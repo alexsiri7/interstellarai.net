@@ -41,6 +41,6 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: workers/feedback
           secrets: |
-            GITHUB_FEEDBACK_TOKEN
+            FEEDBACK_TOKEN
         env:
-          GITHUB_FEEDBACK_TOKEN: ${{ secrets.GITHUB_FEEDBACK_TOKEN }}
+          FEEDBACK_TOKEN: ${{ secrets.FEEDBACK_TOKEN }}

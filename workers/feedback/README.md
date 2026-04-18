@@ -41,8 +41,8 @@ CI: push to `main` with changes under `workers/feedback/**` triggers the
 `Deploy feedback worker` workflow. Repo secrets required:
 
 - `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` (already set)
-- `GITHUB_FEEDBACK_TOKEN` — fine-grained PAT with Issues:write on every
+- `FEEDBACK_TOKEN` — fine-grained PAT with Issues:write on every
   repo in the allowlist
 
 Manual: `cd workers/feedback && npx wrangler deploy` (after
-`wrangler secret put GITHUB_FEEDBACK_TOKEN`).
+`wrangler secret put FEEDBACK_TOKEN`).

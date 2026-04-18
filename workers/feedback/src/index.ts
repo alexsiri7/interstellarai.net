@@ -9,7 +9,7 @@
 // Allowlist is baked in — clients cannot submit to arbitrary repos.
 
 interface Env {
-  GITHUB_FEEDBACK_TOKEN: string;
+  FEEDBACK_TOKEN: string;
 }
 
 const ALLOWED_REPOS = new Set<string>([
@@ -129,7 +129,7 @@ export default {
     if (body.message.length > MAX_MESSAGE_CHARS)
       return json({ error: "message too long" }, 400);
 
-    const token = env.GITHUB_FEEDBACK_TOKEN;
+    const token = env.FEEDBACK_TOKEN;
     if (!token) return json({ error: "worker not configured" }, 503);
 
     let screenshotUrl: string | null = null;
