@@ -1,0 +1,26 @@
+---
+import Layout from "../../layouts/Layout.astro";
+import { getCollection } from "astro:content";
+
+export async function getStaticPaths() {
+  const decisions = await getCollection("decisions");
+  return decisions.map((d) => ({ params: { slug: d.slug }, props: { decision: d } }));
+}
+
+const { decision } = Astro.props;
+const { Content } = await decision.render();
+---
+
+<Layout title={`ADR-${String(decision.data.number).padStart(3, "0")}: ${decision.data.title}`}>
+  <p><a href="/decisions">← all decisions</a></p>
+  <h1>ADR-{String(decision.data.number).padStart(3, "0")}: {decision.data.title}</h1>
+  <p style="color: var(--muted);">
+    <strong>Status</strong>: {decision.data.status} ·
+    <strong>Date</strong>: {decision.data.date}
+    {decision.data.projects && (
+      <>· <strong>Applies to</strong>: {decision.data.projects.join(", ")}</>
+    )}
+  </p>
+  <hr />
+  <Content />
+</Layout>

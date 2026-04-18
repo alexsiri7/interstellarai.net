@@ -1,0 +1,54 @@
+---
+import Layout from "../layouts/Layout.astro";
+---
+
+<Layout title="Projects · InterStellar AI">
+  <h1>Projects</h1>
+  <p>
+    Every project in the portfolio, with its stack and deploy target. Cross-referenced
+    from the <a href="/decisions">decision log</a> for context on why the tech is what it
+    is.
+  </p>
+
+  <h2>Reli</h2>
+  <p>
+    Personal AI assistant with a knowledge graph. Python/FastAPI + React, Postgres with
+    pgvector. Deploy: <em>in transition</em> from self-hosted Tailscale/Docker to Railway
+    staging + prod (see ADR-003).
+  </p>
+
+  <h2>Word Coach Annie</h2>
+  <p>
+    AI writing assistant for novelists. Next.js 15, PostgreSQL/Supabase, Prisma, MCP
+    server with 48 tools. Deploy: Railway with staging → prod pipeline.
+  </p>
+
+  <h2>FilmDuel</h2>
+  <p>
+    Movie and TV ranking via ELO duels. FastAPI + React, PostgreSQL/Supabase. Deploy:
+    Railway native auto-deploy — adding staging gate is tracked in filmduel issue #108.
+  </p>
+
+  <h2>Cosmic Match</h2>
+  <p>
+    Space-themed match-3 mobile game. Flutter + Flame. Ships as signed Android APK/AAB via
+    GitHub Actions.
+  </p>
+
+  <h2>The Un-Reminder</h2>
+  <p>
+    Stochastic, context-aware habit prompts designed to defeat notification blindness.
+    Native Android (Kotlin), on-device Gemma 4, no backend.
+  </p>
+
+  <h2>Archon</h2>
+  <p>
+    Open-source AI coding harness. YAML workflow engine that drives the automation
+    pipeline every other project in this portfolio depends on.
+  </p>
+
+  <h2>Beads</h2>
+  <p>
+    Distributed graph issue tracker for AI agents. Go + Dolt.
+  </p>
+</Layout>

@@ -1,0 +1,50 @@
+---
+import Layout from "../layouts/Layout.astro";
+---
+
+<Layout title="Tenets · InterStellar AI">
+  <h1>Tenets</h1>
+  <p>
+    The non-negotiable principles that shape every project in the portfolio. When a
+    trade-off appears, these are the tiebreakers.
+  </p>
+
+  <h2>1. Code delivered to prod is the only goal that counts</h2>
+  <p>
+    Merged PRs, green CI, and AI activity are <em>proxies</em> for delivery — not delivery
+    itself. If the pipeline produces PRs that pile up, or merges that don't reach users,
+    the pipeline is failing even if every component looks busy. We measure health by
+    whether the last commit on <code>main</code> is live in production within a
+    reasonable window.
+  </p>
+
+  <h2>2. Automation must close the loop</h2>
+  <p>
+    An automated step that creates work without finishing it is a regression. Every layer
+    of automation — issue pickup, PR creation, CI, merge, deploy — needs a self-healing
+    path when it fails. When auto-fix can't resolve a case, it escalates to a human with
+    clear context, not a silent dropped ball.
+  </p>
+
+  <h2>3. Staging before prod, always</h2>
+  <p>
+    No automation merges straight to production without a staging gate that exercises the
+    actual integration. The gate runs against a real staging database, real external
+    services, and a real build of the app.
+  </p>
+
+  <h2>4. One pipeline, many projects</h2>
+  <p>
+    The same cron stack, the same PR maintenance bot, the same health monitor, and the
+    same release cadence apply to every project in the portfolio. Per-project divergence
+    only exists where the platform forces it (mobile vs. web, Supabase vs. Postgres).
+    Everything else converges on one pattern so fixes compound.
+  </p>
+
+  <h2>5. Build in public, inside the team</h2>
+  <p>
+    Decisions live in this repo. PRDs live in the repos that ship them. Memory files make
+    the AI agents' context visible and editable. Nothing critical lives only in someone's
+    head — if it isn't written down, it can't survive the next context window.
+  </p>
+</Layout>

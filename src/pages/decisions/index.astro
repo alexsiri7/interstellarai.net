@@ -1,0 +1,29 @@
+---
+import Layout from "../../layouts/Layout.astro";
+import { getCollection } from "astro:content";
+
+const decisions = (await getCollection("decisions")).sort(
+  (a, b) => a.data.number - b.data.number
+);
+---
+
+<Layout title="Decisions · InterStellar AI">
+  <h1>Decision log</h1>
+  <p>
+    Architecture Decision Records for the InterStellar AI portfolio. Each entry captures
+    what was decided, why, and the alternatives we rejected. Superseded entries are kept
+    for context.
+  </p>
+  <ul>
+    {decisions.map((d) => (
+      <li>
+        <a href={`/decisions/${d.slug}`}>
+          ADR-{String(d.data.number).padStart(3, "0")}: {d.data.title}
+        </a>
+        <small style="color: var(--muted); margin-left: 0.5rem;">
+          [{d.data.status}] · {d.data.date}
+        </small>
+      </li>
+    ))}
+  </ul>
+</Layout>
