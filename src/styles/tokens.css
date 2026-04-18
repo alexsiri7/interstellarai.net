@@ -1,0 +1,160 @@
+/* ============================================================
+   InterstellarAI — colors_and_type.css
+   Core design tokens: color, type, spacing, radius, shadow.
+   Import this file first in any page.
+   ============================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+:root {
+  /* -------- PAPER / NEUTRALS (warm, slightly cream) -------- */
+  --paper:        #FAF7F2;   /* default page bg */
+  --paper-2:      #F3EFE6;   /* slightly recessed card / rail */
+  --paper-3:      #E8E2D4;   /* dividers, keyboard keys */
+  --ink:          #1A1A1A;   /* body text */
+  --ink-2:        #3A3A3A;   /* secondary text */
+  --ink-3:        #8B7355;   /* tertiary, warm gray-brown */
+  --ink-4:        #B8AD9A;   /* quaternary, muted */
+
+  /* -------- BRAND ACCENTS -------- */
+  --terracotta:   #D97757;   /* primary brand accent, CTA */
+  --terracotta-2: #C15D3D;   /* pressed / deeper */
+  --terracotta-3: #F2C7B5;   /* tint, highlight backgrounds */
+  --slate:        #2B3A67;   /* deep blue-black, ink alt */
+  --slate-2:      #4A5B8C;   /* secondary slate */
+  --dusk:         #7A8B99;   /* cool gray for UI chrome */
+
+  /* -------- ACCENTS (used sparingly) -------- */
+  --marigold:     #E8A33D;   /* highlight, "new" badges */
+  --moss:         #6B8E5A;   /* success, positive */
+  --rust:         #B04A2F;   /* error, destructive */
+
+  /* -------- SEMANTIC -------- */
+  --bg:           var(--paper);
+  --bg-elevated:  #FFFFFF;
+  --bg-recessed:  var(--paper-2);
+  --fg:           var(--ink);
+  --fg-muted:     var(--ink-2);
+  --fg-subtle:    var(--ink-3);
+  --fg-faint:     var(--ink-4);
+  --border:       var(--paper-3);
+  --border-strong:#CFC6B2;
+  --accent:       var(--terracotta);
+  --accent-hover: var(--terracotta-2);
+  --link:         var(--slate);
+
+  /* -------- TYPE FAMILIES -------- */
+  --font-display: 'Instrument Serif', 'Georgia', serif;
+  --font-body:    'Geist', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+  --font-mono:    'JetBrains Mono', ui-monospace, SFMono-Regular, 'Menlo', monospace;
+
+  /* -------- TYPE SCALE -------- */
+  /* Display (serif, italic-friendly) */
+  --fs-hero:      clamp(3.5rem, 8vw, 6.5rem);   /* 56–104 */
+  --fs-display:   clamp(2.5rem, 5vw, 4rem);     /* 40–64  */
+  --fs-h1:        2.5rem;   /* 40 */
+  --fs-h2:        2rem;     /* 32 */
+  --fs-h3:        1.5rem;   /* 24 */
+  --fs-h4:        1.25rem;  /* 20 */
+
+  /* Body */
+  --fs-lg:        1.125rem; /* 18 */
+  --fs-md:        1rem;     /* 16 */
+  --fs-sm:        0.875rem; /* 14 */
+  --fs-xs:        0.75rem;  /* 12 */
+
+  /* Line heights */
+  --lh-tight:     1.05;
+  --lh-snug:      1.2;
+  --lh-normal:    1.5;
+  --lh-loose:     1.7;
+
+  /* Letter spacing */
+  --tr-tight:     -0.02em;
+  --tr-normal:    0;
+  --tr-wide:      0.04em;
+  --tr-mono:      0.02em;
+
+  /* Weights */
+  --fw-light:     300;
+  --fw-regular:   400;
+  --fw-medium:    500;
+  --fw-semibold:  600;
+  --fw-bold:      700;
+
+  /* -------- SPACING (4px base) -------- */
+  --sp-1:  0.25rem;  /*  4 */
+  --sp-2:  0.5rem;   /*  8 */
+  --sp-3:  0.75rem;  /* 12 */
+  --sp-4:  1rem;     /* 16 */
+  --sp-5:  1.5rem;   /* 24 */
+  --sp-6:  2rem;     /* 32 */
+  --sp-7:  3rem;     /* 48 */
+  --sp-8:  4rem;     /* 64 */
+  --sp-9:  6rem;     /* 96 */
+  --sp-10: 8rem;     /* 128 */
+
+  /* -------- RADII -------- */
+  --r-xs:  4px;
+  --r-sm:  8px;
+  --r-md:  12px;
+  --r-lg:  16px;
+  --r-xl:  24px;
+  --r-2xl: 32px;
+  --r-pill: 999px;
+
+  /* -------- SHADOWS (soft, warm) -------- */
+  --shadow-xs:   0 1px 2px rgba(60, 40, 20, 0.06);
+  --shadow-sm:   0 2px 8px rgba(60, 40, 20, 0.08);
+  --shadow-md:   0 8px 24px rgba(60, 40, 20, 0.10);
+  --shadow-lg:   0 16px 48px rgba(60, 40, 20, 0.14);
+  --shadow-inset:inset 0 1px 2px rgba(60, 40, 20, 0.08);
+
+  /* -------- MOTION -------- */
+  --ease-out:    cubic-bezier(0.2, 0.7, 0.2, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-in-out: cubic-bezier(0.6, 0, 0.4, 1);
+  --dur-fast:    120ms;
+  --dur-med:     220ms;
+  --dur-slow:    420ms;
+}
+
+/* ============================================================
+   Base type — apply to elements by default
+   ============================================================ */
+
+html, body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: var(--fs-md);
+  line-height: var(--lh-normal);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1, h2, h3, h4 { font-family: var(--font-display); font-weight: var(--fw-regular); letter-spacing: var(--tr-tight); line-height: var(--lh-snug); color: var(--fg); }
+h1 { font-size: var(--fs-h1); line-height: var(--lh-tight); }
+h2 { font-size: var(--fs-h2); }
+h3 { font-size: var(--fs-h3); }
+h4 { font-size: var(--fs-h4); font-family: var(--font-body); font-weight: var(--fw-semibold); letter-spacing: var(--tr-normal); }
+
+.display { font-family: var(--font-display); font-size: var(--fs-display); line-height: var(--lh-tight); letter-spacing: var(--tr-tight); }
+.hero    { font-family: var(--font-display); font-size: var(--fs-hero);    line-height: var(--lh-tight); letter-spacing: var(--tr-tight); }
+.italic  { font-style: italic; }
+
+p { margin: 0 0 var(--sp-4) 0; }
+.lede { font-size: var(--fs-lg); color: var(--fg-muted); line-height: var(--lh-loose); }
+
+small, .caption { font-size: var(--fs-sm); color: var(--fg-muted); }
+.eyebrow { font-family: var(--font-mono); font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: var(--tr-wide); color: var(--fg-subtle); }
+.mono    { font-family: var(--font-mono); font-size: 0.95em; letter-spacing: var(--tr-mono); }
+code     { font-family: var(--font-mono); font-size: 0.9em; background: var(--paper-2); padding: 2px 6px; border-radius: var(--r-xs); }
+
+a { color: var(--link); text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; transition: color var(--dur-fast) var(--ease-out); }
+a:hover { color: var(--terracotta); }
+
+hr { border: 0; border-top: 1px solid var(--border); margin: var(--sp-6) 0; }
+
+/* Selection */
+::selection { background: var(--terracotta-3); color: var(--ink); }

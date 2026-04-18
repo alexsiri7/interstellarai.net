@@ -3,27 +3,116 @@ import Layout from "../layouts/Layout.astro";
 ---
 
 <Layout title="InterStellar AI">
-  <h1>InterStellar AI</h1>
-  <p>
-    We build AI-native software — a portfolio of focused products that live together,
-    share infrastructure, and ship continuously. This site is where we publish how we
-    build, what we've decided, and which projects are live.
-  </p>
+  <section class="hero-b">
+    <div class="wrap">
+      <div class="hero-grid">
+        <div>
+          <div class="eyebrow">✶ interstellarai.net · est. 2026</div>
+          <h1>Small software, <em>shipped</em> by machines.</h1>
+          <p class="lede">A portfolio of tiny AI-powered tools — and the engineering handbook that keeps them shipping. Automation drafts the PRs. Staging gates the deploys. Humans write the ADRs and drink the coffee.</p>
+          <div class="ctas">
+            <a class="btn btn-primary btn-md" href="/projects">See the projects →</a>
+            <a class="btn btn-link btn-md" href="/tenets">Read the tenets</a>
+          </div>
+          <div class="hero-meta">
+            <span>◉ 7 repos in orbit</span>
+            <span>✶ 4 ADRs, counting</span>
+            <span>· auto-deployed</span>
+          </div>
+        </div>
+        <div class="diagram">
+          <img src="/assets/illustration-orbit.svg" alt="" class="drift"/>
+        </div>
+      </div>
+    </div>
+  </section>
 
-  <h2>Live projects</h2>
-  <ul>
-    <li><a href="https://filmduel.interstellarai.net">FilmDuel</a> — rank movies and TV via ELO duels</li>
-    <li>Reli — personal AI assistant with a knowledge graph (private beta)</li>
-    <li>Word Coach Annie — AI writing assistant for novelists (private beta)</li>
-    <li>Cosmic Match — space-themed match-3 mobile game (Android)</li>
-    <li>The Un-Reminder — stochastic habit prompts, on-device AI (Android)</li>
-  </ul>
+  <section class="how">
+    <div class="wrap">
+      <div class="how-cell">
+        <div class="num">◯ 01</div>
+        <h3>A human writes <em>an intent.</em></h3>
+        <p>A GitHub issue, a two-line prose spec, or a sticky note. The bar is low; the point is to start.</p>
+        <div class="links"><a href="/tenets">Why we write things down →</a></div>
+      </div>
+      <div class="how-cell">
+        <div class="num">◯ 02</div>
+        <h3>A <em>small tool</em> drafts the PR.</h3>
+        <p>A YAML-driven harness turns the intent into a PR: scoped, CI-green, auto-merge armed.</p>
+        <div class="links"><a href="/decisions/004-archon-drives-automation">ADR-004: one tool drives the portfolio →</a></div>
+      </div>
+      <div class="how-cell">
+        <div class="num">◯ 03</div>
+        <h3>Staging <em>is the gate.</em></h3>
+        <p>Merges roll to staging, E2E runs, prod promotes if the gate passes. A fourth cron watches the first three.</p>
+        <div class="links"><a href="/decisions/001-staging-before-prod">ADR-001 · ADR-002 →</a></div>
+      </div>
+    </div>
+  </section>
 
-  <h2>How we build</h2>
-  <p>
-    Every project is driven by the same operating principles and the same automation
-    pipeline. If you want the short version, read the <a href="/tenets">tenets</a>.
-    For the long version — the specific decisions and tradeoffs — read the
-    <a href="/decisions">decision log</a>.
-  </p>
+  <section class="portfolio">
+    <div class="wrap">
+      <div class="section-head">
+        <h2 class="section-title">What's <em>in orbit</em></h2>
+      </div>
+      <div class="portfolio-grid">
+        <a class="pf-card" href="https://filmduel.interstellarai.net">
+          <div class="row">
+            <p class="name"><em>Film</em>Duel</p>
+            <span class="badge badge-live">live</span>
+          </div>
+          <p class="blurb">Rank movies and TV via ELO duels.</p>
+          <div class="foot"><span>FastAPI · React</span><span>↗</span></div>
+        </a>
+        <div class="pf-card">
+          <div class="row">
+            <p class="name">Reli</p>
+            <span class="badge badge-wip">wip</span>
+          </div>
+          <p class="blurb">Personal AI assistant with a knowledge graph.</p>
+          <div class="foot"><span>FastAPI · React</span><span></span></div>
+        </div>
+        <div class="pf-card">
+          <div class="row">
+            <p class="name"><em>Word Coach</em> Annie</p>
+            <span class="badge badge-wip">wip</span>
+          </div>
+          <p class="blurb">AI writing assistant for novelists.</p>
+          <div class="foot"><span>Next.js · Supabase</span><span></span></div>
+        </div>
+        <div class="pf-card">
+          <div class="row">
+            <p class="name"><em>Cosmic</em> Match</p>
+            <span class="badge badge-wip">wip</span>
+          </div>
+          <p class="blurb">Space-themed match-3 mobile game.</p>
+          <div class="foot"><span>Flutter · Flame</span><span></span></div>
+        </div>
+        <div class="pf-card">
+          <div class="row">
+            <p class="name">The <em>Un-Reminder</em></p>
+            <span class="badge badge-wip">wip</span>
+          </div>
+          <p class="blurb">Stochastic, context-aware habit prompts.</p>
+          <div class="foot"><span>Android · on-device AI</span><span></span></div>
+        </div>
+        <a class="pf-card" href="https://github.com/alexsiri7/Archon">
+          <div class="row">
+            <p class="name">Archon</p>
+            <span class="badge badge-wip">wip</span>
+          </div>
+          <p class="blurb">Open-source AI coding harness.</p>
+          <div class="foot"><span>TypeScript · YAML</span><span>↗</span></div>
+        </a>
+        <div class="pf-card">
+          <div class="row">
+            <p class="name">Beads</p>
+            <span class="badge badge-wip">wip</span>
+          </div>
+          <p class="blurb">Distributed graph issue tracker for AI agents.</p>
+          <div class="foot"><span>Go · Dolt</span><span></span></div>
+        </div>
+      </div>
+    </div>
+  </section>
 </Layout>

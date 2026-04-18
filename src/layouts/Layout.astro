@@ -1,13 +1,17 @@
 ---
+import '../styles/tokens.css';
+import '../styles/global.css';
+
 interface Props {
   title: string;
   description?: string;
 }
 const { title, description = "InterStellar AI — building AI-native software, in public." } = Astro.props;
+const path = Astro.url.pathname;
 ---
 
 <!doctype html>
-<html lang="en">
+<html lang="en" data-dir="b">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -16,53 +20,70 @@ const { title, description = "InterStellar AI — building AI-native software, i
     <title>{title}</title>
   </head>
   <body>
-    <header class="site-header">
-      <a href="/" class="brand">InterStellar AI</a>
-      <nav>
-        <a href="/tenets">Tenets</a>
-        <a href="/decisions">Decisions</a>
-        <a href="/projects">Projects</a>
-      </nav>
-    </header>
+    <nav class="nav">
+      <div class="nav-inner">
+        <a class="nav-brand" href="/">
+          <svg width="28" height="28" viewBox="0 0 64 64" fill="none" aria-hidden="true" style="flex-shrink:0">
+            <ellipse cx="32" cy="32" rx="26" ry="10" transform="rotate(-24 32 32)"
+              stroke="currentColor" stroke-width="2.5" fill="none"/>
+            <ellipse cx="32" cy="32" rx="20" ry="8" transform="rotate(24 32 32)"
+              stroke="currentColor" stroke-width="1.2" fill="none" opacity="0.6" stroke-dasharray="2 3"/>
+            <circle cx="32" cy="32" r="6" fill="#D97757"/>
+            <circle cx="52" cy="22" r="2.2" fill="currentColor"/>
+          </svg>
+          <span><em>Interstellar</em><span class="ai">AI</span></span>
+        </a>
+        <div class="nav-links">
+          <a class={`nav-link ${path === '/' ? 'is-active' : ''}`} href="/">Home</a>
+          <a class={`nav-link ${path.startsWith('/tenets') ? 'is-active' : ''}`} href="/tenets">Tenets</a>
+          <a class={`nav-link ${path.startsWith('/decisions') ? 'is-active' : ''}`} href="/decisions">Decisions</a>
+          <a class={`nav-link ${path.startsWith('/projects') ? 'is-active' : ''}`} href="/projects">Projects</a>
+        </div>
+        <div class="nav-right">
+          <a class="nav-ghost-link" href="https://github.com/alexsiri7/interstellarai.net" target="_blank" rel="noreferrer">github ↗</a>
+        </div>
+      </div>
+    </nav>
     <main>
       <slot />
     </main>
-    <footer>
-      <p>Built in public · <a href="https://github.com/alexsiri7/interstellarai.net">source</a></p>
+    <footer class="footer">
+      <div class="footer-inner">
+        <div>
+          <div class="brand">
+            <svg width="30" height="30" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+              <ellipse cx="32" cy="32" rx="26" ry="10" transform="rotate(-24 32 32)" stroke="#FAF7F2" stroke-width="2.5" fill="none"/>
+              <circle cx="32" cy="32" r="6" fill="#D97757"/>
+              <circle cx="52" cy="22" r="2.5" fill="#FAF7F2"/>
+            </svg>
+            <span><em>Interstellar</em><span class="ai">AI</span></span>
+          </div>
+          <p class="tagline">Small, AI-driven software projects and the engineering handbook that keeps them shipping.</p>
+        </div>
+        <div class="footer-cols">
+          <div>
+            <div class="footer-h">Handbook</div>
+            <a href="/tenets">Tenets</a>
+            <a href="/decisions">Decision log</a>
+            <a href="/projects">Projects</a>
+          </div>
+          <div>
+            <div class="footer-h">Projects</div>
+            <a href="https://filmduel.interstellarai.net" target="_blank" rel="noreferrer">FilmDuel</a>
+            <a href="https://github.com/alexsiri7/Archon" target="_blank" rel="noreferrer">Archon</a>
+            <a href="https://github.com/alexsiri7/un-reminder" target="_blank" rel="noreferrer">un-reminder</a>
+            <a href="https://github.com/alexsiri7/cosmic-match" target="_blank" rel="noreferrer">Cosmic Match</a>
+          </div>
+          <div>
+            <div class="footer-h">Elsewhere</div>
+            <a href="https://github.com/alexsiri7" target="_blank" rel="noreferrer">GitHub</a>
+          </div>
+        </div>
+      </div>
+      <div class="footer-foot">
+        <span>&copy; 2026 InterstellarAI &middot; Made in orbit</span>
+        <span>&#10038; Deployed via the pipeline &middot; Cloudflare Pages</span>
+      </div>
     </footer>
-    <style is:global>
-      :root {
-        --fg: #e7eef7;
-        --bg: #0b0f1a;
-        --muted: #8b97ac;
-        --accent: #8ab4ff;
-        --border: #1f2636;
-      }
-      * { box-sizing: border-box; }
-      html, body { margin: 0; padding: 0; }
-      body {
-        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-        background: var(--bg);
-        color: var(--fg);
-        line-height: 1.6;
-      }
-      a { color: var(--accent); text-decoration: none; }
-      a:hover { text-decoration: underline; }
-      main { max-width: 760px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
-      .site-header {
-        display: flex; align-items: center; justify-content: space-between;
-        max-width: 960px; margin: 0 auto; padding: 1.25rem;
-        border-bottom: 1px solid var(--border);
-      }
-      .brand { font-weight: 700; letter-spacing: 0.02em; color: var(--fg); }
-      nav a { margin-left: 1rem; color: var(--muted); }
-      nav a:hover { color: var(--accent); }
-      h1 { font-size: 2rem; line-height: 1.2; margin: 1rem 0 0.5rem; }
-      h2 { margin-top: 2rem; }
-      code { background: #131a2b; padding: 0.1rem 0.35rem; border-radius: 4px; font-size: 0.9em; }
-      pre { background: #131a2b; padding: 1rem; border-radius: 6px; overflow-x: auto; }
-      hr { border: 0; border-top: 1px solid var(--border); margin: 2rem 0; }
-      footer { max-width: 960px; margin: 0 auto; padding: 2rem 1.25rem; color: var(--muted); border-top: 1px solid var(--border); }
-    </style>
   </body>
 </html>
