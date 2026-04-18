@@ -39,6 +39,15 @@ const path = Astro.url.pathname;
           <a class={`nav-link ${path.startsWith('/decisions') ? 'is-active' : ''}`} href="/decisions">Decisions</a>
           <a class={`nav-link ${path.startsWith('/projects') ? 'is-active' : ''}`} href="/projects">Projects</a>
         </div>
+        <details class="nav-mobile">
+          <summary class="nav-hamburger" aria-label="Open navigation">&#9776;</summary>
+          <div class="nav-mobile-links">
+            <a href="/">Home</a>
+            <a href="/tenets">Tenets</a>
+            <a href="/decisions">Decisions</a>
+            <a href="/projects">Projects</a>
+          </div>
+        </details>
         <div class="nav-right">
           <a class="nav-ghost-link" href="https://github.com/alexsiri7/interstellarai.net" target="_blank" rel="noreferrer">github ↗</a>
         </div>

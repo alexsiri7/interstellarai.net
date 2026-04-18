@@ -16,7 +16,7 @@ const decisions = (await getCollection("decisions")).sort(
   </section>
   <section class="adr-body">
     <div class="wrap-prose">
-      <ol class="decisions">
+      <div class="decisions">
         {decisions.map((d) => (
           <a class="dec" href={`/decisions/${d.slug}`}>
             <span class="num">{String(d.data.number).padStart(3, "0")}</span>
@@ -27,7 +27,7 @@ const decisions = (await getCollection("decisions")).sort(
             </span>
           </a>
         ))}
-      </ol>
+      </div>
     </div>
   </section>
 </Layout>
