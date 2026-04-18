@@ -207,7 +207,6 @@ html[data-dir="b"] .feature p { color: #B4AB96; }
 /* ============================================================
    Home — Portfolio grid (mini project cards, 4 up)
    ============================================================ */
-.portfolio { }
 .portfolio-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-4); }
 .pf-card { display: block; padding: var(--sp-5); background: var(--paper); border: 1px solid var(--border); border-radius: var(--r-lg);
            text-decoration: none; color: inherit; transition: all 220ms var(--ease-out); position: relative; }
@@ -270,7 +269,6 @@ html[data-dir="b"] .chip.is-on { background: var(--paper); color: var(--ink); bo
    ADR Detail
    ============================================================ */
 .adr-head { padding: var(--sp-8) var(--sp-6) var(--sp-6); background: var(--section-alt); }
-.adr-head .wrap-prose { }
 .adr-head .crumbs { font-family: var(--font-mono); font-size: 12px; color: var(--ink-3); letter-spacing: 0.04em; margin-bottom: var(--sp-4); }
 .adr-head .crumbs a { color: var(--slate); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 html[data-dir="b"] .adr-head .crumbs { color: #8A816F; }
