@@ -40,7 +40,7 @@ against staging. Prod deploys are gated on staging tests passing.
 | Project | Staging env | Pipeline | Notes |
 |---------|:-:|:-:|-------|
 | Word Coach Annie | ✅ | ✅ | Reference implementation |
-| Reli | ⚠️ provisioned but unused | ⚠️ deploys to old Tailscale host | Migration in progress (reli#629) |
+| Reli | ⚠️ provisioned but unused | ⚠️ deploys to a legacy self-hosted target | Migration in progress |
 | FilmDuel | ❌ | ❌ Railway native auto-deploy direct to prod | Adding gate tracked in filmduel#108 |
 
 ## Alternatives considered

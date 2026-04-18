@@ -21,7 +21,7 @@ maintenance tax. This ADR fixes the mapping.
 
 | Project | Deploy target | Artifact | Rationale |
 |---------|---------------|----------|-----------|
-| Reli | Railway (migrating from Tailscale host) | Docker image via Railway CLI | Needs staging DB, pgvector, long-running worker. Railway handles both. |
+| Reli | Railway (migrating from legacy self-hosted target) | Docker image via Railway CLI | Needs staging DB, pgvector, long-running worker. Railway handles both. |
 | Word Coach Annie | Railway | Next.js build | Same as Reli. Already reference impl. |
 | FilmDuel | Railway | FastAPI + static frontend | Same as above. Staging gate pending (filmduel#108). |
 | Cosmic Match | GitHub Actions → signed APK/AAB | Android bundle | Mobile — no host needed. Play Store is the deploy target. |
@@ -37,14 +37,15 @@ All Railway-hosted services follow the staging-before-prod rule (ADR-001).
 - **Subdomain convention**: everything under `*.interstellarai.net`. DNS lives
   in Cloudflare. Per-project subdomains point to their Railway URL.
 - **Reli migration is the biggest open lift**: the workflow still deploys via
-  SSH to a Tailscale host. Tracked in reli#629, blocked on human infra setup.
+  SSH to a legacy self-hosted target. Tracked internally, blocked on human
+  infra setup.
 
 ## Alternatives considered
 
 - **All on Railway, including mobile**: Railway doesn't build signed Android
   bundles. Rejected.
-- **All on self-hosted (Hetzner/Tailscale Docker)**: lower ongoing cost, higher
-  ops burden, single point of failure. Rejected — staging + HA on Railway is
-  cheap enough that self-host isn't worth the toil.
+- **All self-hosted**: lower ongoing cost, higher ops burden, single point of
+  failure. Rejected — staging + HA on Railway is cheap enough that self-host
+  isn't worth the toil.
 - **Vercel instead of Railway for Next.js**: possible for WCA specifically, but
   splits the Postgres story. Keeping Postgres + app on Railway is simpler.
