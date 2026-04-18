@@ -17,8 +17,9 @@ deployed from their own repos — not from here.
 
 - [Astro 5](https://astro.build) static site generator
 - TypeScript + content collections for type-safe Markdown
-- Deploy: **Cloudflare Pages** via Git integration (no workflow in this repo —
-  CF builds on push to `main` and publishes preview deploys per PR)
+- Deploy: **Cloudflare Pages** in direct-upload mode via
+  `.github/workflows/deploy.yml`. Every push to `main` builds and deploys.
+  Pull requests get preview URLs on the Cloudflare dashboard.
 
 ## Local development
 
@@ -33,22 +34,21 @@ Build check:
 npm run build && npm run preview
 ```
 
-## Deploy setup — human steps still needed
+## Deploy
 
-1. **Cloudflare Pages project**: Cloudflare dashboard → **Workers & Pages** →
-   Create → Pages → **Connect to Git** → pick `alexsiri7/interstellarai.net`.
-   - Framework preset: **Astro**
-   - Build command: `npm run build`
-   - Build output directory: `dist`
-   - Root directory: (leave empty)
-2. **Custom domain**: in the Pages project → **Custom domains** → add
-   `www.interstellarai.net`. Cloudflare auto-creates the CNAME since the zone
-   lives in the same account.
-3. **Apex redirect** (optional): add a Cloudflare redirect rule or page rule
-   sending `interstellarai.net/*` → `https://www.interstellarai.net/$1`.
+The workflow uses `cloudflare/wrangler-action` to `wrangler pages deploy dist`
+against the `interstellarai-net` Pages project. Required repo secrets:
 
-Once connected, every push to `main` deploys. Pull requests get preview URLs
-automatically.
+- `CLOUDFLARE_API_TOKEN` — scoped to Pages:Edit on the target account
+- `CLOUDFLARE_ACCOUNT_ID`
+
+Custom domain `www.interstellarai.net` is attached to the Pages project and
+resolves via Cloudflare's automatic DNS.
+
+### Optional apex redirect
+
+Add a Cloudflare redirect rule or page rule sending
+`interstellarai.net/*` → `https://www.interstellarai.net/$1`.
 
 ## Writing a new ADR
 

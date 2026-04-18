@@ -16,7 +16,7 @@ const { Content } = await decision.render();
   <h1>ADR-{String(decision.data.number).padStart(3, "0")}: {decision.data.title}</h1>
   <p style="color: var(--muted);">
     <strong>Status</strong>: {decision.data.status} ·
-    <strong>Date</strong>: {decision.data.date}
+    <strong>Date</strong>: {decision.data.date.toISOString().slice(0, 10)}
     {decision.data.projects && (
       <>· <strong>Applies to</strong>: {decision.data.projects.join(", ")}</>
     )}

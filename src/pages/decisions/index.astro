@@ -21,7 +21,7 @@ const decisions = (await getCollection("decisions")).sort(
           ADR-{String(d.data.number).padStart(3, "0")}: {d.data.title}
         </a>
         <small style="color: var(--muted); margin-left: 0.5rem;">
-          [{d.data.status}] · {d.data.date}
+          [{d.data.status}] · {d.data.date.toISOString().slice(0, 10)}
         </small>
       </li>
     ))}
