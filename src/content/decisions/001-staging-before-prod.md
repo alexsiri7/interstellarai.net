@@ -3,7 +3,6 @@ title: Staging gate required before production
 number: 1
 status: accepted
 date: 2026-04-18
-projects: [reli, word-coach-annie, filmduel]
 ---
 
 ## Context
@@ -28,20 +27,12 @@ against staging. Prod deploys are gated on staging tests passing.
 
 ## Consequences
 
-- **More infra**: every project needs two Railway environments instead of one,
-  plus a staging DB.
+- **More infra**: every web backend needs two environments instead of one, plus
+  a staging DB.
 - **Slower shipping**: a commit takes ~5 more minutes to reach prod while
   staging deploys and tests run. Acceptable tradeoff.
 - **Higher confidence**: regressions caught on staging never reach users, which
   is the whole point of automation-without-review.
-
-## Status per project
-
-| Project | Staging env | Pipeline | Notes |
-|---------|:-:|:-:|-------|
-| Word Coach Annie | ✅ | ✅ | Reference implementation |
-| Reli | ⚠️ provisioned but unused | ⚠️ deploys to a legacy self-hosted target | Migration in progress |
-| FilmDuel | ❌ | ❌ Railway native auto-deploy direct to prod | Adding gate tracked in filmduel#108 |
 
 ## Alternatives considered
 
