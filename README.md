@@ -17,8 +17,8 @@ deployed from their own repos — not from here.
 
 - [Astro 5](https://astro.build) static site generator
 - TypeScript + content collections for type-safe Markdown
-- Deploy: GitHub Actions → GitHub Pages (configured in
-  `.github/workflows/deploy.yml`)
+- Deploy: **Cloudflare Pages** via Git integration (no workflow in this repo —
+  CF builds on push to `main` and publishes preview deploys per PR)
 
 ## Local development
 
@@ -35,14 +35,20 @@ npm run build && npm run preview
 
 ## Deploy setup — human steps still needed
 
-1. **GitHub Pages**: In repo Settings → Pages → Source: **GitHub Actions**.
-   The `deploy.yml` workflow handles the rest on push to `main`.
-2. **Custom domain**: Settings → Pages → Custom domain: `www.interstellarai.net`.
-   Add the `CNAME` and DNS records per GitHub's docs. Cloudflare-side DNS entries
-   need to point at `alexsiri7.github.io`.
-3. **HTTPS**: enforce HTTPS in Pages settings after the cert provisions.
+1. **Cloudflare Pages project**: Cloudflare dashboard → **Workers & Pages** →
+   Create → Pages → **Connect to Git** → pick `alexsiri7/interstellarai.net`.
+   - Framework preset: **Astro**
+   - Build command: `npm run build`
+   - Build output directory: `dist`
+   - Root directory: (leave empty)
+2. **Custom domain**: in the Pages project → **Custom domains** → add
+   `www.interstellarai.net`. Cloudflare auto-creates the CNAME since the zone
+   lives in the same account.
+3. **Apex redirect** (optional): add a Cloudflare redirect rule or page rule
+   sending `interstellarai.net/*` → `https://www.interstellarai.net/$1`.
 
-Once set up, every push to `main` deploys. No manual steps.
+Once connected, every push to `main` deploys. Pull requests get preview URLs
+automatically.
 
 ## Writing a new ADR
 
