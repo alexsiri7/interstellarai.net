@@ -1,0 +1,74 @@
+---
+import Layout from "../../layouts/Layout.astro";
+import { getCollection } from "astro:content";
+
+const conventions = (await getCollection("conventions")).sort(
+  (a, b) => a.data.order - b.data.order
+);
+---
+
+<Layout title="Conventions · InterStellar AI">
+  <section class="pf-hero">
+    <div class="wrap-prose">
+      <h1>Conventions</h1>
+      <p class="lede">Opinionated engineering conventions shared across every project in the portfolio. Humans read them here; the PR review agent fetches the raw markdown from GitHub. Same source of truth for both.</p>
+    </div>
+  </section>
+  <section class="adr-body">
+    <div class="wrap-prose">
+      <div class="decisions">
+        {conventions.map((c) => (
+          <a class="dec" href={`/conventions/${c.slug}`}>
+            <span class="num">{String(c.data.order).padStart(2, "0")}</span>
+            <span class="title">{c.data.title}</span>
+            <span class="meta-date">{c.data.updated.toISOString().slice(0, 10)}</span>
+            <span class="meta-status">
+              <span class="badge badge-neutral">convention</span>
+            </span>
+          </a>
+        ))}
+      </div>
+      <div class="convention-summaries">
+        {conventions.map((c) => (
+          <div class="convention-summary">
+            <h3><a href={`/conventions/${c.slug}`}>{c.data.title}</a></h3>
+            <p>{c.data.summary}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .convention-summaries {
+    margin-top: var(--sp-8);
+    display: grid;
+    gap: var(--sp-6);
+  }
+  .convention-summary h3 {
+    font-family: var(--font-display);
+    font-size: 24px;
+    line-height: 1.2;
+    margin: 0 0 var(--sp-2);
+    font-weight: 400;
+    letter-spacing: -0.005em;
+  }
+  .convention-summary h3 a {
+    color: inherit;
+    text-decoration: none;
+  }
+  .convention-summary h3 a:hover {
+    color: var(--terracotta);
+  }
+  .convention-summary p {
+    font-size: 16px;
+    line-height: 1.65;
+    color: var(--ink-2);
+    margin: 0;
+    text-wrap: pretty;
+  }
+  :global(html[data-dir="b"]) .convention-summary p {
+    color: #C6BFAE;
+  }
+</style>
