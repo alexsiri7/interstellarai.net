@@ -8,22 +8,26 @@ const decisions = (await getCollection("decisions")).sort(
 ---
 
 <Layout title="Decisions · InterStellar AI">
-  <h1>Decision log</h1>
-  <p>
-    Architecture Decision Records for the InterStellar AI portfolio. Each entry captures
-    what was decided, why, and the alternatives we rejected. Superseded entries are kept
-    for context.
-  </p>
-  <ul>
-    {decisions.map((d) => (
-      <li>
-        <a href={`/decisions/${d.slug}`}>
-          ADR-{String(d.data.number).padStart(3, "0")}: {d.data.title}
-        </a>
-        <small style="color: var(--muted); margin-left: 0.5rem;">
-          [{d.data.status}] · {d.data.date.toISOString().slice(0, 10)}
-        </small>
-      </li>
-    ))}
-  </ul>
+  <section class="pf-hero">
+    <div class="wrap-prose">
+      <h1>Decision log</h1>
+      <p class="lede">Architecture Decision Records for the InterStellar AI portfolio. Each entry captures what was decided, why, and the alternatives we rejected.</p>
+    </div>
+  </section>
+  <section class="adr-body">
+    <div class="wrap-prose">
+      <div class="decisions">
+        {decisions.map((d) => (
+          <a class="dec" href={`/decisions/${d.slug}`}>
+            <span class="num">{String(d.data.number).padStart(3, "0")}</span>
+            <span class="title">{d.data.title}</span>
+            <span class="meta-date">{d.data.date.toISOString().slice(0, 10)}</span>
+            <span class="meta-status">
+              <span class={`badge badge-${d.data.status}`}>{d.data.status}</span>
+            </span>
+          </a>
+        ))}
+      </div>
+    </div>
+  </section>
 </Layout>

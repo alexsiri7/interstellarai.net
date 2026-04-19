@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" fill="none">
+  
+  <defs>
+    <pattern id="dots" x="0" y="0" width="8" height="8" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r="0.8" fill="#8B7355" opacity="0.3"></circle>
+    </pattern>
+  </defs>
+  <rect width="400" height="400" fill="url(#dots)"></rect>
+  <circle cx="200" cy="200" r="180" stroke="#1A1A1A" stroke-width="1" fill="none" opacity="0.15"></circle>
+  <circle cx="200" cy="200" r="130" stroke="#1A1A1A" stroke-width="1" fill="none" opacity="0.25" stroke-dasharray="2 4"></circle>
+  <ellipse cx="200" cy="200" rx="160" ry="60" transform="rotate(-18 200 200)" stroke="#1A1A1A" stroke-width="1.5" fill="none"></ellipse>
+  <ellipse cx="200" cy="200" rx="100" ry="40" transform="rotate(18 200 200)" stroke="#D97757" stroke-width="1.5" fill="none"></ellipse>
+  <circle cx="200" cy="200" r="18" fill="#D97757"></circle>
+  <circle cx="200" cy="200" r="8" fill="#FAF7F2"></circle>
+  
+  <circle cx="348" cy="152" r="5" fill="#1A1A1A"></circle>
+  <circle cx="52" cy="248" r="4" fill="#2B3A67"></circle>
+  <circle cx="260" cy="70" r="3" fill="#1A1A1A"></circle>
+  <circle cx="110" cy="340" r="3" fill="#E8A33D"></circle>
+</svg>

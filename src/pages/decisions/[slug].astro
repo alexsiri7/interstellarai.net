@@ -9,18 +9,26 @@ export async function getStaticPaths() {
 
 const { decision } = Astro.props;
 const { Content } = await decision.render();
+const adrNum = String(decision.data.number).padStart(3, "0");
 ---
 
-<Layout title={`ADR-${String(decision.data.number).padStart(3, "0")}: ${decision.data.title}`}>
-  <p><a href="/decisions">← all decisions</a></p>
-  <h1>ADR-{String(decision.data.number).padStart(3, "0")}: {decision.data.title}</h1>
-  <p style="color: var(--muted);">
-    <strong>Status</strong>: {decision.data.status} ·
-    <strong>Date</strong>: {decision.data.date.toISOString().slice(0, 10)}
-    {decision.data.projects && (
-      <>· <strong>Applies to</strong>: {decision.data.projects.join(", ")}</>
-    )}
-  </p>
-  <hr />
-  <Content />
+<Layout title={`ADR-${adrNum}: ${decision.data.title}`}>
+  <section class="adr-head">
+    <div class="wrap-prose">
+      <div class="crumbs"><a href="/decisions">← all decisions</a></div>
+      <h1>ADR-{adrNum}: {decision.data.title}</h1>
+      <div class="adr-meta">
+        <span><strong>Status</strong>: {decision.data.status}</span>
+        <span><strong>Date</strong>: {decision.data.date.toISOString().slice(0, 10)}</span>
+        {decision.data.projects && (
+          <span><strong>Applies to</strong>: {decision.data.projects.join(", ")}</span>
+        )}
+      </div>
+    </div>
+  </section>
+  <section class="adr-body">
+    <div class="wrap-prose">
+      <Content />
+    </div>
+  </section>
 </Layout>
