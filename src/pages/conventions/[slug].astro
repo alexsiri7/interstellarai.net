@@ -1,0 +1,45 @@
+---
+import Layout from "../../layouts/Layout.astro";
+import { getCollection } from "astro:content";
+
+export async function getStaticPaths() {
+  const conventions = await getCollection("conventions");
+  return conventions.map((c) => ({ params: { slug: c.slug }, props: { convention: c } }));
+}
+
+const { convention } = Astro.props;
+const { Content } = await convention.render();
+---
+
+<Layout title={`${convention.data.title} · Conventions · InterStellar AI`}>
+  <section class="adr-head">
+    <div class="wrap-prose">
+      <div class="crumbs"><a href="/conventions">← all conventions</a></div>
+      <h1>{convention.data.title}</h1>
+      <div class="adr-meta">
+        <span><strong>Type</strong>: convention</span>
+        <span><strong>Updated</strong>: {convention.data.updated.toISOString().slice(0, 10)}</span>
+      </div>
+      <p class="convention-lede">{convention.data.summary}</p>
+    </div>
+  </section>
+  <section class="adr-body">
+    <div class="wrap-prose">
+      <Content />
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .convention-lede {
+    font-size: 17px;
+    line-height: 1.6;
+    color: var(--ink-2);
+    max-width: 65ch;
+    margin: var(--sp-4) 0 0;
+    text-wrap: pretty;
+  }
+  :global(html[data-dir="b"]) .convention-lede {
+    color: #C6BFAE;
+  }
+</style>

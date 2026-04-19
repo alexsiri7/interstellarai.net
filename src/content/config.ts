@@ -12,4 +12,14 @@ const decisions = defineCollection({
   }),
 });
 
-export const collections = { decisions };
+const conventions = defineCollection({
+  type: "content",
+  schema: z.object({
+    title: z.string(),
+    order: z.number(),
+    summary: z.string(),
+    updated: z.coerce.date(),
+  }),
+});
+
+export const collections = { decisions, conventions };

@@ -37,6 +37,7 @@ const path = Astro.url.pathname;
           <a class={`nav-link ${path === '/' ? 'is-active' : ''}`} href="/">Home</a>
           <a class={`nav-link ${path.startsWith('/tenets') ? 'is-active' : ''}`} href="/tenets">Tenets</a>
           <a class={`nav-link ${path.startsWith('/decisions') ? 'is-active' : ''}`} href="/decisions">Decisions</a>
+          <a class={`nav-link ${path.startsWith('/conventions') ? 'is-active' : ''}`} href="/conventions">Conventions</a>
           <a class={`nav-link ${path.startsWith('/projects') ? 'is-active' : ''}`} href="/projects">Projects</a>
         </div>
         <details class="nav-mobile">
@@ -45,6 +46,7 @@ const path = Astro.url.pathname;
             <a href="/">Home</a>
             <a href="/tenets">Tenets</a>
             <a href="/decisions">Decisions</a>
+            <a href="/conventions">Conventions</a>
             <a href="/projects">Projects</a>
           </div>
         </details>
@@ -74,6 +76,7 @@ const path = Astro.url.pathname;
             <div class="footer-h">Handbook</div>
             <a href="/tenets">Tenets</a>
             <a href="/decisions">Decision log</a>
+            <a href="/conventions">Conventions</a>
             <a href="/projects">Projects</a>
           </div>
           <div>
