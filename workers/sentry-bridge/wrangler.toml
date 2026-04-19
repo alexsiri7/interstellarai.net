@@ -1,0 +1,12 @@
+name = "sentry-bridge"
+main = "src/index.ts"
+compatibility_date = "2026-04-18"
+
+# Secrets (set via CI or `wrangler secret put`):
+#   SENTRY_CLIENT_SECRET — Client Secret from the Sentry Internal Integration
+#                          (Settings → Developer Settings → Internal Integrations).
+#                          Used to verify the HMAC-SHA256 webhook signature.
+#   GITHUB_TOKEN         — fine-grained PAT with Issues:write on every repo
+#                          listed in PROJECT_REPO_MAP in src/index.ts. Can
+#                          reuse the same PAT as the feedback worker's
+#                          FEEDBACK_TOKEN if its scopes cover these repos.

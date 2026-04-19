@@ -1,0 +1,48 @@
+name: Deploy sentry-bridge worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "workers/sentry-bridge/**"
+      - ".github/workflows/deploy-sentry-bridge.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: worker-sentry-bridge
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workers/sentry-bridge
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Deploy to Cloudflare Workers
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: workers/sentry-bridge
+          secrets: |
+            SENTRY_CLIENT_SECRET
+            GITHUB_TOKEN
+        env:
+          SENTRY_CLIENT_SECRET: ${{ secrets.SENTRY_CLIENT_SECRET }}
+          GITHUB_TOKEN: ${{ secrets.SENTRY_BRIDGE_GITHUB_TOKEN }}
