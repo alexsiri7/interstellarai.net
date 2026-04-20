@@ -65,6 +65,78 @@ notify() {
 }
 
 # ----------------------------------------------------------------------------
+# file_stuck_issue: file a durable `manual-review`-labeled issue on the
+# affected repo when the factory exhausts MAX_ATTEMPTS for a given SHA.
+#
+# The `manual-review` label is intentionally NOT in issue-pickup-cron.sh's
+# INGEST_LABELS ("enhancement", "bug"), so these issues will NOT be re-queued
+# into archon — they exist purely as a durable work item for a human.
+#
+# Dedup: at most one open `manual-review` issue per (repo, kind, sha). We
+# search existing open issues by title for "SHA <sha>" and skip if one exists.
+#
+# Args:
+#   $1 repo             — "owner/repo" (e.g. "alexsiri7/word-coach-annie")
+#   $2 kind             — "main-ci" or "pr-ci"
+#   $3 sha              — head SHA that is stuck
+#   $4 subject_summary  — short human-readable subject (e.g. "word-coach-annie main CI red")
+#   $5 evidence_link    — URL to the relevant CI run or PR
+#   $6 attempts         — attempt count (for body, typically $MAX_ATTEMPTS)
+#   $7 log_file         — path to the relevant archon log (for body)
+# ----------------------------------------------------------------------------
+file_stuck_issue() {
+  local repo="$1" kind="$2" sha="$3" subject_summary="$4" \
+        evidence_link="$5" attempts="$6" log_file="$7"
+
+  # Ensure the label exists (idempotent — --force updates color/desc if present)
+  gh label create --repo "$repo" manual-review \
+    --color B60205 \
+    --description "Factory escalation — needs human attention" \
+    --force >/dev/null 2>&1 || true
+
+  # Dedup: skip if an open manual-review issue for this SHA already exists.
+  local existing
+  existing=$(gh issue list --repo "$repo" --state open --label manual-review \
+    --search "SHA $sha in:title" --json number --jq '.[0].number // empty' \
+    2>/dev/null || echo "")
+  if [ -n "$existing" ]; then
+    log "$repo: manual-review issue #$existing already open for SHA $sha ($kind) — skipping"
+    return
+  fi
+
+  local title="factory stuck: $subject_summary after $attempts attempts (SHA $sha)"
+  local body
+  body=$(cat <<EOF
+## Factory escalation — manual review required
+
+**Kind**: $kind
+**Repo**: $repo
+**SHA**: \`$sha\`
+**Evidence**: $evidence_link
+**Attempts**: $attempts (at MAX_ATTEMPTS)
+**Archon log**: \`$log_file\`
+
+Auto-filed by \`pipeline-health-cron.sh\` after \`sha_attempt_decide\` exhausted the remediation budget for this SHA. The ntfy alert has also been sent.
+
+This issue is labeled \`manual-review\` only — \`issue-pickup-cron.sh\` will NOT auto-queue it into archon (its \`INGEST_LABELS\` is \`enhancement\` / \`bug\`). A human should diagnose why automated remediation kept failing for this SHA and either fix it or close the issue.
+EOF
+)
+
+  local issue_url
+  issue_url=$(gh issue create --repo "$repo" \
+    --title "$title" \
+    --label "manual-review" \
+    --body "$body" 2>/dev/null | tail -1)
+  local issue_num
+  issue_num=$(echo "$issue_url" | grep -oE '[0-9]+$')
+  if [ -n "$issue_num" ]; then
+    log "$repo: filed manual-review issue #$issue_num for $kind at $sha ($issue_url)"
+  else
+    log "$repo: failed to file manual-review issue for $kind at $sha"
+  fi
+}
+
+# ----------------------------------------------------------------------------
 # sha_attempt_decide: shared helper for SHA-scoped remediation attempts.
 #
 # Args:
@@ -184,6 +256,11 @@ check_main_ci() {
       notify "factory stuck: $project main CI red" \
         "main CI red at $sha after $MAX_ATTEMPTS attempts" \
         high warning
+      file_stuck_issue "alexsiri7/$project" "main-ci" "$sha" \
+        "$project main CI red" \
+        "https://github.com/alexsiri7/$project/actions/runs/$run_id" \
+        "$MAX_ATTEMPTS" \
+        "$repo_dir/.archon-logs/"
       return
       ;;
   esac
@@ -436,18 +513,62 @@ reconcile_zombies() {
 }
 
 # ----------------------------------------------------------------------------
-# Check 3: Disk warning — ntfy if / or /mnt/ext-fast above 85%.
+# Check 3: Disk warning — ntfy if / or /mnt/ext-fast above 85%. For `/`,
+# attempt conservative, non-destructive cache cleanup first; only ntfy if
+# still over threshold after cleanup. Never touches /tmp or user data.
 # ----------------------------------------------------------------------------
+disk_used_pct() {
+  df -P "$1" 2>/dev/null | awk 'NR==2 { gsub("%",""); print $5 }'
+}
+
+autoclean_root() {
+  # Each step is wrapped so a single failure doesn't abort the rest.
+  if command -v go >/dev/null 2>&1; then
+    log "autoclean: go clean -cache"
+    go clean -cache >/dev/null 2>&1 || true
+  fi
+  if command -v bun >/dev/null 2>&1; then
+    log "autoclean: bun pm cache rm"
+    bun pm cache rm >/dev/null 2>&1 || true
+  fi
+  if command -v npm >/dev/null 2>&1; then
+    log "autoclean: npm cache clean --force"
+    npm cache clean --force >/dev/null 2>&1 || true
+  fi
+  if command -v journalctl >/dev/null 2>&1; then
+    log "autoclean: journalctl --user --vacuum-time=7d"
+    journalctl --user --vacuum-time=7d >/dev/null 2>&1 || true
+  fi
+}
+
 check_disk() {
   for mount in / /mnt/ext-fast; do
     local used
-    used=$(df -P "$mount" 2>/dev/null | awk 'NR==2 { gsub("%",""); print $5 }')
+    used=$(disk_used_pct "$mount")
     [ -n "$used" ] || continue
     if [ "$used" -ge 85 ]; then
-      log "disk $mount at ${used}% — ntfying"
-      notify "Disk warning: $mount ${used}%" \
-        "Pipeline will stall if this fills. Investigate and clean." \
-        high warning
+      if [ "$mount" = "/" ]; then
+        local before="$used"
+        log "disk / at ${before}% — running conservative autoclean before ntfy"
+        autoclean_root
+        local after
+        after=$(disk_used_pct "/")
+        [ -n "$after" ] || after="$before"
+        log "disk / ${before}% → ${after}% after cleanup"
+        if [ "$after" -ge 85 ]; then
+          log "disk / still at ${after}% after cleanup — ntfying"
+          notify "Disk warning: / ${after}% (was ${before}%)" \
+            "Autoclean ran (go/bun/npm caches, journal vacuum) but disk still >=85%. Investigate manually." \
+            high warning
+        else
+          log "disk / recovered (${before}% → ${after}%) — no ntfy"
+        fi
+      else
+        log "disk $mount at ${used}% — ntfying"
+        notify "Disk warning: $mount ${used}%" \
+          "Pipeline will stall if this fills. Investigate and clean." \
+          high warning
+      fi
     fi
   done
 }
@@ -604,6 +725,11 @@ check_pr_ci_retry() {
         notify "factory stuck: $project PR #$pr_num CI red" \
           "PR #$pr_num CI red at ${pr_sha:0:10} after $MAX_ATTEMPTS attempts" \
           high warning
+        file_stuck_issue "alexsiri7/$project" "pr-ci" "$pr_sha" \
+          "$project PR #$pr_num CI red" \
+          "https://github.com/alexsiri7/$project/pull/$pr_num" \
+          "$MAX_ATTEMPTS" \
+          "$repo_dir/.archon-logs/"
         continue
         ;;
     esac
