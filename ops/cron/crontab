@@ -3,7 +3,7 @@
 # Secrets loaded from ~/.config/archon-cron/secrets.env (not in this repo).
 
 */15 * * * * /mnt/ext-fast/interstellarai.net/ops/cron/issue-pickup-cron.sh >> /tmp/issue-pickup.log 2>&1
-*/15 * * * * /mnt/ext-fast/archon/scripts/pr-maintenance-cron.sh >> /tmp/pr-maintenance.log 2>&1
+*/15 * * * * /mnt/ext-fast/interstellarai.net/ops/cron/pr-maintenance-cron.sh >> /tmp/pr-maintenance.log 2>&1
 17 */3 * * * /mnt/ext-fast/interstellarai.net/ops/cron/backup-dbs.sh >> /tmp/db-backup.log 2>&1
 */30 * * * * /mnt/ext-fast/interstellarai.net/ops/cron/pipeline-health-cron.sh >> /tmp/pipeline-health.log 2>&1
 0 8 * * * /mnt/ext-fast/interstellarai.net/ops/cron/daily-release-cron.sh >> /tmp/daily-release.log 2>&1

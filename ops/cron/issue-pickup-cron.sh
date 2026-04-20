@@ -28,7 +28,7 @@ LOG_PREFIX="[issue-pickup]"
 INGEST_LABELS=("enhancement" "bug")
 
 # Labels archon already manages — presence of any of these means "don't re-queue".
-ARCHON_LABELS=("archon:queued" "archon:in-progress" "archon:done" "archon:failed" "archon:skipped")
+ARCHON_LABELS=("archon:queued" "archon:in-progress" "archon:done" "archon:failed" "archon:skipped" "archon:blocked")
 
 PROJECTS=("${DEFAULT_PROJECTS[@]}")
 [ $# -gt 0 ] && PROJECTS=("$@")
@@ -40,15 +40,29 @@ log() { echo "$(date -Is) $LOG_PREFIX $*"; }
 SUMMARY_IN_PROGRESS=0
 SUMMARY_STALE=0
 SUMMARY_QUEUED=0
+SUMMARY_BLOCKED=0
+SUMMARY_PROMOTED=0
 SUMMARY_ACTION="none"
 SUMMARY_NOTE=""
 
 ensure_labels() {
   local repo="$1"
-  for label in archon:queued archon:in-progress archon:done archon:failed archon:skipped; do
+  for label in archon:queued archon:in-progress archon:done archon:failed archon:skipped archon:blocked; do
     gh label create "$label" --repo "alexsiri7/$repo" \
       --color "c2e0c6" --description "Archon pipeline state" 2>/dev/null || true
   done
+}
+
+# Returns 0 (blocked) if the issue has at least one open dependency, 1 (clear)
+# otherwise. Uses GitHub's issue dependencies API. On API error, defaults to
+# "clear" — we'd rather let a candidate run than freeze the pipeline on a
+# transient failure; the worst case is a phase runs slightly out of order.
+has_open_blockers() {
+  local project="$1" issue_num="$2"
+  local blockers
+  blockers=$(gh api "repos/alexsiri7/$project/issues/$issue_num/dependencies/blocked_by" \
+    --jq '[.[] | select(.state == "open")] | length' 2>/dev/null || echo 0)
+  [ "${blockers:-0}" -gt 0 ]
 }
 
 has_archon_label() {
@@ -156,9 +170,47 @@ auto_queue() {
     local age=$((now_sec - created_sec))
     [ "$age" -lt 300 ] && continue
 
-    log "$project: auto-queuing #$num (age ${age}s)"
-    gh issue edit "$num" --repo "alexsiri7/$project" --add-label "archon:queued" 2>/dev/null || \
-      log "$project: #$num — could not add archon:queued label"
+    # Dep-aware: if the issue has open blockers, park it in archon:blocked
+    # instead of archon:queued. promote_unblocked will flip it later.
+    local initial_label="archon:queued"
+    if has_open_blockers "$project" "$num"; then
+      initial_label="archon:blocked"
+      log "$project: auto-labeling #$num archon:blocked (open blockers)"
+    else
+      log "$project: auto-queuing #$num (age ${age}s)"
+    fi
+    gh issue edit "$num" --repo "alexsiri7/$project" --add-label "$initial_label" 2>/dev/null || \
+      log "$project: #$num — could not add $initial_label label"
+  done
+}
+
+# --- Phase 1.5: promote archon:blocked issues whose blockers are all closed ---
+# Runs after auto_queue so newly-filed sub-issues that happen to be unblocked
+# get picked up on the same tick.
+promote_unblocked() {
+  local project="$1"
+  local blocked_json
+  blocked_json=$(gh issue list --repo "alexsiri7/$project" --state open \
+    --label "archon:blocked" --limit 100 --json number 2>/dev/null || echo "[]")
+  SUMMARY_BLOCKED=$(echo "$blocked_json" | jq 'length' 2>/dev/null || echo 0)
+
+  local nums
+  nums=$(echo "$blocked_json" | jq -r '.[].number' 2>/dev/null)
+  [ -z "$nums" ] && return
+
+  local num
+  for num in $nums; do
+    if has_open_blockers "$project" "$num"; then
+      continue
+    fi
+    log "$project: #$num unblocked — promoting archon:blocked → archon:queued"
+    if gh issue edit "$num" --repo "alexsiri7/$project" \
+        --remove-label "archon:blocked" --add-label "archon:queued" 2>/dev/null; then
+      SUMMARY_PROMOTED=$((SUMMARY_PROMOTED + 1))
+      SUMMARY_BLOCKED=$((SUMMARY_BLOCKED - 1))
+    else
+      log "$project: #$num — could not swap blocked→queued"
+    fi
   done
 }
 
@@ -234,9 +286,10 @@ for PROJECT in "${PROJECTS[@]}"; do
   ensure_labels "$PROJECT"
   unstick_stale "$PROJECT"
   auto_queue "$PROJECT"
+  promote_unblocked "$PROJECT"
   pick_and_fire "$PROJECT"
 
-  summary="$PROJECT: queued=$SUMMARY_QUEUED in-progress=$SUMMARY_IN_PROGRESS stale=$SUMMARY_STALE action=$SUMMARY_ACTION"
+  summary="$PROJECT: queued=$SUMMARY_QUEUED blocked=$SUMMARY_BLOCKED in-progress=$SUMMARY_IN_PROGRESS stale=$SUMMARY_STALE promoted=$SUMMARY_PROMOTED action=$SUMMARY_ACTION"
   [ -n "$SUMMARY_NOTE" ] && summary="$summary ($SUMMARY_NOTE)"
   log "$summary"
 done
