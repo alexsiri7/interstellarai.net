@@ -36,7 +36,7 @@ const path = Astro.url.pathname;
         <div class="nav-links">
           <a class={`nav-link ${path === '/' ? 'is-active' : ''}`} href="/">Home</a>
           <a class={`nav-link ${path.startsWith('/tenets') ? 'is-active' : ''}`} href="/tenets">Tenets</a>
-          <a class={`nav-link ${path.startsWith('/decisions') ? 'is-active' : ''}`} href="/decisions">Decisions</a>
+          <a class={`nav-link ${path.startsWith('/mementos') ? 'is-active' : ''}`} href="/mementos">Mementos</a>
           <a class={`nav-link ${path.startsWith('/conventions') ? 'is-active' : ''}`} href="/conventions">Conventions</a>
           <a class={`nav-link ${path.startsWith('/projects') ? 'is-active' : ''}`} href="/projects">Projects</a>
         </div>
@@ -45,7 +45,7 @@ const path = Astro.url.pathname;
           <div class="nav-mobile-links">
             <a href="/">Home</a>
             <a href="/tenets">Tenets</a>
-            <a href="/decisions">Decisions</a>
+            <a href="/mementos">Mementos</a>
             <a href="/conventions">Conventions</a>
             <a href="/projects">Projects</a>
           </div>
@@ -75,7 +75,7 @@ const path = Astro.url.pathname;
           <div>
             <div class="footer-h">Handbook</div>
             <a href="/tenets">Tenets</a>
-            <a href="/decisions">Decision log</a>
+            <a href="/mementos">Mementos</a>
             <a href="/conventions">Conventions</a>
             <a href="/projects">Projects</a>
           </div>

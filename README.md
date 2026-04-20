@@ -7,7 +7,7 @@ the InterStellar AI project portfolio.
 
 - **Marketing pages** (`src/pages/`) — what visitors see at the apex domain
 - **Tenets** (`src/pages/tenets.astro`) — the non-negotiable principles
-- **Decision log** (`src/content/decisions/`) — ADRs for cross-project decisions
+- **Decision log** (`src/content/mementos/`) — ADRs for cross-project decisions
 - **Project index** (`src/pages/projects.astro`) — catalog with deploy targets
 
 Per-project apps live under subdomains (e.g. `filmduel.interstellarai.net`),
@@ -52,11 +52,11 @@ Add a Cloudflare redirect rule or page rule sending
 
 ## Writing a new ADR
 
-1. Pick the next `number` (check `src/content/decisions/` — current max + 1).
+1. Pick the next `number` (check `src/content/mementos/` — current max + 1).
 2. Copy an existing ADR as a template.
 3. Fill in frontmatter (`title`, `number`, `status`, `date`, `projects`).
 4. Write Context / Decision / Consequences / Alternatives-considered.
-5. Open a PR. Merging publishes it to `/decisions/<slug>`.
+5. Open a PR. Merging publishes it to `/mementos/<slug>`.
 
 ## Writing a new tenet
 

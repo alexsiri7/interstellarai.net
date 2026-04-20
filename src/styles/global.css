@@ -237,9 +237,9 @@ html[data-dir="b"] .tenet:last-child { border-bottom-color: rgba(255,255,255,0.0
 html[data-dir="b"] .tenet p { color: #B4AB96; }
 
 /* ============================================================
-   Decisions index
+   Mementos index
    ============================================================ */
-.decisions { list-style: none; margin: 0; padding: 0; }
+.mementos { list-style: none; margin: 0; padding: 0; }
 .dec { padding: var(--sp-5) 0; border-top: 1px solid var(--border); display: grid;
        grid-template-columns: 60px 1fr 140px 120px; gap: var(--sp-5); align-items: center; cursor: pointer;
        text-decoration: none; color: inherit; transition: all 120ms var(--ease-out); }

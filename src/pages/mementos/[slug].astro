@@ -3,8 +3,8 @@ import Layout from "../../layouts/Layout.astro";
 import { getCollection } from "astro:content";
 
 export async function getStaticPaths() {
-  const decisions = await getCollection("decisions");
-  return decisions.map((d) => ({ params: { slug: d.slug }, props: { decision: d } }));
+  const mementos = await getCollection("mementos");
+  return mementos.map((d) => ({ params: { slug: d.slug }, props: { decision: d } }));
 }
 
 const { decision } = Astro.props;
@@ -15,7 +15,7 @@ const adrNum = String(decision.data.number).padStart(3, "0");
 <Layout title={`ADR-${adrNum}: ${decision.data.title}`}>
   <section class="adr-head">
     <div class="wrap-prose">
-      <div class="crumbs"><a href="/decisions">← all decisions</a></div>
+      <div class="crumbs"><a href="/mementos">← all mementos</a></div>
       <h1>ADR-{adrNum}: {decision.data.title}</h1>
       <div class="adr-meta">
         <span><strong>Status</strong>: {decision.data.status}</span>
