@@ -1,0 +1,8 @@
+# Shared list of archon-managed project slugs under alexsiri7/.
+# Read by all pipeline cron scripts. Edit this to add/remove projects.
+un-reminder
+cosmic-match
+word-coach-annie
+filmduel
+reli
+interstellarai.net

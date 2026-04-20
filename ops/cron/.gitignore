@@ -1,0 +1,7 @@
+# Logs (runtime-only, should live in /tmp or /var/log, never in-tree)
+*.log
+*.log.*
+
+# Any accidental secrets drop
+secrets.env
+*.creds.txt
