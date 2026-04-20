@@ -53,16 +53,29 @@ ensure_labels() {
   done
 }
 
-# Returns 0 (blocked) if the issue has at least one open dependency, 1 (clear)
-# otherwise. Uses GitHub's issue dependencies API. On API error, defaults to
-# "clear" — we'd rather let a candidate run than freeze the pipeline on a
-# transient failure; the worst case is a phase runs slightly out of order.
+# Returns 0 (blocked) if the issue has at least one open "blocker" — defined
+# as either an explicit `blocked_by` dependency OR an open sub-issue (child).
+# Returns 1 (clear) otherwise.
+#
+# The child rule lets PRD/epic issues naturally park themselves while their
+# phase children are in flight — no archon:skipped hygiene needed. When the
+# last child closes, the PRD unblocks and gets picked up, which triggers a
+# finalization archon run over the completed work.
+#
+# On API error, defaults to "clear" — we'd rather let a candidate run than
+# freeze the pipeline on a transient failure; worst case is a phase runs
+# slightly out of order.
 has_open_blockers() {
   local project="$1" issue_num="$2"
-  local blockers
+  local blockers children
   blockers=$(gh api "repos/alexsiri7/$project/issues/$issue_num/dependencies/blocked_by" \
     --jq '[.[] | select(.state == "open")] | length' 2>/dev/null || echo 0)
-  [ "${blockers:-0}" -gt 0 ]
+  if [ "${blockers:-0}" -gt 0 ]; then
+    return 0
+  fi
+  children=$(gh api "repos/alexsiri7/$project/issues/$issue_num/sub_issues" \
+    --jq '[.[] | select(.state == "open")] | length' 2>/dev/null || echo 0)
+  [ "${children:-0}" -gt 0 ]
 }
 
 has_archon_label() {
