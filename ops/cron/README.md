@@ -38,7 +38,8 @@ It installs with absolute paths pointing at `/mnt/ext-fast/interstellarai.net/op
 
 | Script | Cadence | What it does |
 |---|---|---|
-| `issue-pickup-cron.sh` | every 15 min | auto-label new issues, fire `archon-fix-github-issue` on oldest queued |
+| `issue-pickup-cron.sh` | every 15 min | auto-label new issues, fire `archon-fix-github-issue` on oldest queued (dep-aware: skips issues with open blockers) |
+| `pr-maintenance-cron.sh` | every 15 min | zero-AI PR janitor: promotes green drafts, squash-merges CLEAN, fires `archon-pr-maintenance` on one dirty/behind PR per project |
 | `pr-review-cron.sh` | every 5 min | fire `archon-smart-pr-review` on open non-draft PRs, once per (repo, pr, sha) |
 | `pipeline-health-cron.sh` | every 30 min | main-CI-red detection, zombie-run reaping, disk pressure, stall detection |
 | `backup-dbs.sh` | every 3h (at :17) | Supabase → local + rclone to Google Drive |
@@ -50,4 +51,3 @@ It installs with absolute paths pointing at `/mnt/ext-fast/interstellarai.net/op
 | `lib/archon-projects.sh` | sourced by others | loads project list from `archon-projects.txt` |
 | `archon-projects.txt` | data | canonical list of managed project slugs under `alexsiri7/` |
 
-Note: `pr-maintenance-cron.sh` lives separately in the `archon` repo (`/mnt/ext-fast/archon/scripts/`). It's in the installed crontab but not versioned here.
