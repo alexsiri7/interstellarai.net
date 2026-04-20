@@ -449,7 +449,7 @@ check_progress() {
 }
 
 # ----------------------------------------------------------------------------
-# Check 5: Retry CI on open archon PRs with failed checks.
+# Check 6: Retry CI on open archon PRs with failed checks.
 #   Ported from archon/scripts/poll-health.sh (check 1). For each open PR on
 #   an `archon/` branch whose statusCheckRollup contains a FAILURE, fire
 #   archon-assist to diagnose + push a fix. Dedup by PR number; cleared when
@@ -462,10 +462,13 @@ check_pr_ci_retry() {
 
   # Collect current set of archon PRs with FAILURE in rollup
   local failed_prs
-  failed_prs=$(gh pr list --repo "alexsiri7/$project" --state open \
+  if ! failed_prs=$(gh pr list --repo "alexsiri7/$project" --state open \
     --json number,title,headRefName,statusCheckRollup \
     --jq '.[] | select(.headRefName | startswith("archon/")) | select(.statusCheckRollup | length > 0) | select(.statusCheckRollup | map(.conclusion // "PENDING") | any(. == "FAILURE")) | [(.number|tostring), .title] | @tsv' \
-    2>/dev/null || echo "")
+    2>&1); then
+    log "$project: gh pr list failed — skipping PR CI retry check"
+    return
+  fi
 
   # Clear markers for PRs no longer failing
   local current_nums=""
@@ -509,9 +512,9 @@ check_pr_ci_retry() {
 }
 
 # ----------------------------------------------------------------------------
-# Check 6: Prod deploy HTTP health.
+# Check 7: Prod deploy HTTP health.
 #   Ported from archon/scripts/poll-health.sh (check 3). For each project with
-#   a DEPLOY_URLS entry, HEAD the URL; if HTTP status is <200 or >=400, file
+#   a DEPLOY_URLS entry, probe the URL; if HTTP status is <200 or >=400, file
 #   a `bug` issue (queued for the normal pickup cron). Dedup per project;
 #   marker is cleared once the deploy recovers.
 # ----------------------------------------------------------------------------
@@ -522,6 +525,7 @@ check_deploy_http() {
 
   local http_code
   http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$deploy_url" 2>/dev/null || echo "000")
+  [[ "$http_code" =~ ^[0-9]+$ ]] || http_code=000
 
   local marker="$STATE_DIR/deploy-down-$project"
   if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 400 ]; then
@@ -531,7 +535,6 @@ check_deploy_http() {
     fi
 
     log "$project: deploy down (HTTP $http_code at $deploy_url) — filing issue"
-    touch "$marker"
 
     local body
     body=$(cat <<EOF
@@ -545,10 +548,19 @@ The production deployment is not responding correctly. Check the hosting
 dashboard (Railway / Cloudflare Pages / etc.) and recent deployments for errors.
 EOF
 )
-    gh issue create --repo "alexsiri7/$project" \
+    local issue_url
+    if issue_url=$(gh issue create --repo "alexsiri7/$project" \
       --title "Deploy down: $deploy_url returning HTTP $http_code" \
       --label "bug" \
-      --body "$body" >/dev/null 2>&1 || true
+      --body "$body" 2>&1); then
+      touch "$marker"
+      log "$project: filed deploy-down issue: $issue_url"
+    else
+      log "$project: ERROR: failed to file deploy-down issue — $issue_url"
+      notify "Deploy down: $project" \
+        "HTTP $http_code at $deploy_url — gh issue create failed, needs manual attention" \
+        high warning
+    fi
     return
   fi
 
@@ -558,7 +570,7 @@ EOF
 }
 
 # ----------------------------------------------------------------------------
-# Check 7: Shipped-PR ntfy — announce PRs merged in the last 24h.
+# Check 8: Shipped-PR ntfy — announce PRs merged in the last 24h.
 #   Ported from archon/scripts/poll-health.sh (check 4). Only fires when the
 #   deploy URL is configured AND currently healthy (we assume merged code is
 #   live). For each merged PR, pulls linked issue numbers from the body and
@@ -571,10 +583,12 @@ check_shipped_prs() {
   [ -n "$deploy_url" ] || return
 
   # Only announce if deploy is currently healthy — avoid claiming "shipped"
-  # when prod is actually down. check_deploy_http already logged status.
-  local http_code
-  http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$deploy_url" 2>/dev/null || echo "000")
-  [ "$http_code" -ge 200 ] && [ "$http_code" -lt 400 ] || return
+  # when prod is actually down. Rely on check_deploy_http's marker (runs
+  # earlier in the same loop) rather than re-probing the URL.
+  if [ -f "$STATE_DIR/deploy-down-$project" ]; then
+    log "$project: deploy currently down — skipping shipped-PR notifications"
+    return
+  fi
 
   local merged
   merged=$(gh pr list --repo "alexsiri7/$project" --state merged \
@@ -582,7 +596,7 @@ check_shipped_prs() {
     --jq "[.[] | select((.mergedAt | fromdateiso8601) > (now - 86400))]" \
     2>/dev/null || echo "[]")
 
-  echo "$merged" | jq -c '.[]' 2>/dev/null | while IFS= read -r pr; do
+  echo "$merged" | jq -c '.[]' 2>&1 | while IFS= read -r pr; do
     [ -n "$pr" ] || continue
     local pr_num pr_title pr_body
     pr_num=$(echo "$pr" | jq -r '.number')

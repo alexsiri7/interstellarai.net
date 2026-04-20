@@ -127,6 +127,8 @@ log "repo: $local_path"
 log "workflow: $workflow"
 log "account: $(basename "$account_dir")"
 touch "$lock_file"
+# shellcheck disable=SC2064
+trap "rm -f '$lock_file'" EXIT
 
 logfile="$LOG_DIR/${repo_name}-${sweep_name}-$(date +%Y%m%d).log"
 
@@ -139,5 +141,5 @@ else
   notify "Sweep failed: $repo_name" "$sweep_name failed — check $logfile" high x
 fi
 
-rm -f "$lock_file"
+# lock_file cleaned by EXIT trap
 log "=== nightly sweep complete ==="
