@@ -1,0 +1,53 @@
+# ops/cron
+
+Scheduled scripts that run the archon pipeline on this machine:
+- pick up new GitHub issues and dispatch archon
+- keep PRs merging (rebase/fix/auto-merge)
+- review PRs via archon-smart-pr-review
+- watch pipeline health (CI red, zombie runs, disk pressure)
+- daily release tags
+- Supabase DB backups
+- APK auto-sync to connected Android devices
+
+## Secrets
+
+Secrets are **never** committed here. Scripts load them from:
+
+```
+$ARCHON_CRON_SECRETS   (default: ~/.config/archon-cron/secrets.env, chmod 600)
+```
+
+Required keys (see individual scripts for which ones each uses):
+
+- `ANNIE_DB_URL`, `RELI_DB_URL`, `FILMDUEL_DB_URL` — Supabase connection strings used by `backup-dbs.sh`.
+- `NTFY_TOPIC` — private ntfy.sh topic for notifications. No fallback default; scripts fail loud if missing.
+
+Set perms: `chmod 600 ~/.config/archon-cron/secrets.env`.
+
+## Install the crontab
+
+The file `crontab` in this directory is a committed reference. To install:
+
+```
+crontab ops/cron/crontab
+```
+
+It installs with absolute paths pointing at `/mnt/ext-fast/interstellarai.net/ops/cron/...`. Adjust paths there if this repo lives elsewhere on your machine.
+
+## Script index
+
+| Script | Cadence | What it does |
+|---|---|---|
+| `issue-pickup-cron.sh` | every 15 min | auto-label new issues, fire `archon-fix-github-issue` on oldest queued |
+| `pr-review-cron.sh` | every 5 min | fire `archon-smart-pr-review` on open non-draft PRs, once per (repo, pr, sha) |
+| `pipeline-health-cron.sh` | every 30 min | main-CI-red detection, zombie-run reaping, disk pressure, stall detection |
+| `backup-dbs.sh` | every 3h (at :17) | Supabase → local + rclone to Google Drive |
+| `daily-release-cron.sh` | 08:00 daily | tag + release per repo if main moved since last release |
+| `auto-apk-sync.sh` | every 5 min | pull latest signed APK from CI, install to any connected device |
+| `apk-autosync-daemon.sh` | systemd user service | event-driven counterpart to `auto-apk-sync.sh` |
+| `fetch-apks.sh` / `install-apks.sh` | manual | helper CLIs for APK ops |
+| `generate-android-keystore.sh` | manual, one-off per project | generate release keystore + upload to GH Actions secrets |
+| `lib/archon-projects.sh` | sourced by others | loads project list from `archon-projects.txt` |
+| `archon-projects.txt` | data | canonical list of managed project slugs under `alexsiri7/` |
+
+Note: `pr-maintenance-cron.sh` lives separately in the `archon` repo (`/mnt/ext-fast/archon/scripts/`). It's in the installed crontab but not versioned here.

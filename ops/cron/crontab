@@ -1,0 +1,12 @@
+# Archon pipeline crontab. Install with: crontab ops/cron/crontab
+# Paths below assume this repo is checked out at /mnt/ext-fast/interstellarai.net.
+# Secrets loaded from ~/.config/archon-cron/secrets.env (not in this repo).
+
+*/15 * * * * /mnt/ext-fast/interstellarai.net/ops/cron/issue-pickup-cron.sh >> /tmp/issue-pickup.log 2>&1
+*/15 * * * * /mnt/ext-fast/archon/scripts/pr-maintenance-cron.sh >> /tmp/pr-maintenance.log 2>&1
+17 */3 * * * /mnt/ext-fast/interstellarai.net/ops/cron/backup-dbs.sh >> /tmp/db-backup.log 2>&1
+*/30 * * * * /mnt/ext-fast/interstellarai.net/ops/cron/pipeline-health-cron.sh >> /tmp/pipeline-health.log 2>&1
+0 8 * * * /mnt/ext-fast/interstellarai.net/ops/cron/daily-release-cron.sh >> /tmp/daily-release.log 2>&1
+*/5 * * * * /mnt/ext-fast/interstellarai.net/ops/cron/auto-apk-sync.sh >> /tmp/apk-sync.log 2>&1
+7 * * * * /usr/sbin/logrotate --state /home/asiri/.logrotate.state /home/asiri/.config/logrotate/archon-pipeline.conf >/dev/null 2>&1
+*/5 * * * * /mnt/ext-fast/interstellarai.net/ops/cron/pr-review-cron.sh >> /tmp/pr-review.log 2>&1
