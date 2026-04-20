@@ -48,6 +48,12 @@ declare -A DEPLOY_URLS=(
 )
 
 mkdir -p "$STATE_DIR"
+mkdir -p "$STATE_DIR/prciretry" "$STATE_DIR/escalated" \
+         "$STATE_DIR/main-ci" "$STATE_DIR/escalated-main"
+
+# Max archon-remediation attempts against a single head SHA before we stop
+# re-firing and ntfy the operator that the factory is stuck.
+MAX_ATTEMPTS=3
 
 log() { echo "$(date -Is) $LOG_PREFIX $*"; }
 
@@ -56,6 +62,67 @@ notify() {
   curl -s -o /dev/null \
     -H "Title: $title" -H "Priority: $priority" -H "Tags: $tags" \
     -d "$msg" "ntfy.sh/$NTFY_TOPIC" 2>/dev/null || true
+}
+
+# ----------------------------------------------------------------------------
+# sha_attempt_decide: shared helper for SHA-scoped remediation attempts.
+#
+# Args:
+#   $1 marker_file        — path holding "<sha>:<attempts>"
+#   $2 escalate_dir       — dir where presence of "<key>-<sha>" = already ntfy'd
+#   $3 escalate_key       — prefix used to form the escalated-ntfy marker file
+#                           (e.g. "$project" for main, "$project-pr<N>" for PR)
+#   $4 current_sha        — head SHA we are evaluating right now
+#
+# Echoes one of:
+#   FIRE <attempts_after_increment>   — caller should fire remediation
+#   SKIP                              — already at/over MAX_ATTEMPTS for this
+#                                       SHA; caller should NOT fire. If the
+#                                       escalated-ntfy marker does not exist,
+#                                       it will be created and this function
+#                                       returns SKIP_NTFY instead, meaning the
+#                                       caller should send the "factory stuck"
+#                                       ntfy.
+#   SKIP_NTFY                         — same as SKIP but caller must ntfy now.
+#
+# The marker is always (re)written to "<current_sha>:<attempts>" so that a
+# SHA change resets the counter to 1 on the next FIRE and newer state wins.
+# ----------------------------------------------------------------------------
+sha_attempt_decide() {
+  local marker_file="$1" escalate_dir="$2" escalate_key="$3" current_sha="$4"
+  local recorded_sha="" recorded_attempts=0
+  if [ -f "$marker_file" ]; then
+    local content
+    content=$(cat "$marker_file" 2>/dev/null || echo "")
+    recorded_sha="${content%%:*}"
+    recorded_attempts="${content##*:}"
+    case "$recorded_attempts" in ''|*[!0-9]*) recorded_attempts=0 ;; esac
+  fi
+
+  local attempts
+  if [ "$recorded_sha" != "$current_sha" ]; then
+    # New SHA — reset budget
+    attempts=1
+    echo "${current_sha}:${attempts}" > "$marker_file"
+    echo "FIRE $attempts"
+    return
+  fi
+
+  if [ "$recorded_attempts" -lt "$MAX_ATTEMPTS" ]; then
+    attempts=$((recorded_attempts + 1))
+    echo "${current_sha}:${attempts}" > "$marker_file"
+    echo "FIRE $attempts"
+    return
+  fi
+
+  # At/over MAX_ATTEMPTS for this SHA — do not fire. Ntfy once per (key, SHA).
+  local escalated_marker="$escalate_dir/${escalate_key}-${current_sha}"
+  if [ ! -f "$escalated_marker" ]; then
+    touch "$escalated_marker"
+    echo "SKIP_NTFY"
+    return
+  fi
+  echo "SKIP"
 }
 
 # ----------------------------------------------------------------------------
@@ -76,19 +143,17 @@ check_main_ci() {
   sha=$(echo "$latest" | jq -r '.headSha')
   run_id=$(echo "$latest" | jq -r '.databaseId')
 
+  local marker="$STATE_DIR/main-ci/$project"
   if [ "$conclusion" = "success" ]; then
-    # Green again — clear stale markers for this repo
+    # Green again — clear stale markers for this repo (new-style marker dir
+    # plus any legacy single-file markers from earlier versions of this script).
+    rm -f "$marker" 2>/dev/null || true
+    find "$STATE_DIR/escalated-main" -maxdepth 1 -name "$project-*" -delete 2>/dev/null || true
     find "$STATE_DIR" -maxdepth 1 -name "main-ci-fired-$project-*" -delete 2>/dev/null || true
     return
   fi
   # Still running, cancelled, or pending — not actionable yet
   [ "$conclusion" = "failure" ] || return
-
-  local marker="$STATE_DIR/main-ci-fired-$project-$sha"
-  if [ -f "$marker" ]; then
-    log "$project: main CI still red at $sha — archon already fired, skipping"
-    return
-  fi
 
   # Also skip if a human (or earlier tick) already filed an open "Main CI" issue
   # that is queued or in-progress. Avoids duplicating triage on SHA changes.
@@ -98,16 +163,36 @@ check_main_ci() {
     --jq '[.[] | select((.labels | map(.name)) as $l | ($l | index("archon:queued")) or ($l | index("archon:in-progress")))] | .[0].number // empty' \
     2>/dev/null || echo "")
   if [ -n "$existing" ]; then
-    log "$project: main CI red, but open CI issue #$existing already queued/in-progress — marker set, skipping"
-    touch "$marker"
+    log "$project: main CI red, but open CI issue #$existing already queued/in-progress — skipping"
     return
   fi
+
+  # SHA-scoped attempt tracking: new SHA resets counter, same SHA retries up
+  # to MAX_ATTEMPTS, then ntfys "factory stuck" and backs off.
+  local decision action attempts
+  decision=$(sha_attempt_decide "$marker" "$STATE_DIR/escalated-main" "$project" "$sha")
+  action="${decision%% *}"
+  attempts="${decision##* }"
+
+  case "$action" in
+    SKIP)
+      log "$project: main CI red at $sha — already at MAX_ATTEMPTS=$MAX_ATTEMPTS, backed off"
+      return
+      ;;
+    SKIP_NTFY)
+      log "$project: main CI red at $sha — MAX_ATTEMPTS=$MAX_ATTEMPTS reached, ntfying operator"
+      notify "factory stuck: $project main CI red" \
+        "main CI red at $sha after $MAX_ATTEMPTS attempts" \
+        high warning
+      return
+      ;;
+  esac
 
   local failed_jobs
   failed_jobs=$(gh run view "$run_id" --repo "alexsiri7/$project" --json jobs \
     --jq '[.jobs[] | select(.conclusion == "failure") | .name] | join(", ")' 2>/dev/null || echo "unknown")
 
-  log "$project: main CI red ($failed_jobs) at $sha — filing issue + firing archon"
+  log "$project: main CI red ($failed_jobs) at $sha — filing issue + firing archon (attempt $attempts/$MAX_ATTEMPTS)"
 
   local issue_body
   issue_body=$(cat <<EOF
@@ -138,8 +223,6 @@ EOF
     log "$project: could not create issue — skipping archon fire (will retry next tick)"
     return
   fi
-
-  touch "$marker"
 
   mkdir -p "$repo_dir/.archon-logs"
   local logf="$repo_dir/.archon-logs/health-ci-fix-${sha:0:8}-$(date +%Y%m%d-%H%M%S).log"
@@ -460,19 +543,20 @@ check_pr_ci_retry() {
   local repo_dir="$BASE_DIR/$project"
   [ -d "$repo_dir/.git" ] || return
 
-  # Collect current set of archon PRs with FAILURE in rollup
+  # Collect current set of archon PRs with FAILURE in rollup.
+  # Includes headRefOid so we can scope attempts to the PR's current head SHA.
   local failed_prs
   failed_prs=$(gh pr list --repo "alexsiri7/$project" --state open \
-    --json number,title,headRefName,statusCheckRollup \
-    --jq '.[] | select(.headRefName | startswith("archon/")) | select(.statusCheckRollup | length > 0) | select(.statusCheckRollup | map(.conclusion // "PENDING") | any(. == "FAILURE")) | [(.number|tostring), .title] | @tsv' \
+    --json number,title,headRefName,headRefOid,statusCheckRollup \
+    --jq '.[] | select(.headRefName | startswith("archon/")) | select(.statusCheckRollup | length > 0) | select(.statusCheckRollup | map(.conclusion // "PENDING") | any(. == "FAILURE")) | [(.number|tostring), .headRefOid, .title] | @tsv' \
     2>/dev/null || echo "")
 
-  # Clear markers for PRs no longer failing
+  # Clear markers for PRs no longer failing (merged, closed, or recovered).
   local current_nums=""
   if [ -n "$failed_prs" ]; then
     current_nums=$(echo "$failed_prs" | awk -F'\t' '{print $1}' | sort -u)
   fi
-  local prefix="prciretry-$project-pr"
+  local prefix="$project-pr"
   while IFS= read -r marker; do
     [ -z "$marker" ] && continue
     local mbase mnum
@@ -481,20 +565,50 @@ check_pr_ci_retry() {
     if [ -z "$current_nums" ] || ! echo "$current_nums" | grep -qx "$mnum"; then
       rm -f "$marker"
     fi
-  done < <(find "$STATE_DIR" -maxdepth 1 -name "prciretry-$project-pr*" 2>/dev/null)
+  done < <(find "$STATE_DIR/prciretry" -maxdepth 1 -name "$project-pr*" 2>/dev/null)
+  # Also clear any stale "escalated" ntfy-dedup markers for PRs that recovered.
+  while IFS= read -r marker; do
+    [ -z "$marker" ] && continue
+    local mbase prnum
+    mbase=$(basename "$marker")
+    # <project>-pr<N>-<sha> → extract N
+    prnum="${mbase#$project-pr}"
+    prnum="${prnum%%-*}"
+    if [ -z "$current_nums" ] || ! echo "$current_nums" | grep -qx "$prnum"; then
+      rm -f "$marker"
+    fi
+  done < <(find "$STATE_DIR/escalated" -maxdepth 1 -name "$project-pr*" 2>/dev/null)
+  # Legacy single-file markers from earlier versions of this script.
+  find "$STATE_DIR" -maxdepth 1 -name "prciretry-$project-pr*" -delete 2>/dev/null || true
 
   [ -n "$failed_prs" ] || return
 
-  while IFS=$'\t' read -r pr_num pr_title; do
+  while IFS=$'\t' read -r pr_num pr_sha pr_title; do
     [ -n "$pr_num" ] || continue
-    local marker="$STATE_DIR/prciretry-$project-pr$pr_num"
-    if [ -f "$marker" ]; then
-      log "$project: PR #$pr_num CI still red — archon-assist already fired, skipping"
-      continue
-    fi
+    [ -n "$pr_sha" ] || continue
 
-    log "$project: PR #$pr_num CI red — firing archon-assist to fix"
-    touch "$marker"
+    local marker="$STATE_DIR/prciretry/$project-pr$pr_num"
+    local decision action attempts
+    decision=$(sha_attempt_decide "$marker" "$STATE_DIR/escalated" \
+      "$project-pr$pr_num" "$pr_sha")
+    action="${decision%% *}"
+    attempts="${decision##* }"
+
+    case "$action" in
+      SKIP)
+        log "$project: PR #$pr_num CI red at ${pr_sha:0:10} — already at MAX_ATTEMPTS=$MAX_ATTEMPTS, backed off"
+        continue
+        ;;
+      SKIP_NTFY)
+        log "$project: PR #$pr_num CI red at ${pr_sha:0:10} — MAX_ATTEMPTS=$MAX_ATTEMPTS reached, ntfying operator"
+        notify "factory stuck: $project PR #$pr_num CI red" \
+          "PR #$pr_num CI red at ${pr_sha:0:10} after $MAX_ATTEMPTS attempts" \
+          high warning
+        continue
+        ;;
+    esac
+
+    log "$project: PR #$pr_num CI red at ${pr_sha:0:10} — firing archon-assist (attempt $attempts/$MAX_ATTEMPTS)"
 
     mkdir -p "$repo_dir/.archon-logs"
     local logf="$repo_dir/.archon-logs/health-pr-ci-fix-pr${pr_num}-$(date +%Y%m%d-%H%M%S).log"
@@ -620,6 +734,36 @@ check_shipped_prs() {
 }
 
 # ----------------------------------------------------------------------------
+# Check 8: Sweep stale `archon:in-progress` labels off closed issues.
+#   archon's fix workflow closes issues via "Fixes #N" on a merged PR, but
+#   GitHub doesn't auto-update the label, and the workflow doesn't always
+#   bother either — leaving closed issues stuck with `archon:in-progress`.
+#   Low-frequency, cheap, idempotent — safe to run every tick.
+# ----------------------------------------------------------------------------
+sweep_stale_labels() {
+  local project="$1"
+  local stale_nums
+  stale_nums=$(gh issue list --repo "alexsiri7/$project" --state closed \
+    --label "archon:in-progress" --limit 100 \
+    --json number --jq '.[].number' 2>/dev/null || echo "")
+  [ -n "$stale_nums" ] || return
+
+  local count=0
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    if gh issue edit "$n" --repo "alexsiri7/$project" \
+         --remove-label "archon:in-progress" \
+         --add-label "archon:done" >/dev/null 2>&1; then
+      count=$((count + 1))
+    fi
+  done <<< "$stale_nums"
+
+  if [ "$count" -gt 0 ]; then
+    log "$project: swept $count stale archon:in-progress label(s) → archon:done on closed issues"
+  fi
+}
+
+# ----------------------------------------------------------------------------
 log "=== pipeline health check ==="
 for project in "${REPOS[@]}"; do
   check_main_ci "$project"
@@ -627,6 +771,7 @@ for project in "${REPOS[@]}"; do
   check_pr_ci_retry "$project"
   check_deploy_http "$project"
   check_shipped_prs "$project"
+  sweep_stale_labels "$project"
 done
 reconcile_zombies
 check_disk
