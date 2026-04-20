@@ -41,7 +41,8 @@ It installs with absolute paths pointing at `/mnt/ext-fast/interstellarai.net/op
 | `issue-pickup-cron.sh` | every 15 min | auto-label new issues, fire `archon-fix-github-issue` on oldest queued. Dep-aware: an issue is blocked if it has any open `blocked_by` dep OR any open sub-issue child (so PRDs park themselves until all phases close, then unblock for finalization). |
 | `pr-maintenance-cron.sh` | every 15 min | zero-AI PR janitor: promotes green drafts, squash-merges CLEAN, fires `archon-pr-maintenance` on one dirty/behind PR per project |
 | `pr-review-cron.sh` | every 5 min | fire `archon-smart-pr-review` on open non-draft PRs, once per (repo, pr, sha) |
-| `pipeline-health-cron.sh` | every 30 min | main-CI-red detection, zombie-run reaping, disk pressure, stall detection |
+| `pipeline-health-cron.sh` | every 30 min | main-CI-red detection, prod-deploy health (status API + HTTP probe), zombie-run reaping, disk pressure, stall detection, PR-CI retry (fires `archon-assist` on open archon PRs with failed CI), shipped-PR ntfys for merged PRs that closed issues |
+| `sweep-audits.sh` | 02:00 daily | rotating codebase audit (12-slot day-of-year rotation: `archon-architect` / `archon-security-audit` / `archon-test-audit` × filmduel / word-coach-annie / reli / cosmic-match) |
 | `backup-dbs.sh` | every 3h (at :17) | Supabase → local + rclone to Google Drive |
 | `daily-release-cron.sh` | 08:00 daily | tag + release per repo if main moved since last release |
 | `auto-apk-sync.sh` | every 5 min | pull latest signed APK from CI, install to any connected device |

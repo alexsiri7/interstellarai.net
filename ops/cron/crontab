@@ -10,3 +10,4 @@
 */5 * * * * /mnt/ext-fast/interstellarai.net/ops/cron/auto-apk-sync.sh >> /tmp/apk-sync.log 2>&1
 7 * * * * /usr/sbin/logrotate --state /home/asiri/.logrotate.state /home/asiri/.config/logrotate/archon-pipeline.conf >/dev/null 2>&1
 */5 * * * * /mnt/ext-fast/interstellarai.net/ops/cron/pr-review-cron.sh >> /tmp/pr-review.log 2>&1
+0 2 * * * /mnt/ext-fast/interstellarai.net/ops/cron/sweep-audits.sh >> /tmp/sweep-audits.log 2>&1

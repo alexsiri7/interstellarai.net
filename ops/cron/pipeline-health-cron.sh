@@ -8,6 +8,13 @@
 #   5. No pipeline progress in last tick (no commits, no archon completions):
 #        - If token-limit markers in recent logs → wait, retry next tick
 #        - Else → fire archon-assist diagnostic (dedup: 2h cooldown)
+#   6. Open archon PRs with failed CI → fire archon-assist to diagnose + fix
+#      (dedup by PR number, reset when PR merges/closes)
+#   7. Prod deploy HTTP health → file bug issue if deploy URL returns non-2xx/3xx
+#      (dedup per-project, cleared on recovery)
+#   8. Shipped-PR ntfy → emit "Shipped: repo #issue" for PRs that closed issues
+#      in the last 24h, when the deploy URL is currently healthy
+#      (dedup per-PR)
 #
 # Crontab:
 #   */30 * * * * <repo>/ops/cron/pipeline-health-cron.sh >> /tmp/pipeline-health.log 2>&1
@@ -29,6 +36,16 @@ SECRETS_FILE="${ARCHON_CRON_SECRETS:-$HOME/.config/archon-cron/secrets.env}"
 [ -r "$SECRETS_FILE" ] && . "$SECRETS_FILE"
 : "${NTFY_TOPIC:?NTFY_TOPIC not set — populate $SECRETS_FILE}"
 LOG_PREFIX="[pipeline-health]"
+
+# Public prod-deploy URLs, keyed by project slug. Only projects listed here
+# are subject to HTTP health checks + shipped-PR ntfys. Keep in sync with
+# deploy workflows / ntfy steps in each repo's .github/workflows/.
+declare -A DEPLOY_URLS=(
+  ["filmduel"]="https://filmduel.up.railway.app"
+  ["word-coach-annie"]="https://annie.interstellarai.net/api/health"
+  ["reli"]="https://reli.interstellarai.net"
+  ["interstellarai.net"]="https://www.interstellarai.net"
+)
 
 mkdir -p "$STATE_DIR"
 
@@ -432,10 +449,184 @@ check_progress() {
 }
 
 # ----------------------------------------------------------------------------
+# Check 5: Retry CI on open archon PRs with failed checks.
+#   Ported from archon/scripts/poll-health.sh (check 1). For each open PR on
+#   an `archon/` branch whose statusCheckRollup contains a FAILURE, fire
+#   archon-assist to diagnose + push a fix. Dedup by PR number; cleared when
+#   the PR is no longer in the failed-CI list (merged, closed, or recovered).
+# ----------------------------------------------------------------------------
+check_pr_ci_retry() {
+  local project="$1"
+  local repo_dir="$BASE_DIR/$project"
+  [ -d "$repo_dir/.git" ] || return
+
+  # Collect current set of archon PRs with FAILURE in rollup
+  local failed_prs
+  failed_prs=$(gh pr list --repo "alexsiri7/$project" --state open \
+    --json number,title,headRefName,statusCheckRollup \
+    --jq '.[] | select(.headRefName | startswith("archon/")) | select(.statusCheckRollup | length > 0) | select(.statusCheckRollup | map(.conclusion // "PENDING") | any(. == "FAILURE")) | [(.number|tostring), .title] | @tsv' \
+    2>/dev/null || echo "")
+
+  # Clear markers for PRs no longer failing
+  local current_nums=""
+  if [ -n "$failed_prs" ]; then
+    current_nums=$(echo "$failed_prs" | awk -F'\t' '{print $1}' | sort -u)
+  fi
+  local prefix="prciretry-$project-pr"
+  while IFS= read -r marker; do
+    [ -z "$marker" ] && continue
+    local mbase mnum
+    mbase=$(basename "$marker")
+    mnum="${mbase#$prefix}"
+    if [ -z "$current_nums" ] || ! echo "$current_nums" | grep -qx "$mnum"; then
+      rm -f "$marker"
+    fi
+  done < <(find "$STATE_DIR" -maxdepth 1 -name "prciretry-$project-pr*" 2>/dev/null)
+
+  [ -n "$failed_prs" ] || return
+
+  while IFS=$'\t' read -r pr_num pr_title; do
+    [ -n "$pr_num" ] || continue
+    local marker="$STATE_DIR/prciretry-$project-pr$pr_num"
+    if [ -f "$marker" ]; then
+      log "$project: PR #$pr_num CI still red — archon-assist already fired, skipping"
+      continue
+    fi
+
+    log "$project: PR #$pr_num CI red — firing archon-assist to fix"
+    touch "$marker"
+
+    mkdir -p "$repo_dir/.archon-logs"
+    local logf="$repo_dir/.archon-logs/health-pr-ci-fix-pr${pr_num}-$(date +%Y%m%d-%H%M%S).log"
+    (
+      cd "$repo_dir"
+      CLAUDECODE=0 nohup archon workflow run archon-assist \
+        "PR #$pr_num has failing CI checks. Check out the branch, look at the CI failure logs with 'gh pr checks $pr_num' and 'gh run view', diagnose the failure, fix it, commit, and push. The PR title is: $pr_title" \
+        > "$logf" 2>&1 &
+      disown
+    )
+  done <<< "$failed_prs"
+}
+
+# ----------------------------------------------------------------------------
+# Check 6: Prod deploy HTTP health.
+#   Ported from archon/scripts/poll-health.sh (check 3). For each project with
+#   a DEPLOY_URLS entry, HEAD the URL; if HTTP status is <200 or >=400, file
+#   a `bug` issue (queued for the normal pickup cron). Dedup per project;
+#   marker is cleared once the deploy recovers.
+# ----------------------------------------------------------------------------
+check_deploy_http() {
+  local project="$1"
+  local deploy_url="${DEPLOY_URLS[$project]:-}"
+  [ -n "$deploy_url" ] || return  # No public URL configured — skip
+
+  local http_code
+  http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$deploy_url" 2>/dev/null || echo "000")
+
+  local marker="$STATE_DIR/deploy-down-$project"
+  if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 400 ]; then
+    if [ -f "$marker" ]; then
+      log "$project: deploy still down (HTTP $http_code at $deploy_url) — issue already filed, skipping"
+      return
+    fi
+
+    log "$project: deploy down (HTTP $http_code at $deploy_url) — filing issue"
+    touch "$marker"
+
+    local body
+    body=$(cat <<EOF
+## Deploy health check failure
+
+**URL**: $deploy_url
+**HTTP status**: $http_code
+**Detected**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+
+The production deployment is not responding correctly. Check the hosting
+dashboard (Railway / Cloudflare Pages / etc.) and recent deployments for errors.
+EOF
+)
+    gh issue create --repo "alexsiri7/$project" \
+      --title "Deploy down: $deploy_url returning HTTP $http_code" \
+      --label "bug" \
+      --body "$body" >/dev/null 2>&1 || true
+    return
+  fi
+
+  # Healthy — clear marker if present
+  [ -f "$marker" ] && rm -f "$marker"
+  log "$project: deploy OK (HTTP $http_code at $deploy_url)"
+}
+
+# ----------------------------------------------------------------------------
+# Check 7: Shipped-PR ntfy — announce PRs merged in the last 24h.
+#   Ported from archon/scripts/poll-health.sh (check 4). Only fires when the
+#   deploy URL is configured AND currently healthy (we assume merged code is
+#   live). For each merged PR, pulls linked issue numbers from the body and
+#   emits "Shipped: <repo> #<issue>" for each. Dedup per-PR.
+#   Projects without a DEPLOY_URLS entry are skipped (no live signal).
+# ----------------------------------------------------------------------------
+check_shipped_prs() {
+  local project="$1"
+  local deploy_url="${DEPLOY_URLS[$project]:-}"
+  [ -n "$deploy_url" ] || return
+
+  # Only announce if deploy is currently healthy — avoid claiming "shipped"
+  # when prod is actually down. check_deploy_http already logged status.
+  local http_code
+  http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$deploy_url" 2>/dev/null || echo "000")
+  [ "$http_code" -ge 200 ] && [ "$http_code" -lt 400 ] || return
+
+  local merged
+  merged=$(gh pr list --repo "alexsiri7/$project" --state merged \
+    --json number,title,mergedAt,body \
+    --jq "[.[] | select((.mergedAt | fromdateiso8601) > (now - 86400))]" \
+    2>/dev/null || echo "[]")
+
+  echo "$merged" | jq -c '.[]' 2>/dev/null | while IFS= read -r pr; do
+    [ -n "$pr" ] || continue
+    local pr_num pr_title pr_body
+    pr_num=$(echo "$pr" | jq -r '.number')
+    pr_title=$(echo "$pr" | jq -r '.title')
+    pr_body=$(echo "$pr" | jq -r '.body // ""')
+
+    local marker="$STATE_DIR/shipped-$project-pr$pr_num"
+    [ -f "$marker" ] && continue
+
+    # Extract "Fixes/Closes/Resolves #N" issue references from the PR body
+    local issue_nums
+    issue_nums=$(echo "$pr_body" \
+      | grep -oiE '(fix(es)?|close[sd]?|resolve[sd]?) #[0-9]+' \
+      | grep -oE '[0-9]+' || true)
+
+    if [ -n "$issue_nums" ]; then
+      for issue_num in $issue_nums; do
+        local issue_title
+        issue_title=$(gh issue view "$issue_num" --repo "alexsiri7/$project" \
+          --json title -q '.title' 2>/dev/null || echo "")
+        notify "Shipped: $project #$issue_num" \
+          "$issue_title — deployed to prod via PR #$pr_num" \
+          default rocket
+        log "$project: shipped-ntfy for issue #$issue_num via PR #$pr_num"
+      done
+    else
+      notify "Shipped: $project PR #$pr_num" \
+        "$pr_title — deployed to prod" \
+        default rocket
+      log "$project: shipped-ntfy for PR #$pr_num (no linked issue)"
+    fi
+
+    touch "$marker"
+  done
+}
+
+# ----------------------------------------------------------------------------
 log "=== pipeline health check ==="
 for project in "${REPOS[@]}"; do
   check_main_ci "$project"
   check_prod_deploy "$project"
+  check_pr_ci_retry "$project"
+  check_deploy_http "$project"
+  check_shipped_prs "$project"
 done
 reconcile_zombies
 check_disk
