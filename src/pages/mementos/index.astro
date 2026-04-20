@@ -17,13 +17,13 @@ const mementos = (await getCollection("mementos")).sort(
   <section class="adr-body">
     <div class="wrap-prose">
       <div class="mementos">
-        {mementos.map((d) => (
-          <a class="dec" href={`/mementos/${d.slug}`}>
-            <span class="num">{String(d.data.number).padStart(3, "0")}</span>
-            <span class="title">{d.data.title}</span>
-            <span class="meta-date">{d.data.date.toISOString().slice(0, 10)}</span>
+        {mementos.map((m) => (
+          <a class="dec" href={`/mementos/${m.slug}`}>
+            <span class="num">{String(m.data.number).padStart(3, "0")}</span>
+            <span class="title">{m.data.title}</span>
+            <span class="meta-date">{m.data.date.toISOString().slice(0, 10)}</span>
             <span class="meta-status">
-              <span class={`badge badge-${d.data.status}`}>{d.data.status}</span>
+              <span class={`badge badge-${m.data.status}`}>{m.data.status}</span>
             </span>
           </a>
         ))}
