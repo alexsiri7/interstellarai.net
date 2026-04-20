@@ -2,12 +2,12 @@
 import Layout from "../../layouts/Layout.astro";
 import { getCollection } from "astro:content";
 
-const decisions = (await getCollection("decisions")).sort(
+const mementos = (await getCollection("mementos")).sort(
   (a, b) => a.data.number - b.data.number
 );
 ---
 
-<Layout title="Decisions · InterStellar AI">
+<Layout title="Mementos · InterStellar AI">
   <section class="pf-hero">
     <div class="wrap-prose">
       <h1>Decision log</h1>
@@ -16,9 +16,9 @@ const decisions = (await getCollection("decisions")).sort(
   </section>
   <section class="adr-body">
     <div class="wrap-prose">
-      <div class="decisions">
-        {decisions.map((d) => (
-          <a class="dec" href={`/decisions/${d.slug}`}>
+      <div class="mementos">
+        {mementos.map((d) => (
+          <a class="dec" href={`/mementos/${d.slug}`}>
             <span class="num">{String(d.data.number).padStart(3, "0")}</span>
             <span class="title">{d.data.title}</span>
             <span class="meta-date">{d.data.date.toISOString().slice(0, 10)}</span>

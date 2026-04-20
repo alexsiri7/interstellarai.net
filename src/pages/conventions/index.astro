@@ -16,7 +16,7 @@ const conventions = (await getCollection("conventions")).sort(
   </section>
   <section class="adr-body">
     <div class="wrap-prose">
-      <div class="decisions">
+      <div class="mementos">
         {conventions.map((c) => (
           <a class="dec" href={`/conventions/${c.slug}`}>
             <span class="num">{String(c.data.order).padStart(2, "0")}</span>
