@@ -4,24 +4,24 @@ import { getCollection } from "astro:content";
 
 export async function getStaticPaths() {
   const mementos = await getCollection("mementos");
-  return mementos.map((d) => ({ params: { slug: d.slug }, props: { decision: d } }));
+  return mementos.map((m) => ({ params: { slug: m.slug }, props: { memento: m } }));
 }
 
-const { decision } = Astro.props;
-const { Content } = await decision.render();
-const adrNum = String(decision.data.number).padStart(3, "0");
+const { memento } = Astro.props;
+const { Content } = await memento.render();
+const adrNum = String(memento.data.number).padStart(3, "0");
 ---
 
-<Layout title={`ADR-${adrNum}: ${decision.data.title}`}>
+<Layout title={`ADR-${adrNum}: ${memento.data.title}`}>
   <section class="adr-head">
     <div class="wrap-prose">
       <div class="crumbs"><a href="/mementos">← all mementos</a></div>
-      <h1>ADR-{adrNum}: {decision.data.title}</h1>
+      <h1>ADR-{adrNum}: {memento.data.title}</h1>
       <div class="adr-meta">
-        <span><strong>Status</strong>: {decision.data.status}</span>
-        <span><strong>Date</strong>: {decision.data.date.toISOString().slice(0, 10)}</span>
-        {decision.data.projects && (
-          <span><strong>Applies to</strong>: {decision.data.projects.join(", ")}</span>
+        <span><strong>Status</strong>: {memento.data.status}</span>
+        <span><strong>Date</strong>: {memento.data.date.toISOString().slice(0, 10)}</span>
+        {memento.data.projects && (
+          <span><strong>Applies to</strong>: {memento.data.projects.join(", ")}</span>
         )}
       </div>
     </div>
