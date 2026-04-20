@@ -232,7 +232,10 @@ pick_and_fire() {
   local project="$1"
   local repo_dir="$BASE_DIR/$project"
 
-  # Fetch queued list once, reuse for count + pick. Oldest-first is gh's default.
+  # Fetch queued list once, reuse for count + pick.
+  # Order among queued siblings is NOT a contract — if issue A must run before
+  # issue B, declare A as a `blocked_by` dep of B. Don't rely on filing order,
+  # issue number, or gh's list sort.
   local queued_json
   queued_json=$(gh issue list --repo "alexsiri7/$project" --state open \
     --label "archon:queued" --limit 50 --json number 2>/dev/null || echo "[]")
