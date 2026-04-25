@@ -28,7 +28,10 @@ LOG_PREFIX="[issue-pickup]"
 INGEST_LABELS=("enhancement" "bug")
 
 # Labels archon already manages — presence of any of these means "don't re-queue".
-ARCHON_LABELS=("archon:queued" "archon:in-progress" "archon:done" "archon:failed" "archon:skipped" "archon:blocked")
+ARCHON_LABELS=("archon:queued" "archon:in-progress" "archon:triage-in-progress" "archon:done" "archon:failed" "archon:skipped" "archon:blocked")
+
+# Labels that signal human-only intent — triage must not reclassify these.
+HUMAN_LABELS=("manual-review" "factory-gap" "human-needed" "wontfix" "duplicate" "question")
 
 PROJECTS=("${DEFAULT_PROJECTS[@]}")
 [ $# -gt 0 ] && PROJECTS=("$@")
@@ -47,7 +50,7 @@ SUMMARY_NOTE=""
 
 ensure_labels() {
   local repo="$1"
-  for label in archon:queued archon:in-progress archon:done archon:failed archon:skipped archon:blocked; do
+  for label in archon:queued archon:in-progress archon:triage-in-progress archon:done archon:failed archon:skipped archon:blocked; do
     gh label create "$label" --repo "alexsiri7/$repo" \
       --color "c2e0c6" --description "Archon pipeline state" 2>/dev/null || true
   done
@@ -84,6 +87,83 @@ has_archon_label() {
     echo "$labels" | grep -q "\"$al\"" && return 0
   done
   return 1
+}
+
+has_human_label() {
+  local labels="$1"
+  for hl in "${HUMAN_LABELS[@]}"; do
+    echo "$labels" | grep -q "\"$hl\"" && return 0
+  done
+  return 1
+}
+
+# --- Phase 0.5: auto-triage one issue that has no ingest label ---
+# Picks the oldest untriaged issue (no archon:* and no bug/enhancement label,
+# no human-intent label) and fires archon-triage-issue as a background workflow.
+# One issue per tick, matching the pick_and_fire pattern for fixes.
+# Only called when no fix workflow is already running for this repo (gated in
+# the main loop by checking SUMMARY_ACTION after pick_and_fire).
+auto_triage() {
+  local project="$1"
+  local repo_dir="$BASE_DIR/$project"
+
+  if [ ! -d "$repo_dir/.git" ]; then
+    return
+  fi
+
+  # Don't stack — skip if any archon workflow is already running for this repo.
+  if pgrep -fa "archon workflow run.*--cwd.*$repo_dir" >/dev/null 2>&1; then
+    return
+  fi
+  if pgrep -fa "archon workflow run" 2>/dev/null \
+      | grep -qE "(^|[[:space:]=/])$project([[:space:]/]|\$)"; then
+    return
+  fi
+
+  local issues
+  issues=$(gh issue list --repo "alexsiri7/$project" --state open --limit 100 \
+    --json number,labels,createdAt 2>/dev/null || echo "[]")
+
+  local now_sec; now_sec=$(date +%s)
+  local triage_issue=""
+
+  while IFS= read -r row; do
+    local num labels_json created created_sec age
+    num=$(echo "$row" | jq -r '.number')
+    labels_json=$(echo "$row" | jq -c '[.labels[].name]')
+    created=$(echo "$row" | jq -r '.createdAt')
+    created_sec=$(date -d "$created" +%s 2>/dev/null || echo 0)
+    age=$((now_sec - created_sec))
+
+    [ "$age" -lt 300 ] && continue
+    has_archon_label "$labels_json" && continue
+    echo "$labels_json" | grep -q '"archon:triage-in-progress"' && continue
+
+    local has_ingest=0
+    for il in "${INGEST_LABELS[@]}"; do
+      echo "$labels_json" | grep -q "\"$il\"" && has_ingest=1 && break
+    done
+    [ "$has_ingest" = "1" ] && continue
+
+    has_human_label "$labels_json" && continue
+
+    triage_issue="$num"
+    break
+  done < <(echo "$issues" | jq -c '.[]' 2>/dev/null)
+
+  [ -z "$triage_issue" ] && return
+
+  gh issue edit "$triage_issue" --repo "alexsiri7/$project" \
+    --add-label "archon:triage-in-progress" 2>/dev/null || true
+
+  cd "$repo_dir"
+  mkdir -p .archon-logs
+  local logf=".archon-logs/cron-triage-$triage_issue-$(date +%Y%m%d-%H%M%S).log"
+  CLAUDECODE=0 nohup archon workflow run archon-triage-issue \
+    "triage #$triage_issue" --no-worktree >"$logf" 2>&1 &
+  disown
+  log "$project: triage launched for #$triage_issue (pid=$!, log=$logf)"
+  SUMMARY_ACTION="triage #$triage_issue"
 }
 
 # --- Phase 0: un-stick stale archon:in-progress issues ---
@@ -134,6 +214,15 @@ unstick_stale() {
     local labeled_sec; labeled_sec=$(date -d "$labeled_at" +%s 2>/dev/null || echo 0)
     local age=$((now_sec - labeled_sec))
     if [ "$age" -lt "$STUCK_AGE_SECONDS" ]; then
+      continue
+    fi
+
+    # Don't re-queue issues that a human has explicitly parked (manual-review etc.)
+    local issue_labels
+    issue_labels=$(gh issue view "$num" --repo "alexsiri7/$project" --json labels \
+      --jq '.labels | map(.name) | @json' 2>/dev/null || echo "[]")
+    if has_human_label "$issue_labels"; then
+      log "$project: #$num — skipping re-queue (has human-intent label)"
       continue
     fi
 
@@ -304,6 +393,8 @@ for PROJECT in "${PROJECTS[@]}"; do
   auto_queue "$PROJECT"
   promote_unblocked "$PROJECT"
   pick_and_fire "$PROJECT"
+  # Triage only runs when the fix queue is idle — it fills otherwise-empty ticks.
+  [ "$SUMMARY_ACTION" = "none" ] && auto_triage "$PROJECT"
 
   summary="$PROJECT: queued=$SUMMARY_QUEUED blocked=$SUMMARY_BLOCKED in-progress=$SUMMARY_IN_PROGRESS stale=$SUMMARY_STALE promoted=$SUMMARY_PROMOTED action=$SUMMARY_ACTION"
   [ -n "$SUMMARY_NOTE" ] && summary="$summary ($SUMMARY_NOTE)"
