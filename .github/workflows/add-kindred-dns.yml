@@ -1,0 +1,24 @@
+name: Add Kindred DNS records
+
+on:
+  workflow_dispatch:
+
+jobs:
+  add-dns:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add kindred.interstellarai.net CNAME
+        run: |
+          curl -s -X POST "https://api.cloudflare.com/client/v4/zones/91920269386ee5dc67099d4781da9572/dns_records" \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"type":"CNAME","name":"kindred.interstellarai.net","content":"fq1w7ing.up.railway.app","ttl":1,"proxied":true}' \
+            | jq '{success, result: .result.name, errors}'
+
+      - name: Add mcp.kindred.interstellarai.net CNAME
+        run: |
+          curl -s -X POST "https://api.cloudflare.com/client/v4/zones/91920269386ee5dc67099d4781da9572/dns_records" \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"type":"CNAME","name":"mcp.kindred.interstellarai.net","content":"95kcg00b.up.railway.app","ttl":1,"proxied":true}' \
+            | jq '{success, result: .result.name, errors}'
