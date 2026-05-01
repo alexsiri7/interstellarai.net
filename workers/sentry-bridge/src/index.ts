@@ -31,6 +31,7 @@ const PROJECT_REPO_MAP: Record<string, string> = {
   "word-coach-annie": "alexsiri7/word-coach-annie",
   filmduel: "alexsiri7/filmduel",
   reli: "alexsiri7/Reli",
+  kindred: "alexsiri7/kindred",
   "interstellarai.net": "alexsiri7/interstellarai.net",
 };
 
