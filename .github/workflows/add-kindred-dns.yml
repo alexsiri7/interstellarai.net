@@ -7,18 +7,29 @@ jobs:
   add-dns:
     runs-on: ubuntu-latest
     steps:
-      - name: Add kindred.interstellarai.net CNAME
+      - name: Update kindred.interstellarai.net CNAME
         run: |
-          curl -s -X POST "https://api.cloudflare.com/client/v4/zones/91920269386ee5dc67099d4781da9572/dns_records" \
+          RECORD_ID=$(curl -s "https://api.cloudflare.com/client/v4/zones/91920269386ee5dc67099d4781da9572/dns_records?type=CNAME&name=kindred.interstellarai.net" \
             -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -d '{"type":"CNAME","name":"kindred.interstellarai.net","content":"fq1w7ing.up.railway.app","ttl":1,"proxied":true}' \
-            | jq '{success, result: .result.name, errors}'
+            | jq -r '.result[0].id // empty')
+          if [ -z "$RECORD_ID" ]; then
+            echo "Creating record..."
+            curl -s -X POST "https://api.cloudflare.com/client/v4/zones/91920269386ee5dc67099d4781da9572/dns_records" \
+              -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              -d '{"type":"CNAME","name":"kindred.interstellarai.net","content":"fq1w7ing.up.railway.app","ttl":1,"proxied":true}' \
+              | jq '{success, result: .result.name, content: .result.content, errors}'
+          else
+            echo "Updating record $RECORD_ID..."
+            curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/91920269386ee5dc67099d4781da9572/dns_records/$RECORD_ID" \
+              -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              -d '{"type":"CNAME","name":"kindred.interstellarai.net","content":"fq1w7ing.up.railway.app","ttl":1,"proxied":true}' \
+              | jq '{success, result: .result.name, content: .result.content, errors}'
+          fi
 
-      - name: Add mcp.kindred.interstellarai.net CNAME
+      - name: Verify mcp.kindred.interstellarai.net CNAME
         run: |
-          curl -s -X POST "https://api.cloudflare.com/client/v4/zones/91920269386ee5dc67099d4781da9572/dns_records" \
+          curl -s "https://api.cloudflare.com/client/v4/zones/91920269386ee5dc67099d4781da9572/dns_records?type=CNAME&name=mcp.kindred.interstellarai.net" \
             -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -d '{"type":"CNAME","name":"mcp.kindred.interstellarai.net","content":"95kcg00b.up.railway.app","ttl":1,"proxied":true}' \
-            | jq '{success, result: .result.name, errors}'
+            | jq '{success, records: [.result[] | {name, content, proxied}]}'
