@@ -7,6 +7,7 @@ compatibility_date = "2026-04-18"
 #                          (Settings → Developer Settings → Internal Integrations).
 #                          Used to verify the HMAC-SHA256 webhook signature.
 #   GITHUB_TOKEN         — fine-grained PAT with Issues:write on every repo
-#                          listed in PROJECT_REPO_MAP in src/index.ts. Can
-#                          reuse the same PAT as the feedback worker's
-#                          FEEDBACK_TOKEN if its scopes cover these repos.
+#                          listed in PROJECT_REPO_MAP in src/index.ts. CI
+#                          sources this from the repo secret FEEDBACK_TOKEN
+#                          (shared with the feedback worker); see
+#                          .github/workflows/deploy-sentry-bridge.yml.

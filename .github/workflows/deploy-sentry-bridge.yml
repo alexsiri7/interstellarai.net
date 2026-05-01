@@ -45,4 +45,6 @@ jobs:
             GITHUB_TOKEN
         env:
           SENTRY_CLIENT_SECRET: ${{ secrets.SENTRY_CLIENT_SECRET }}
-          GITHUB_TOKEN: ${{ secrets.SENTRY_BRIDGE_GITHUB_TOKEN }}
+          # Reused from the feedback worker — same fine-grained PAT covers
+          # every repo in PROJECT_REPO_MAP (all under alexsiri7/*).
+          GITHUB_TOKEN: ${{ secrets.FEEDBACK_TOKEN }}
