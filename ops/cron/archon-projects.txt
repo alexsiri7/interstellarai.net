@@ -5,4 +5,5 @@ cosmic-match
 word-coach-annie
 filmduel
 reli
+kindred
 interstellarai.net

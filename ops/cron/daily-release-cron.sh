@@ -11,7 +11,7 @@ set -uo pipefail
 
 export PATH="$HOME/.bun/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
 
-PROJECTS=(reli word-coach-annie filmduel cosmic-match un-reminder interstellarai.net)
+PROJECTS=(reli word-coach-annie filmduel cosmic-match un-reminder kindred interstellarai.net)
 BASE_DIR="/mnt/ext-fast"
 OWNER="alexsiri7"
 LOG_PREFIX="[daily-release]"
