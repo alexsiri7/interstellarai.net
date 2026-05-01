@@ -1,0 +1,33 @@
+name: Fix kindred-mcp DNS (one-shot, delete after run)
+on:
+  workflow_dispatch:
+
+jobs:
+  fix-dns:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get zone ID
+        id: zone
+        run: |
+          ZONE=$(curl -s "https://api.cloudflare.com/client/v4/zones?name=interstellarai.net" \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" | jq -r '.result[0].id')
+          echo "id=$ZONE" >> $GITHUB_OUTPUT
+
+      - name: Create kindred-mcp CNAME
+        run: |
+          curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${{ steps.zone.outputs.id }}/dns_records" \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            --data '{"type":"CNAME","name":"kindred-mcp","content":"q1ttggzr.up.railway.app","proxied":true}' \
+            | jq '{success,errors,result:.result.name}'
+
+      - name: Delete mcp.kindred CNAME
+        run: |
+          REC=$(curl -s "https://api.cloudflare.com/client/v4/zones/${{ steps.zone.outputs.id }}/dns_records?name=mcp.kindred.interstellarai.net" \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" | jq -r '.result[0].id')
+          if [ "$REC" != "null" ] && [ -n "$REC" ]; then
+            curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/${{ steps.zone.outputs.id }}/dns_records/$REC" \
+              -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" | jq '{success,errors}'
+          else
+            echo "Record not found, skipping delete"
+          fi
