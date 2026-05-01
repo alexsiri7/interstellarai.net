@@ -1,0 +1,25 @@
+name: Fix kindred-mcp CNAME to DNS-only (one-shot)
+on:
+  workflow_dispatch:
+
+jobs:
+  fix-dns:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get zone and record ID
+        id: ids
+        run: |
+          ZONE=$(curl -s "https://api.cloudflare.com/client/v4/zones?name=interstellarai.net" \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" | jq -r '.result[0].id')
+          REC=$(curl -s "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records?name=kindred-mcp.interstellarai.net" \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" | jq -r '.result[0].id')
+          echo "zone=$ZONE" >> $GITHUB_OUTPUT
+          echo "rec=$REC" >> $GITHUB_OUTPUT
+
+      - name: Set CNAME to DNS-only (unproxied)
+        run: |
+          curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${{ steps.ids.outputs.zone }}/dns_records/${{ steps.ids.outputs.rec }}" \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            --data '{"type":"CNAME","name":"kindred-mcp","content":"q1ttggzr.up.railway.app","proxied":false}' \
+            | jq '{success,errors,result:{name:.result.name,proxied:.result.proxied}}'
