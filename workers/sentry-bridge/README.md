@@ -101,11 +101,12 @@ CI: push to `main` with changes under `workers/sentry-bridge/**` triggers the
 
 - `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` (already set)
 - `SENTRY_CLIENT_SECRET` (from the Sentry Internal Integration)
-- `SENTRY_BRIDGE_GITHUB_TOKEN` — PAT with Issues:write on every repo in the map.
-  Named with the `SENTRY_BRIDGE_` prefix because GitHub Actions reserves the
-  plain `GITHUB_TOKEN` secret name for the auto-provisioned per-workflow token.
-  CI pushes it into the Worker as the `GITHUB_TOKEN` binding. Reuse the same
-  PAT value as the feedback worker's `FEEDBACK_TOKEN` if its scopes cover the
-  mapped repos.
+- `FEEDBACK_TOKEN` — reused from the feedback worker. CI pushes its value into
+  this Worker as the `GITHUB_TOKEN` binding (renamed at deploy time because
+  GitHub Actions reserves the plain `GITHUB_TOKEN` secret name for the
+  auto-provisioned per-workflow token). The PAT must have Issues:write on
+  every repo in `PROJECT_REPO_MAP`; if a new mapped repo is outside that
+  scope, regenerate `FEEDBACK_TOKEN` with broader scope rather than minting
+  a sentry-specific PAT.
 
 Manual: `cd workers/sentry-bridge && npx wrangler deploy`.
