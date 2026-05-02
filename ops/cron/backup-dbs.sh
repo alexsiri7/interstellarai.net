@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Backup Annie (Supabase PostgreSQL → SQLite) and Reli (SQLite)
+# Backup Annie (Supabase PostgreSQL → SQLite), Reli (SQLite), FilmDuel, Kindred (pg_dump)
 # - Local: /mnt/steam-slow/backups/ (7-day rotation)
 # - Remote: Google Drive via rclone (if configured)
 
@@ -13,6 +13,7 @@ SECRETS_FILE="${ARCHON_CRON_SECRETS:-$HOME/.config/archon-cron/secrets.env}"
 : "${ANNIE_DB_URL:?ANNIE_DB_URL not set — populate $SECRETS_FILE}"
 : "${RELI_DB_URL:?RELI_DB_URL not set — populate $SECRETS_FILE}"
 : "${FILMDUEL_DB_URL:?FILMDUEL_DB_URL not set — populate $SECRETS_FILE}"
+: "${KINDRED_DB_URL:?KINDRED_DB_URL not set — populate $SECRETS_FILE}"
 
 BACKUP_ROOT="/mnt/steam-slow/backups"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
@@ -68,6 +69,22 @@ else
     log "ERROR: FilmDuel pg_dump failed"
 fi
 
+# --- Kindred (Supabase PostgreSQL → pg_dump) ---
+KINDRED_BACKUP_DIR="$BACKUP_ROOT/kindred"
+mkdir -p "$KINDRED_BACKUP_DIR"
+
+KINDRED_OUT="$KINDRED_BACKUP_DIR/kindred-${TIMESTAMP}.sql.gz"
+if pg_dump "$KINDRED_DB_URL" --no-owner --no-acl 2>&1 | gzip > "$KINDRED_OUT"; then
+    SIZE=$(du -h "$KINDRED_OUT" | cut -f1)
+    ENTRIES=$(psql "$KINDRED_DB_URL" -t -c "SELECT count(*) FROM entries" 2>/dev/null | tr -d ' ' || echo "?")
+    log "Kindred backed up: $KINDRED_OUT ($SIZE, $ENTRIES entries)"
+    if [ "$ENTRIES" = "0" ]; then
+        log "WARNING: Kindred backup has 0 entries — possible data loss!"
+    fi
+else
+    log "ERROR: Kindred pg_dump failed"
+fi
+
 # --- Rotate old backups ---
 find "$ANNIE_BACKUP_DIR" -name "*.db" -mtime +$KEEP_DAYS -delete 2>/dev/null && \
     log "Rotated Annie backups older than ${KEEP_DAYS} days" || true
@@ -75,12 +92,15 @@ find "$RELI_BACKUP_DIR" -name "*.db" -mtime +$KEEP_DAYS -delete 2>/dev/null && \
     log "Rotated Reli backups older than ${KEEP_DAYS} days" || true
 find "$FILMDUEL_BACKUP_DIR" -name "*.sql.gz" -mtime +$KEEP_DAYS -delete 2>/dev/null && \
     log "Rotated FilmDuel backups older than ${KEEP_DAYS} days" || true
+find "$KINDRED_BACKUP_DIR" -name "*.sql.gz" -mtime +$KEEP_DAYS -delete 2>/dev/null && \
+    log "Rotated Kindred backups older than ${KEEP_DAYS} days" || true
 
 # --- Google Drive sync (if rclone configured) ---
 if command -v rclone &>/dev/null && rclone listremotes 2>/dev/null | grep -q "^gdrive:"; then
     rclone copy "$ANNIE_BACKUP_DIR" "$RCLONE_REMOTE/annie" --max-age 2d -q
     rclone copy "$RELI_BACKUP_DIR" "$RCLONE_REMOTE/reli" --max-age 2d -q
     rclone copy "$FILMDUEL_BACKUP_DIR" "$RCLONE_REMOTE/filmduel" --max-age 2d -q
+    rclone copy "$KINDRED_BACKUP_DIR" "$RCLONE_REMOTE/kindred" --max-age 2d -q
     log "Synced to Google Drive ($RCLONE_REMOTE)"
 else
     log "SKIP: rclone/gdrive not configured, local backup only"
