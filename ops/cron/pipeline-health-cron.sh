@@ -47,6 +47,31 @@ declare -A DEPLOY_URLS=(
   ["interstellarai.net"]="https://www.interstellarai.net"
 )
 
+declare -A GITHUB_PROJECTS=(
+  ["word-coach-annie"]="PVT_kwHOAANDVc4BV190"
+  ["reli"]="PVT_kwHOAANDVc4BV191"
+)
+
+# Add an issue to the GitHub Project for its repo, if one is mapped.
+# Args: $1=repo (owner/name or just name), $2=issue_num
+add_to_project() {
+  local repo="$1" issue_num="$2"
+  local slug="${repo##*/}"  # strip "owner/" prefix if present
+  local project_id="${GITHUB_PROJECTS[$slug]:-}"
+  [ -z "$project_id" ] && return 0
+  local node_id
+  node_id=$(gh api "repos/alexsiri7/$slug/issues/$issue_num" \
+    --jq '.node_id' 2>/dev/null || echo "")
+  [ -z "$node_id" ] && return 0
+  gh api graphql -f query="
+  mutation {
+    addProjectV2ItemById(input: {
+      projectId: \"$project_id\"
+      contentId: \"$node_id\"
+    }) { item { id } }
+  }" >/dev/null 2>&1 || true
+}
+
 mkdir -p "$STATE_DIR"
 mkdir -p "$STATE_DIR/prciretry" "$STATE_DIR/escalated" \
          "$STATE_DIR/main-ci" "$STATE_DIR/escalated-main"
@@ -131,6 +156,7 @@ EOF
   issue_num=$(echo "$issue_url" | grep -oE '[0-9]+$')
   if [ -n "$issue_num" ]; then
     log "$repo: filed manual-review issue #$issue_num for $kind at $sha ($issue_url)"
+    add_to_project "$repo" "$issue_num"
   else
     log "$repo: failed to file manual-review issue for $kind at $sha"
   fi
@@ -301,6 +327,8 @@ EOF
     return
   fi
 
+  add_to_project "$project" "$issue_num"
+
   mkdir -p "$repo_dir/.archon-logs"
   local logf="$repo_dir/.archon-logs/health-ci-fix-${sha:0:8}-$(date +%Y%m%d-%H%M%S).log"
   (
@@ -374,6 +402,21 @@ check_prod_deploy() {
       return
     fi
 
+    # Per-project cooldown (2h): prevents re-firing when Archon closes the issue
+    # by landing a trivial commit (new SHA = new marker = loop). Infrastructure
+    # failures like expired tokens can't be fixed with code commits.
+    local cooldown_marker="$STATE_DIR/prod-deploy-cooldown-$project"
+    local now_epoch; now_epoch=$(date +%s)
+    if [ -f "$cooldown_marker" ]; then
+      local last_filed; last_filed=$(cat "$cooldown_marker" 2>/dev/null || echo 0)
+      local elapsed=$(( now_epoch - last_filed ))
+      if [ "$elapsed" -lt 7200 ]; then
+        log "$project: prod deploy FAILED at ${deploy_sha:0:10} — cooldown active (${elapsed}s < 2h since last issue filed), skipping"
+        touch "$marker"
+        return
+      fi
+    fi
+
     local existing
     existing=$(gh issue list --repo "alexsiri7/$project" --state open \
       --search "Prod deploy in:title" --json number,labels \
@@ -418,6 +461,7 @@ EOF
     fi
 
     touch "$marker"
+    echo "$now_epoch" > "$cooldown_marker"
     # No ntfy — archon has been fired and will auto-fix. If it can't,
     # the issue stays open and pipeline-health re-tries on the next tick.
 
@@ -539,6 +583,75 @@ autoclean_root() {
     log "autoclean: journalctl --user --vacuum-time=7d"
     journalctl --user --vacuum-time=7d >/dev/null 2>&1 || true
   fi
+  autoclean_stale_worktrees
+  autoclean_tmp
+}
+
+# Remove stale Archon worktrees from ~/.archon/workspaces whose branch has no
+# open PR. Covers the retry-loop accumulation pattern (hundreds of failed task
+# dirs from a broken archon period). Prunes git metadata after deletion.
+autoclean_stale_worktrees() {
+  for repo_dir in "$BASE_DIR"/*/; do
+    [ -d "$repo_dir/.git" ] || continue
+    local project; project=$(basename "$repo_dir")
+
+    # One API call per repo to get all open PR branches.
+    local open_branches
+    open_branches=$(gh pr list --repo "alexsiri7/$project" --state open \
+      --json headRefName --jq '.[].headRefName' 2>/dev/null || echo "")
+
+    local removed=0
+    # Worktrees live under workspaces/ext-fast/<project>/ and workspaces/alexsiri7/<project>/
+    local wt_base
+    for wt_base in \
+      "$HOME/.archon/workspaces/ext-fast/$project/worktrees/archon" \
+      "$HOME/.archon/workspaces/alexsiri7/$project/worktrees/archon"; do
+      [ -d "$wt_base" ] || continue
+      while IFS= read -r wt_name; do
+        [[ "$wt_name" == task-archon-* ]] || continue
+        local wt_path="$wt_base/$wt_name"
+        local branch="archon/$wt_name"
+        # Keep if there is an open PR on this branch.
+        if echo "$open_branches" | grep -qxF "$branch"; then
+          continue
+        fi
+        # Keep if modified in the last 4h — task may be in-progress but pre-PR.
+        if find "$wt_path" -maxdepth 0 -mmin -240 2>/dev/null | grep -q .; then
+          continue
+        fi
+        rm -rf "$wt_path" 2>/dev/null || true
+        removed=$((removed + 1))
+      done < <(ls "$wt_base" 2>/dev/null)
+    done
+
+    if [ "$removed" -gt 0 ]; then
+      git -C "$repo_dir" worktree prune --expire now 2>/dev/null || true
+      log "autoclean: pruned $removed stale worktrees for $project"
+    fi
+  done
+}
+
+# Remove known build/test artifacts from /tmp that are older than 1 day.
+# Patterns are scoped to avoid touching unrelated files.
+autoclean_tmp() {
+  local patterns=(
+    "flutter-sdk"         "flutter_tools.*"
+    "*-bd-tests-*"        "bd-testbin-*"
+    "bd-init-test-*"      "bd-embedded-init-test-*"
+    "go-build*"           "*-venv"
+    "pip-unpack-*"        "litertlm-*.aar"
+    "litert-*.aar"        "llama-cpp.tar.gz"
+    "llama-cpp"
+  )
+  local total=0
+  for pat in "${patterns[@]}"; do
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      local sz; sz=$(du -sb "$f" 2>/dev/null | awk '{print $1}' || echo 0)
+      rm -rf "$f" 2>/dev/null && total=$((total + sz)) || true
+    done < <(find /tmp -maxdepth 1 -name "$pat" -mtime +1 2>/dev/null)
+  done
+  [ "$total" -gt 0 ] && log "autoclean: freed $((total / 1048576))MB from /tmp stale artifacts"
 }
 
 check_disk() {
@@ -749,6 +862,92 @@ check_pr_ci_retry() {
 }
 
 # ----------------------------------------------------------------------------
+# Check 5b: Stuck archon PRs — open, CI-clean (not caught by check_pr_ci_retry),
+#   but not merged/updated for 2+ hours. Fires archon-pr-maintenance to unblock.
+#   Covers cases where pr-maintenance-cron has a gap (e.g. draft+conflicting were
+#   invisible until that script was fixed). Dedup by (project, PR#, head SHA).
+# ----------------------------------------------------------------------------
+check_stuck_prs() {
+  local project="$1"
+  local repo_dir="$BASE_DIR/$project"
+  [ -d "$repo_dir/.git" ] || return
+
+  local now_epoch; now_epoch=$(date +%s)
+  local stale_secs=7200  # 2 hours
+
+  # ISO cutoff: any PR last updated before this is considered stuck.
+  local cutoff_iso
+  cutoff_iso=$(date -u -d "@$((now_epoch - stale_secs))" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "")
+  [ -n "$cutoff_iso" ] || return
+
+  # Open archon PRs that:
+  #   - are not drafts (drafts handled by pr-maintenance-cron Phase 0)
+  #   - are not CLEAN (would be merged by Phase 1)
+  #   - are not BLOCKED (CI failing, caught by check_pr_ci_retry)
+  #   - haven't been updated in >2h
+  local stuck_prs
+  stuck_prs=$(gh pr list --repo "alexsiri7/$project" --state open \
+    --json number,title,headRefName,headRefOid,isDraft,updatedAt,mergeStateStatus \
+    --jq --arg cutoff "$cutoff_iso" \
+    '[.[] | select(.headRefName | startswith("archon/"))
+          | select(.isDraft == false)
+          | select(.mergeStateStatus != "CLEAN")
+          | select(.mergeStateStatus != "BLOCKED")
+          | select(.updatedAt < $cutoff)
+          | [(.number|tostring), .headRefOid, .mergeStateStatus, .title]
+          | @tsv] | .[]' \
+    2>/dev/null || echo "")
+
+  [ -n "$stuck_prs" ] || return
+
+  mkdir -p "$STATE_DIR/stuck-pr"
+
+  while IFS=$'\t' read -r pr_num pr_sha merge_state pr_title; do
+    [ -n "$pr_num" ] || continue
+    [ -n "$pr_sha" ] || continue
+
+    local marker="$STATE_DIR/stuck-pr/$project-pr$pr_num"
+    local decision action attempts
+    decision=$(sha_attempt_decide "$marker" "$STATE_DIR/escalated" \
+      "stuck-$project-pr$pr_num" "$pr_sha")
+    action="${decision%% *}"
+    attempts="${decision##* }"
+
+    case "$action" in
+      SKIP)
+        log "$project: PR #$pr_num stuck ($merge_state) at ${pr_sha:0:10} — MAX_ATTEMPTS reached, backed off"
+        continue
+        ;;
+      SKIP_NTFY)
+        log "$project: PR #$pr_num stuck ($merge_state) at ${pr_sha:0:10} — MAX_ATTEMPTS=$MAX_ATTEMPTS exhausted, ntfying"
+        notify "factory stuck: $project PR #$pr_num ($merge_state)" \
+          "PR #$pr_num open >2h, mergeState=$merge_state, pr-maintenance not making progress" \
+          high warning
+        file_stuck_issue "alexsiri7/$project" "stuck-pr" "$pr_sha" \
+          "$project PR #$pr_num stuck ($merge_state)" \
+          "https://github.com/alexsiri7/$project/pull/$pr_num" \
+          "$MAX_ATTEMPTS" \
+          "$repo_dir/.archon-logs/"
+        continue
+        ;;
+    esac
+
+    log "$project: PR #$pr_num stuck ($merge_state) at ${pr_sha:0:10} — firing archon-pr-maintenance (attempt $attempts/$MAX_ATTEMPTS)"
+
+    mkdir -p "$repo_dir/.archon-logs"
+    local logf="$repo_dir/.archon-logs/health-stuck-pr${pr_num}-$(date +%Y%m%d-%H%M%S).log"
+    (
+      cd "$repo_dir"
+      CLAUDECODE=0 nohup archon workflow run archon-pr-maintenance \
+        "PR #$pr_num" \
+        > "$logf" 2>&1 &
+      disown
+    )
+    log "$project: archon-pr-maintenance fired for PR #$pr_num (log $logf)"
+  done <<< "$stuck_prs"
+}
+
+# ----------------------------------------------------------------------------
 # Check 6: Prod deploy HTTP health.
 #   Ported from archon/scripts/poll-health.sh (check 3). For each project with
 #   a DEPLOY_URLS entry, HEAD the URL; if HTTP status is <200 or >=400, file
@@ -895,6 +1094,7 @@ for project in "${REPOS[@]}"; do
   check_main_ci "$project"
   check_prod_deploy "$project"
   check_pr_ci_retry "$project"
+  check_stuck_prs "$project"
   check_deploy_http "$project"
   check_shipped_prs "$project"
   sweep_stale_labels "$project"
