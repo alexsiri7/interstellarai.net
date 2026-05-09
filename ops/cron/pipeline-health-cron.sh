@@ -41,7 +41,7 @@ LOG_PREFIX="[pipeline-health]"
 # are subject to HTTP health checks + shipped-PR ntfys. Keep in sync with
 # deploy workflows / ntfy steps in each repo's .github/workflows/.
 declare -A DEPLOY_URLS=(
-  ["filmduel"]="https://filmduel.up.railway.app"
+  ["filmduel"]="https://filmduel.interstellarai.net"
   ["word-coach-annie"]="https://annie.interstellarai.net/api/health"
   ["reli"]="https://reli.interstellarai.net"
   ["interstellarai.net"]="https://www.interstellarai.net"
