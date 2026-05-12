@@ -3,7 +3,7 @@ id: "009"
 title: "Multi-project portfolio expansion"
 status: "in_progress"
 github_issue: 21
-updated: 2026-05-12
+updated: "2026-05-12"
 ---
 
 ## Why

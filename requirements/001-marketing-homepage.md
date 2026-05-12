@@ -2,7 +2,7 @@
 id: "001"
 title: "Marketing homepage"
 status: "done"
-updated: 2026-05-12
+updated: "2026-05-12"
 ---
 
 ## Why

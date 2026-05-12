@@ -3,7 +3,7 @@ id: "002"
 title: "Projects catalog page"
 status: "done"
 github_issue: 5
-updated: 2026-05-12
+updated: "2026-05-12"
 ---
 
 ## Why

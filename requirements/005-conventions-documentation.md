@@ -3,7 +3,7 @@ id: "005"
 title: "Conventions documentation"
 status: "done"
 github_issue: 10
-updated: 2026-05-12
+updated: "2026-05-12"
 ---
 
 ## Why

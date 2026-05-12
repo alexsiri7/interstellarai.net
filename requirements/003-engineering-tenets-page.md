@@ -2,7 +2,7 @@
 id: "003"
 title: "Engineering tenets page"
 status: "done"
-updated: 2026-05-12
+updated: "2026-05-12"
 ---
 
 ## Why

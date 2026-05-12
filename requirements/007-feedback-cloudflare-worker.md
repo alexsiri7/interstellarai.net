@@ -3,7 +3,7 @@ id: "007"
 title: "Feedback Cloudflare Worker"
 status: "done"
 github_issue: 4
-updated: 2026-05-12
+updated: "2026-05-12"
 ---
 
 ## Why

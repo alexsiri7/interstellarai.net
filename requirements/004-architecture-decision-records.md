@@ -3,7 +3,7 @@ id: "004"
 title: "Architecture Decision Records (Mementos)"
 status: "done"
 github_issue: 15
-updated: 2026-05-12
+updated: "2026-05-12"
 ---
 
 ## Why

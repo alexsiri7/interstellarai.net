@@ -3,7 +3,7 @@ id: "006"
 title: "Cloudflare Pages deployment pipeline"
 status: "done"
 github_issue: 3
-updated: 2026-05-12
+updated: "2026-05-12"
 ---
 
 ## Why

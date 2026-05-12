@@ -3,7 +3,7 @@ id: "008"
 title: "Sentry bridge Cloudflare Worker"
 status: "done"
 github_issue: 7
-updated: 2026-05-12
+updated: "2026-05-12"
 ---
 
 ## Why
