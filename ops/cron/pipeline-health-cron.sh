@@ -607,9 +607,8 @@ autoclean_stale_worktrees() {
       "$HOME/.archon/workspaces/ext-fast/$project/worktrees/archon" \
       "$HOME/.archon/workspaces/alexsiri7/$project/worktrees/archon"; do
       [ -d "$wt_base" ] || continue
-      while IFS= read -r wt_name; do
-        [[ "$wt_name" == task-archon-* ]] || continue
-        local wt_path="$wt_base/$wt_name"
+      while IFS= read -r wt_path; do
+        local wt_name; wt_name=$(basename "$wt_path")
         local branch="archon/$wt_name"
         # Keep if there is an open PR on this branch.
         if echo "$open_branches" | grep -qxF "$branch"; then
@@ -621,7 +620,7 @@ autoclean_stale_worktrees() {
         fi
         rm -rf "$wt_path" 2>/dev/null || true
         removed=$((removed + 1))
-      done < <(ls "$wt_base" 2>/dev/null)
+      done < <(find "$wt_base" -maxdepth 1 -type d -name 'task-archon-*' 2>/dev/null)
     done
 
     if [ "$removed" -gt 0 ]; then
@@ -647,7 +646,7 @@ autoclean_tmp() {
   for pat in "${patterns[@]}"; do
     while IFS= read -r f; do
       [ -n "$f" ] || continue
-      local sz; sz=$(du -sb "$f" 2>/dev/null | awk '{print $1}' || echo 0)
+      local sz; sz=$(du -sb "$f" 2>/dev/null | cut -f1 || echo 0)
       rm -rf "$f" 2>/dev/null && total=$((total + sz)) || true
     done < <(find /tmp -maxdepth 1 -name "$pat" -mtime +1 2>/dev/null)
   done
