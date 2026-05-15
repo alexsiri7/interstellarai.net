@@ -644,12 +644,18 @@ autoclean_stale_worktrees() {
 # Patterns are scoped to avoid touching unrelated files.
 autoclean_tmp() {
   local patterns=(
-    "flutter-sdk"         "flutter_tools.*"
-    "*-bd-tests-*"        "bd-testbin-*"
-    "bd-init-test-*"      "bd-embedded-init-test-*"
-    "go-build*"           "*-venv"
-    "pip-unpack-*"        "litertlm-*.aar"
-    "litert-*.aar"        "llama-cpp.tar.gz"
+    "flutter-sdk"
+    "flutter_tools.*"
+    "*-bd-tests-*"
+    "bd-testbin-*"
+    "bd-init-test-*"
+    "bd-embedded-init-test-*"
+    "go-build*"
+    "*-venv"
+    "pip-unpack-*"
+    "litertlm-*.aar"
+    "litert-*.aar"
+    "llama-cpp.tar.gz"
     "llama-cpp"
   )
   local total=0
