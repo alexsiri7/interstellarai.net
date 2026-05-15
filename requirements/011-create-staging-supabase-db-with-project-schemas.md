@@ -1,6 +1,6 @@
 ---
 created: '2026-05-15'
-github_issue: null
+github_issue: 25
 id: '011'
 status: idea
 title: Create staging Supabase DB with project schemas
@@ -17,4 +17,4 @@ Create a new Supabase instance called "staging". Inside it, create one schema pe
 
 ## Issues
 
-_None yet._
+- #25 — Create staging Supabase DB with project schemas and roles
