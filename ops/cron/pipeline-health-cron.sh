@@ -10,6 +10,8 @@
 #        - Else → fire archon-assist diagnostic (dedup: 2h cooldown)
 #   6. Open archon PRs with failed CI → fire archon-assist to diagnose + fix
 #      (dedup by PR number, reset when PR merges/closes)
+#  6b. Staging deploy HTTP health → ntfy operator if staging URL returns non-2xx/3xx
+#      (informational only, no issue filed; dedup per-project in staging-health/ subdir)
 #   7. Prod deploy HTTP health → file bug issue if deploy URL returns non-2xx/3xx
 #      (dedup per-project, cleared on recovery)
 #   8. Shipped-PR ntfy → emit "Shipped: repo #issue" for PRs that closed issues
