@@ -48,6 +48,12 @@ declare -A DEPLOY_URLS=(
   ["lachesis"]="https://lachesis.interstellarai.net/healthz"
 )
 
+# Staging deploy URLs — subset of projects that have verified staging environments.
+# Health checks here detect staging regressions before they block prod gates.
+declare -A STAGING_DEPLOY_URLS=(
+  ["filmduel"]="https://filmduel-staging.up.railway.app"
+)
+
 declare -A GITHUB_PROJECTS=(
   ["word-coach-annie"]="PVT_kwHOAANDVc4BV190"
   ["reli"]="PVT_kwHOAANDVc4BV191"
@@ -75,7 +81,8 @@ add_to_project() {
 
 mkdir -p "$STATE_DIR"
 mkdir -p "$STATE_DIR/prciretry" "$STATE_DIR/escalated" \
-         "$STATE_DIR/main-ci" "$STATE_DIR/escalated-main"
+         "$STATE_DIR/main-ci" "$STATE_DIR/escalated-main" \
+         "$STATE_DIR/staging-health"
 
 # Max archon-remediation attempts against a single head SHA before we stop
 # re-firing and ntfy the operator that the factory is stuck.
@@ -997,6 +1004,41 @@ EOF
 }
 
 # ----------------------------------------------------------------------------
+# Check 6b: Staging deploy HTTP health.
+#   Same as check_deploy_http but for STAGING_DEPLOY_URLS. Failures are logged
+#   and ntfy'd but do NOT file issues — staging outages are informational, not
+#   pipeline-blocking. Dedup per project in staging-health/ subdirectory.
+# ----------------------------------------------------------------------------
+check_staging_deploy_http() {
+  local project="$1"
+  local staging_url="${STAGING_DEPLOY_URLS[$project]:-}"
+  [ -n "$staging_url" ] || return  # No staging URL configured — skip
+
+  local http_code
+  http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$staging_url" 2>/dev/null || echo "000")
+
+  local marker="$STATE_DIR/staging-health/deploy-down-$project"
+  if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 400 ]; then
+    if [ -f "$marker" ]; then
+      log "$project: staging deploy still down (HTTP $http_code at $staging_url) — already notified, skipping"
+      return
+    fi
+
+    log "$project: staging deploy down (HTTP $http_code at $staging_url) — notifying"
+    touch "$marker"
+
+    notify "Staging down: $project" \
+      "Staging deploy at $staging_url returning HTTP $http_code" \
+      default warning
+    return
+  fi
+
+  # Healthy — clear marker if present
+  [ -f "$marker" ] && rm -f "$marker"
+  log "$project: staging deploy OK (HTTP $http_code at $staging_url)"
+}
+
+# ----------------------------------------------------------------------------
 # Check 7: Shipped-PR ntfy — announce PRs merged in the last 24h.
 #   Ported from archon/scripts/poll-health.sh (check 4). Only fires when the
 #   deploy URL is configured AND currently healthy (we assume merged code is
@@ -1096,6 +1138,7 @@ for project in "${REPOS[@]}"; do
   check_pr_ci_retry "$project"
   check_stuck_prs "$project"
   check_deploy_http "$project"
+  check_staging_deploy_http "$project"
   check_shipped_prs "$project"
   sweep_stale_labels "$project"
 done

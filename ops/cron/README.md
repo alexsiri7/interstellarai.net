@@ -20,6 +20,7 @@ $ARCHON_CRON_SECRETS   (default: ~/.config/archon-cron/secrets.env, chmod 600)
 Required keys (see individual scripts for which ones each uses):
 
 - `ANNIE_DB_URL`, `RELI_DB_URL`, `FILMDUEL_DB_URL` — Supabase connection strings used by `backup-dbs.sh`.
+- `FILMDUEL_STAGING_DB_URL` — FilmDuel staging Supabase connection string. Used by `pipeline-health-cron.sh` for staging health checks.
 - `NTFY_TOPIC` — private ntfy.sh topic for notifications. No fallback default; scripts fail loud if missing.
 
 Set perms: `chmod 600 ~/.config/archon-cron/secrets.env`.
