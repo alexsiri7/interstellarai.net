@@ -1,6 +1,6 @@
 ---
 created: '2026-05-15'
-github_issue: null
+github_issue: 26
 id: '012'
 status: idea
 title: Migrate Annie to consolidated DB (prod + staging schemas)
@@ -17,4 +17,4 @@ Take an extra manual backup of Annie's prod and staging Supabase DBs before touc
 
 ## Issues
 
-_None yet._
+- #26 — Migrate Annie to consolidated DB (prod + staging)
