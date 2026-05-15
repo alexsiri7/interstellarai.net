@@ -1,6 +1,6 @@
 ---
 created: '2026-05-15'
-github_issue: null
+github_issue: 29
 id: '015'
 status: idea
 title: Migrate Kindred to consolidated DB
@@ -17,4 +17,4 @@ Take an extra manual backup of Kindred's Supabase DB. Create kindred schema and 
 
 ## Issues
 
-_None yet._
+- #29 — Migrate Kindred to consolidated DB
