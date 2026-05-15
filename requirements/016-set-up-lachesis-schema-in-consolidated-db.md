@@ -1,6 +1,6 @@
 ---
 created: '2026-05-15'
-github_issue: null
+github_issue: 30
 id: '016'
 status: idea
 title: Set up Lachesis schema in consolidated DB
@@ -17,4 +17,4 @@ Lachesis is already using the default DB but without a proper schema or dedicate
 
 ## Issues
 
-_None yet._
+- #30 — Set up Lachesis schema isolation in consolidated DB
