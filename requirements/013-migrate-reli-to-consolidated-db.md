@@ -1,6 +1,6 @@
 ---
 created: '2026-05-15'
-github_issue: null
+github_issue: 27
 id: '013'
 status: idea
 title: Migrate Reli to consolidated DB
@@ -17,4 +17,4 @@ Take an extra manual backup of Reli's Supabase DB. Create reli schema and dedica
 
 ## Issues
 
-_None yet._
+- #27 — Migrate Reli to consolidated DB
