@@ -2,7 +2,7 @@
 created: '2026-05-15'
 github_issue: 24
 id: '010'
-status: idea
+status: planned
 title: 'Consolidated Supabase architecture: prod + staging DBs with per-project schemas'
 updated: '2026-05-15'
 ---
@@ -13,8 +13,7 @@ Each project currently has its own Supabase instance, incurring per-DB costs. Co
 
 ## What
 
-Two Supabase instances: "default" (prod, already exists) and "staging" (to be created). Each contains one Postgres schema per project: annie, reli, filmduel, kindred, lachesis. Each project gets a dedicated Postgres role with GRANT only on its own schema(s), so no project can accidentally access another's data. Staging mirrors prod schema structure exactly. All projects must migrate to this architecture.
-
+Two Supabase instances already exist: prod and staging. Each should contain one Postgres schema per project: annie, reli, filmduel, kindred, lachesis. Each project gets a dedicated Postgres role with GRANT only on its own schema(s), so no project can accidentally access another's data. Staging mirrors prod schema structure exactly. All projects must migrate to this architecture.
 ## Issues
 
 - #24 — Consolidated Supabase architecture: prod + staging DBs with per-project schemas
