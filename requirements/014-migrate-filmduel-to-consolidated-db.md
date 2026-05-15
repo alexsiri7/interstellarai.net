@@ -1,6 +1,6 @@
 ---
 created: '2026-05-15'
-github_issue: null
+github_issue: 28
 id: '014'
 status: idea
 title: Migrate FilmDuel to consolidated DB
@@ -17,4 +17,4 @@ Take an extra manual backup of FilmDuel's Supabase DB. Create filmduel schema an
 
 ## Issues
 
-_None yet._
+- #28 — Migrate FilmDuel to consolidated DB
