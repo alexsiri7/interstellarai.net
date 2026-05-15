@@ -1,6 +1,6 @@
 ---
 created: '2026-05-15'
-github_issue: null
+github_issue: 24
 id: '010'
 status: idea
 title: 'Consolidated Supabase architecture: prod + staging DBs with per-project schemas'
@@ -17,4 +17,4 @@ Two Supabase instances: "default" (prod, already exists) and "staging" (to be cr
 
 ## Issues
 
-_None yet._
+- #24 — Consolidated Supabase architecture: prod + staging DBs with per-project schemas
