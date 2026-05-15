@@ -55,6 +55,7 @@ declare -A DEPLOY_URLS=(
 # Health checks here detect staging regressions before they block prod gates.
 declare -A STAGING_DEPLOY_URLS=(
   ["filmduel"]="https://filmduel-staging.up.railway.app"
+  ["reli"]="https://reli-staging.up.railway.app"
 )
 
 declare -A GITHUB_PROJECTS=(
