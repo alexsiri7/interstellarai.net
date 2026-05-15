@@ -1,6 +1,6 @@
 ---
 created: '2026-05-15'
-github_issue: null
+github_issue: 31
 id: '017'
 status: idea
 title: Staging environment gates all production deployments
@@ -17,4 +17,9 @@ Every project must have a staging deployment mirroring prod. No code, migration,
 
 ## Issues
 
-_None yet._
+- #31 — Set up and verify Annie staging deployment
+- #32 — Set up and verify Reli staging deployment
+- #33 — Set up and verify FilmDuel staging deployment
+- #34 — Set up and verify Kindred staging deployment
+- #35 — Set up and verify Lachesis staging deployment
+- #36 — Document staging → prod promotion process
