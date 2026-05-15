@@ -45,6 +45,7 @@ declare -A DEPLOY_URLS=(
   ["word-coach-annie"]="https://annie.interstellarai.net/api/health"
   ["reli"]="https://reli.interstellarai.net"
   ["interstellarai.net"]="https://www.interstellarai.net"
+  ["lachesis"]="https://lachesis.interstellarai.net/healthz"
 )
 
 declare -A GITHUB_PROJECTS=(
