@@ -2,9 +2,9 @@
 created: '2026-05-15'
 github_issue: 24
 id: '010'
-status: planned
+status: done
 title: 'Consolidated Supabase architecture: prod + staging DBs with per-project schemas'
-updated: '2026-05-15'
+updated: '2026-05-16'
 ---
 
 ## Why
