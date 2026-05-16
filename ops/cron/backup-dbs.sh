@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Backup Annie, Reli (Supabase PostgreSQL → SQLite), FilmDuel, Kindred, Lachesis (pg_dump)
+# Backup Annie (Supabase PostgreSQL → SQLite), Reli, FilmDuel, Kindred, Lachesis (pg_dump)
 # - Local: /mnt/steam-slow/backups/ (7-day rotation)
 # - Remote: Google Drive via rclone (if configured)
 
@@ -47,17 +47,20 @@ else
     log "ERROR: Annie Supabase export failed"
 fi
 
-# --- Reli (Supabase PostgreSQL → SQLite export) ---
+# --- Reli (Supabase PostgreSQL → pg_dump, schema-scoped) ---
 RELI_BACKUP_DIR="$BACKUP_ROOT/reli"
 mkdir -p "$RELI_BACKUP_DIR"
 
-RELI_OUT="$RELI_BACKUP_DIR/reli-${TIMESTAMP}.db"
-if cd "$ANNIE_PROJECT_DIR" && DATABASE_URL="$RELI_DB_URL" node scripts/export-to-sqlite.mjs "$RELI_OUT" 2>&1; then
+RELI_OUT="$RELI_BACKUP_DIR/reli-${TIMESTAMP}.sql.gz"
+if pg_dump "$RELI_DB_URL" --no-owner --no-acl --schema=reli | gzip > "$RELI_OUT"; then
     SIZE=$(du -h "$RELI_OUT" | cut -f1)
-    THINGS=$(sqlite3 "$RELI_OUT" "SELECT count(*) FROM things" 2>/dev/null || echo "?")
+    THINGS=$(psql "$RELI_DB_URL" -t -c "SELECT count(*) FROM reli.things" 2>/dev/null | tr -d ' ' || echo "?")
     log "Reli backed up: $RELI_OUT ($SIZE, $THINGS things)"
+    if [ "$THINGS" = "0" ] || [ "$THINGS" = "?" ]; then
+        log "WARNING: Reli backup has 0 or unknown things — possible data loss or schema not yet migrated!"
+    fi
 else
-    log "ERROR: Reli Supabase export failed"
+    log "ERROR: Reli pg_dump failed"
 fi
 
 # --- FilmDuel (Supabase PostgreSQL → pg_dump) ---
@@ -68,7 +71,7 @@ FILMDUEL_OUT="$FILMDUEL_BACKUP_DIR/filmduel-${TIMESTAMP}.sql.gz"
 # Note: --schema=filmduel and filmduel.users assume:
 #   1. 014-filmduel-schema-isolation.sql has been run against the consolidated DB
 #   2. FILMDUEL_DB_URL (in Railway) has been updated to the consolidated DB URL
-if pg_dump "$FILMDUEL_DB_URL" --no-owner --no-acl --schema=filmduel 2>&1 | gzip > "$FILMDUEL_OUT"; then
+if pg_dump "$FILMDUEL_DB_URL" --no-owner --no-acl --schema=filmduel | gzip > "$FILMDUEL_OUT"; then
     SIZE=$(du -h "$FILMDUEL_OUT" | cut -f1)
     USERS=$(psql "$FILMDUEL_DB_URL" -t -c "SELECT count(*) FROM filmduel.users" 2>/dev/null | tr -d ' ' || echo "?")
     log "FilmDuel backed up: $FILMDUEL_OUT ($SIZE, $USERS users)"
@@ -84,7 +87,7 @@ KINDRED_BACKUP_DIR="$BACKUP_ROOT/kindred"
 mkdir -p "$KINDRED_BACKUP_DIR"
 
 KINDRED_OUT="$KINDRED_BACKUP_DIR/kindred-${TIMESTAMP}.sql.gz"
-if pg_dump "$KINDRED_DB_URL" --no-owner --no-acl --schema=kindred 2>&1 | gzip > "$KINDRED_OUT"; then
+if pg_dump "$KINDRED_DB_URL" --no-owner --no-acl --schema=kindred | gzip > "$KINDRED_OUT"; then
     SIZE=$(du -h "$KINDRED_OUT" | cut -f1)
     ENTRIES=$(psql "$KINDRED_DB_URL" -t -c "SELECT count(*) FROM kindred.entries" 2>/dev/null | tr -d ' ' || echo "?")
     log "Kindred backed up: $KINDRED_OUT ($SIZE, $ENTRIES entries)"
@@ -100,7 +103,7 @@ LACHESIS_BACKUP_DIR="$BACKUP_ROOT/lachesis"
 mkdir -p "$LACHESIS_BACKUP_DIR"
 
 LACHESIS_OUT="$LACHESIS_BACKUP_DIR/lachesis-${TIMESTAMP}.sql.gz"
-if pg_dump "$LACHESIS_DB_URL" --no-owner --no-acl --schema=lachesis 2>&1 | gzip > "$LACHESIS_OUT"; then
+if pg_dump "$LACHESIS_DB_URL" --no-owner --no-acl --schema=lachesis | gzip > "$LACHESIS_OUT"; then
     SIZE=$(du -h "$LACHESIS_OUT" | cut -f1)
     log "Lachesis backed up: $LACHESIS_OUT ($SIZE)"
     # TODO: once lachesis schema is populated, add row count check like FilmDuel/Kindred:
@@ -113,7 +116,7 @@ fi
 
 # --- Rotate old backups ---
 rotate_backups "$ANNIE_BACKUP_DIR" "*.db" "Annie"
-rotate_backups "$RELI_BACKUP_DIR" "*.db" "Reli"
+rotate_backups "$RELI_BACKUP_DIR" "*.sql.gz" "Reli"
 rotate_backups "$FILMDUEL_BACKUP_DIR" "*.sql.gz" "FilmDuel"
 rotate_backups "$KINDRED_BACKUP_DIR" "*.sql.gz" "Kindred"
 rotate_backups "$LACHESIS_BACKUP_DIR" "*.sql.gz" "Lachesis"
