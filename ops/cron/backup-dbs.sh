@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Backup Annie (Supabase PostgreSQL → SQLite), Reli, FilmDuel, Kindred, Lachesis (pg_dump)
+# Backup Annie, Reli, FilmDuel, Kindred, Lachesis (pg_dump)
 # - Local: /mnt/steam-slow/backups/ (7-day rotation)
 # - Remote: Google Drive via rclone (if configured)
 
@@ -30,21 +30,24 @@ rotate_backups() {
         log "Rotated $name backups older than ${KEEP_DAYS} days" || true
 }
 
-# --- Annie (Supabase PostgreSQL → SQLite export) ---
+# --- Annie (Supabase PostgreSQL → pg_dump, schema-scoped) ---
 ANNIE_PROJECT_DIR="/mnt/ext-fast/gc/rigs/annie"
 ANNIE_BACKUP_DIR="$BACKUP_ROOT/annie"
 mkdir -p "$ANNIE_BACKUP_DIR"
 
-ANNIE_OUT="$ANNIE_BACKUP_DIR/word-coach-annie-${TIMESTAMP}.db"
-if cd "$ANNIE_PROJECT_DIR" && DATABASE_URL="$ANNIE_DB_URL" node scripts/export-to-sqlite.mjs "$ANNIE_OUT" 2>&1; then
+ANNIE_OUT="$ANNIE_BACKUP_DIR/annie-${TIMESTAMP}.sql.gz"
+# Note: --schema=annie and annie."Project" assume:
+#   1. 017-annie-schema-isolation.sql has been run against the consolidated DB
+#   2. ANNIE_DB_URL (in secrets.env) has been updated to the consolidated DB URL
+if pg_dump "$ANNIE_DB_URL" --no-owner --no-acl --schema=annie 2>&1 | gzip > "$ANNIE_OUT"; then
     SIZE=$(du -h "$ANNIE_OUT" | cut -f1)
-    PROJECTS=$(sqlite3 "$ANNIE_OUT" "SELECT count(*) FROM Project" 2>/dev/null || echo "?")
+    PROJECTS=$(psql "$ANNIE_DB_URL" -t -c "SELECT count(*) FROM annie.\"Project\"" 2>/dev/null | tr -d ' ' || echo "?")
     log "Annie backed up: $ANNIE_OUT ($SIZE, $PROJECTS projects)"
     if [ "$PROJECTS" = "0" ]; then
         log "WARNING: Annie backup has 0 projects — possible data loss!"
     fi
 else
-    log "ERROR: Annie Supabase export failed"
+    log "ERROR: Annie pg_dump failed"
 fi
 
 # --- Reli (Supabase PostgreSQL → pg_dump, schema-scoped) ---
@@ -115,7 +118,7 @@ else
 fi
 
 # --- Rotate old backups ---
-rotate_backups "$ANNIE_BACKUP_DIR" "*.db" "Annie"
+rotate_backups "$ANNIE_BACKUP_DIR" "*.sql.gz" "Annie"
 rotate_backups "$RELI_BACKUP_DIR" "*.sql.gz" "Reli"
 rotate_backups "$FILMDUEL_BACKUP_DIR" "*.sql.gz" "FilmDuel"
 rotate_backups "$KINDRED_BACKUP_DIR" "*.sql.gz" "Kindred"
