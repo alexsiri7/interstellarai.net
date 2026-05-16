@@ -2,7 +2,7 @@
 created: '2026-05-15'
 github_issue: 26
 id: '012'
-status: idea
+status: in-progress
 title: Migrate Annie to consolidated DB (prod + staging schemas)
 updated: '2026-05-15'
 ---
