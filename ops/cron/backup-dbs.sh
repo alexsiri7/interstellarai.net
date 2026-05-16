@@ -60,6 +60,9 @@ FILMDUEL_BACKUP_DIR="$BACKUP_ROOT/filmduel"
 mkdir -p "$FILMDUEL_BACKUP_DIR"
 
 FILMDUEL_OUT="$FILMDUEL_BACKUP_DIR/filmduel-${TIMESTAMP}.sql.gz"
+# Note: --schema=filmduel and filmduel.users assume:
+#   1. 014-filmduel-schema-isolation.sql has been run against the consolidated DB
+#   2. FILMDUEL_DB_URL (in Railway) has been updated to the consolidated DB URL
 if pg_dump "$FILMDUEL_DB_URL" --no-owner --no-acl --schema=filmduel 2>&1 | gzip > "$FILMDUEL_OUT"; then
     SIZE=$(du -h "$FILMDUEL_OUT" | cut -f1)
     USERS=$(psql "$FILMDUEL_DB_URL" -t -c "SELECT count(*) FROM filmduel.users" 2>/dev/null | tr -d ' ' || echo "?")
