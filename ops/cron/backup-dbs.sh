@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Backup Annie (Supabase PostgreSQL → SQLite), Reli (SQLite), FilmDuel, Kindred, Lachesis (pg_dump)
+# Backup Annie, Reli (Supabase PostgreSQL → SQLite), FilmDuel, Kindred, Lachesis (pg_dump)
 # - Local: /mnt/steam-slow/backups/ (7-day rotation)
 # - Remote: Google Drive via rclone (if configured)
 
 set -euo pipefail
 
-# Secrets: ANNIE_DB_URL, RELI_DB_URL, FILMDUEL_DB_URL loaded from an env file
-# outside the repo. chmod 600 recommended. Override with $ARCHON_CRON_SECRETS.
+# Secrets: ANNIE_DB_URL, RELI_DB_URL, FILMDUEL_DB_URL, KINDRED_DB_URL, LACHESIS_DB_URL
+# loaded from an env file outside the repo. chmod 600 recommended.
+# Override with $ARCHON_CRON_SECRETS.
 SECRETS_FILE="${ARCHON_CRON_SECRETS:-$HOME/.config/archon-cron/secrets.env}"
 # shellcheck source=/dev/null
 [ -r "$SECRETS_FILE" ] && . "$SECRETS_FILE"
@@ -94,6 +95,10 @@ LACHESIS_OUT="$LACHESIS_BACKUP_DIR/lachesis-${TIMESTAMP}.sql.gz"
 if pg_dump "$LACHESIS_DB_URL" --no-owner --no-acl --schema=lachesis 2>&1 | gzip > "$LACHESIS_OUT"; then
     SIZE=$(du -h "$LACHESIS_OUT" | cut -f1)
     log "Lachesis backed up: $LACHESIS_OUT ($SIZE)"
+    # TODO: once lachesis schema is populated, add row count check like FilmDuel/Kindred:
+    # ROWS=$(psql "$LACHESIS_DB_URL" -t -c "SELECT count(*) FROM lachesis.{primary_table}" 2>/dev/null | tr -d ' ' || echo "?")
+    # log "Lachesis backup: $ROWS rows in {primary_table}"
+    # if [ "$ROWS" = "0" ]; then log "WARNING: Lachesis backup has 0 rows — possible data loss!"; fi
 else
     log "ERROR: Lachesis pg_dump failed"
 fi
