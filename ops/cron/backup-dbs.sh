@@ -76,12 +76,12 @@ KINDRED_BACKUP_DIR="$BACKUP_ROOT/kindred"
 mkdir -p "$KINDRED_BACKUP_DIR"
 
 KINDRED_OUT="$KINDRED_BACKUP_DIR/kindred-${TIMESTAMP}.sql.gz"
-if pg_dump "$KINDRED_DB_URL" --no-owner --no-acl 2>&1 | gzip > "$KINDRED_OUT"; then
+if pg_dump "$KINDRED_DB_URL" --no-owner --no-acl --schema=kindred 2>&1 | gzip > "$KINDRED_OUT"; then
     SIZE=$(du -h "$KINDRED_OUT" | cut -f1)
-    ENTRIES=$(psql "$KINDRED_DB_URL" -t -c "SELECT count(*) FROM entries" 2>/dev/null | tr -d ' ' || echo "?")
+    ENTRIES=$(psql "$KINDRED_DB_URL" -t -c "SELECT count(*) FROM kindred.entries" 2>/dev/null | tr -d ' ' || echo "?")
     log "Kindred backed up: $KINDRED_OUT ($SIZE, $ENTRIES entries)"
-    if [ "$ENTRIES" = "0" ]; then
-        log "WARNING: Kindred backup has 0 entries — possible data loss!"
+    if [ "$ENTRIES" = "0" ] || [ "$ENTRIES" = "?" ]; then
+        log "WARNING: Kindred backup has 0 or unknown entries — possible data loss or schema not yet migrated!"
     fi
 else
     log "ERROR: Kindred pg_dump failed"
