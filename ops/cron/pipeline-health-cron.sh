@@ -56,6 +56,7 @@ declare -A DEPLOY_URLS=(
 declare -A STAGING_DEPLOY_URLS=(
   ["filmduel"]="https://filmduel-staging.up.railway.app"
   ["reli"]="https://reli-staging.up.railway.app"
+  ["word-coach-annie"]="https://word-coach-annie-staging.up.railway.app/api/health"
 )
 
 declare -A GITHUB_PROJECTS=(
