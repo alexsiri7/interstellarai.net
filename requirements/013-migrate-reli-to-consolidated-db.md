@@ -2,7 +2,7 @@
 created: '2026-05-15'
 github_issue: 27
 id: '013'
-status: idea
+status: in-progress
 title: Migrate Reli to consolidated DB
 updated: '2026-05-15'
 ---

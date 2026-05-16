@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Backup Annie, Reli (Supabase PostgreSQL → SQLite), FilmDuel, Kindred, Lachesis (pg_dump)
+# Backup Annie (Supabase PostgreSQL → SQLite), Reli, FilmDuel, Kindred, Lachesis (pg_dump)
 # - Local: /mnt/steam-slow/backups/ (7-day rotation)
 # - Remote: Google Drive via rclone (if configured)
 
@@ -42,17 +42,20 @@ else
     log "ERROR: Annie Supabase export failed"
 fi
 
-# --- Reli (Supabase PostgreSQL → SQLite export) ---
+# --- Reli (Supabase PostgreSQL → pg_dump, schema-scoped) ---
 RELI_BACKUP_DIR="$BACKUP_ROOT/reli"
 mkdir -p "$RELI_BACKUP_DIR"
 
-RELI_OUT="$RELI_BACKUP_DIR/reli-${TIMESTAMP}.db"
-if cd "$ANNIE_PROJECT_DIR" && DATABASE_URL="$RELI_DB_URL" node scripts/export-to-sqlite.mjs "$RELI_OUT" 2>&1; then
+RELI_OUT="$RELI_BACKUP_DIR/reli-${TIMESTAMP}.sql.gz"
+if pg_dump "$RELI_DB_URL" --no-owner --no-acl --schema=reli 2>&1 | gzip > "$RELI_OUT"; then
     SIZE=$(du -h "$RELI_OUT" | cut -f1)
-    THINGS=$(sqlite3 "$RELI_OUT" "SELECT count(*) FROM things" 2>/dev/null || echo "?")
+    THINGS=$(psql "$RELI_DB_URL" -t -c "SELECT count(*) FROM reli.things" 2>/dev/null | tr -d ' ' || echo "?")
     log "Reli backed up: $RELI_OUT ($SIZE, $THINGS things)"
+    if [ "$THINGS" = "0" ] || [ "$THINGS" = "?" ]; then
+        log "WARNING: Reli backup has 0 or unknown things — possible data loss or schema not yet migrated!"
+    fi
 else
-    log "ERROR: Reli Supabase export failed"
+    log "ERROR: Reli pg_dump failed"
 fi
 
 # --- FilmDuel (Supabase PostgreSQL → pg_dump) ---
@@ -106,7 +109,7 @@ fi
 # --- Rotate old backups ---
 find "$ANNIE_BACKUP_DIR" -name "*.db" -mtime +$KEEP_DAYS -delete 2>/dev/null && \
     log "Rotated Annie backups older than ${KEEP_DAYS} days" || true
-find "$RELI_BACKUP_DIR" -name "*.db" -mtime +$KEEP_DAYS -delete 2>/dev/null && \
+find "$RELI_BACKUP_DIR" -name "*.sql.gz" -mtime +$KEEP_DAYS -delete 2>/dev/null && \
     log "Rotated Reli backups older than ${KEEP_DAYS} days" || true
 find "$FILMDUEL_BACKUP_DIR" -name "*.sql.gz" -mtime +$KEEP_DAYS -delete 2>/dev/null && \
     log "Rotated FilmDuel backups older than ${KEEP_DAYS} days" || true
