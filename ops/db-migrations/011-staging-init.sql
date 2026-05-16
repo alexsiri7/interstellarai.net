@@ -103,11 +103,9 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA lachesis
 -- =============================================================
 -- Verify: all schemas created
 -- =============================================================
--- \dn annie
--- \dn reli
--- \dn filmduel
--- \dn kindred
--- \dn lachesis
+-- SELECT schema_name FROM information_schema.schemata
+--   WHERE schema_name IN ('annie', 'reli', 'filmduel', 'kindred', 'lachesis')
+--   ORDER BY schema_name;
 
 -- Connection string note:
 -- After running this migration, update each app's DATABASE_URL
