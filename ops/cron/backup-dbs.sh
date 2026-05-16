@@ -24,6 +24,11 @@ RCLONE_REMOTE="gdrive:backups/gas-town"
 LOG_TAG="[db-backup]"
 
 log() { echo "$LOG_TAG $(date '+%Y-%m-%d %H:%M:%S') $*"; }
+rotate_backups() {
+    local dir="$1" pattern="$2" name="$3"
+    find "$dir" -name "$pattern" -mtime +$KEEP_DAYS -delete 2>/dev/null && \
+        log "Rotated $name backups older than ${KEEP_DAYS} days" || true
+}
 
 # --- Annie (Supabase PostgreSQL → SQLite export) ---
 ANNIE_PROJECT_DIR="/mnt/ext-fast/gc/rigs/annie"
@@ -47,7 +52,7 @@ RELI_BACKUP_DIR="$BACKUP_ROOT/reli"
 mkdir -p "$RELI_BACKUP_DIR"
 
 RELI_OUT="$RELI_BACKUP_DIR/reli-${TIMESTAMP}.sql.gz"
-if pg_dump "$RELI_DB_URL" --no-owner --no-acl --schema=reli 2>&1 | gzip > "$RELI_OUT"; then
+if pg_dump "$RELI_DB_URL" --no-owner --no-acl --schema=reli | gzip > "$RELI_OUT"; then
     SIZE=$(du -h "$RELI_OUT" | cut -f1)
     THINGS=$(psql "$RELI_DB_URL" -t -c "SELECT count(*) FROM reli.things" 2>/dev/null | tr -d ' ' || echo "?")
     log "Reli backed up: $RELI_OUT ($SIZE, $THINGS things)"
@@ -63,9 +68,12 @@ FILMDUEL_BACKUP_DIR="$BACKUP_ROOT/filmduel"
 mkdir -p "$FILMDUEL_BACKUP_DIR"
 
 FILMDUEL_OUT="$FILMDUEL_BACKUP_DIR/filmduel-${TIMESTAMP}.sql.gz"
-if pg_dump "$FILMDUEL_DB_URL" --no-owner --no-acl 2>&1 | gzip > "$FILMDUEL_OUT"; then
+# Note: --schema=filmduel and filmduel.users assume:
+#   1. 014-filmduel-schema-isolation.sql has been run against the consolidated DB
+#   2. FILMDUEL_DB_URL (in Railway) has been updated to the consolidated DB URL
+if pg_dump "$FILMDUEL_DB_URL" --no-owner --no-acl --schema=filmduel | gzip > "$FILMDUEL_OUT"; then
     SIZE=$(du -h "$FILMDUEL_OUT" | cut -f1)
-    USERS=$(psql "$FILMDUEL_DB_URL" -t -c "SELECT count(*) FROM users" 2>/dev/null | tr -d ' ' || echo "?")
+    USERS=$(psql "$FILMDUEL_DB_URL" -t -c "SELECT count(*) FROM filmduel.users" 2>/dev/null | tr -d ' ' || echo "?")
     log "FilmDuel backed up: $FILMDUEL_OUT ($SIZE, $USERS users)"
     if [ "$USERS" = "0" ]; then
         log "WARNING: FilmDuel backup has 0 users — possible data loss!"
@@ -79,7 +87,7 @@ KINDRED_BACKUP_DIR="$BACKUP_ROOT/kindred"
 mkdir -p "$KINDRED_BACKUP_DIR"
 
 KINDRED_OUT="$KINDRED_BACKUP_DIR/kindred-${TIMESTAMP}.sql.gz"
-if pg_dump "$KINDRED_DB_URL" --no-owner --no-acl --schema=kindred 2>&1 | gzip > "$KINDRED_OUT"; then
+if pg_dump "$KINDRED_DB_URL" --no-owner --no-acl --schema=kindred | gzip > "$KINDRED_OUT"; then
     SIZE=$(du -h "$KINDRED_OUT" | cut -f1)
     ENTRIES=$(psql "$KINDRED_DB_URL" -t -c "SELECT count(*) FROM kindred.entries" 2>/dev/null | tr -d ' ' || echo "?")
     log "Kindred backed up: $KINDRED_OUT ($SIZE, $ENTRIES entries)"
@@ -95,7 +103,7 @@ LACHESIS_BACKUP_DIR="$BACKUP_ROOT/lachesis"
 mkdir -p "$LACHESIS_BACKUP_DIR"
 
 LACHESIS_OUT="$LACHESIS_BACKUP_DIR/lachesis-${TIMESTAMP}.sql.gz"
-if pg_dump "$LACHESIS_DB_URL" --no-owner --no-acl --schema=lachesis 2>&1 | gzip > "$LACHESIS_OUT"; then
+if pg_dump "$LACHESIS_DB_URL" --no-owner --no-acl --schema=lachesis | gzip > "$LACHESIS_OUT"; then
     SIZE=$(du -h "$LACHESIS_OUT" | cut -f1)
     log "Lachesis backed up: $LACHESIS_OUT ($SIZE)"
     # TODO: once lachesis schema is populated, add row count check like FilmDuel/Kindred:
@@ -107,16 +115,11 @@ else
 fi
 
 # --- Rotate old backups ---
-find "$ANNIE_BACKUP_DIR" -name "*.db" -mtime +$KEEP_DAYS -delete 2>/dev/null && \
-    log "Rotated Annie backups older than ${KEEP_DAYS} days" || true
-find "$RELI_BACKUP_DIR" -name "*.sql.gz" -mtime +$KEEP_DAYS -delete 2>/dev/null && \
-    log "Rotated Reli backups older than ${KEEP_DAYS} days" || true
-find "$FILMDUEL_BACKUP_DIR" -name "*.sql.gz" -mtime +$KEEP_DAYS -delete 2>/dev/null && \
-    log "Rotated FilmDuel backups older than ${KEEP_DAYS} days" || true
-find "$KINDRED_BACKUP_DIR" -name "*.sql.gz" -mtime +$KEEP_DAYS -delete 2>/dev/null && \
-    log "Rotated Kindred backups older than ${KEEP_DAYS} days" || true
-find "$LACHESIS_BACKUP_DIR" -name "*.sql.gz" -mtime +$KEEP_DAYS -delete 2>/dev/null && \
-    log "Rotated Lachesis backups older than ${KEEP_DAYS} days" || true
+rotate_backups "$ANNIE_BACKUP_DIR" "*.db" "Annie"
+rotate_backups "$RELI_BACKUP_DIR" "*.sql.gz" "Reli"
+rotate_backups "$FILMDUEL_BACKUP_DIR" "*.sql.gz" "FilmDuel"
+rotate_backups "$KINDRED_BACKUP_DIR" "*.sql.gz" "Kindred"
+rotate_backups "$LACHESIS_BACKUP_DIR" "*.sql.gz" "Lachesis"
 
 # --- Google Drive sync (if rclone configured) ---
 if command -v rclone &>/dev/null && rclone listremotes 2>/dev/null | grep -q "^gdrive:"; then
