@@ -24,6 +24,11 @@ RCLONE_REMOTE="gdrive:backups/gas-town"
 LOG_TAG="[db-backup]"
 
 log() { echo "$LOG_TAG $(date '+%Y-%m-%d %H:%M:%S') $*"; }
+rotate_backups() {
+    local dir="$1" pattern="$2" name="$3"
+    find "$dir" -name "$pattern" -mtime +$KEEP_DAYS -delete 2>/dev/null && \
+        log "Rotated $name backups older than ${KEEP_DAYS} days" || true
+}
 
 # --- Annie (Supabase PostgreSQL → SQLite export) ---
 ANNIE_PROJECT_DIR="/mnt/ext-fast/gc/rigs/annie"
@@ -107,16 +112,11 @@ else
 fi
 
 # --- Rotate old backups ---
-find "$ANNIE_BACKUP_DIR" -name "*.db" -mtime +$KEEP_DAYS -delete 2>/dev/null && \
-    log "Rotated Annie backups older than ${KEEP_DAYS} days" || true
-find "$RELI_BACKUP_DIR" -name "*.db" -mtime +$KEEP_DAYS -delete 2>/dev/null && \
-    log "Rotated Reli backups older than ${KEEP_DAYS} days" || true
-find "$FILMDUEL_BACKUP_DIR" -name "*.sql.gz" -mtime +$KEEP_DAYS -delete 2>/dev/null && \
-    log "Rotated FilmDuel backups older than ${KEEP_DAYS} days" || true
-find "$KINDRED_BACKUP_DIR" -name "*.sql.gz" -mtime +$KEEP_DAYS -delete 2>/dev/null && \
-    log "Rotated Kindred backups older than ${KEEP_DAYS} days" || true
-find "$LACHESIS_BACKUP_DIR" -name "*.sql.gz" -mtime +$KEEP_DAYS -delete 2>/dev/null && \
-    log "Rotated Lachesis backups older than ${KEEP_DAYS} days" || true
+rotate_backups "$ANNIE_BACKUP_DIR" "*.db" "Annie"
+rotate_backups "$RELI_BACKUP_DIR" "*.db" "Reli"
+rotate_backups "$FILMDUEL_BACKUP_DIR" "*.sql.gz" "FilmDuel"
+rotate_backups "$KINDRED_BACKUP_DIR" "*.sql.gz" "Kindred"
+rotate_backups "$LACHESIS_BACKUP_DIR" "*.sql.gz" "Lachesis"
 
 # --- Google Drive sync (if rclone configured) ---
 if command -v rclone &>/dev/null && rclone listremotes 2>/dev/null | grep -q "^gdrive:"; then
