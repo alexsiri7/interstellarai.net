@@ -664,7 +664,6 @@ autoclean_tmp() {
   local total=0
   for pat in "${patterns[@]}"; do
     while IFS= read -r f; do
-      [ -n "$f" ] || continue
       local sz; sz=$(du -sb "$f" 2>/dev/null | cut -f1 || echo 0)
       rm -rf "$f" 2>/dev/null && total=$((total + sz)) || true
     done < <(find /tmp -maxdepth 1 -name "$pat" -mtime +1 2>/dev/null)
@@ -1009,8 +1008,8 @@ EOF
     return
   fi
 
-  # Healthy — clear marker if present
-  [ -f "$marker" ] && rm -f "$marker"
+  # Healthy — clear marker
+  rm -f "$marker"
   log "$project: deploy OK (HTTP $http_code at $deploy_url)"
 }
 
@@ -1044,8 +1043,8 @@ check_staging_deploy_http() {
     return
   fi
 
-  # Healthy — clear marker if present
-  [ -f "$marker" ] && rm -f "$marker"
+  # Healthy — clear marker
+  rm -f "$marker"
   log "$project: staging deploy OK (HTTP $http_code at $staging_url)"
 }
 
