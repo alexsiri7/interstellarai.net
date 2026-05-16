@@ -26,8 +26,8 @@ LOG_TAG="[db-backup]"
 log() { echo "$LOG_TAG $(date '+%Y-%m-%d %H:%M:%S') $*"; }
 rotate_backups() {
     local dir="$1" pattern="$2" name="$3"
-    find "$dir" -name "$pattern" -mtime +$KEEP_DAYS -delete 2>/dev/null && \
-        log "Rotated $name backups older than ${KEEP_DAYS} days" || true
+    find "$dir" -name "$pattern" -mtime +"$KEEP_DAYS" -delete 2>/dev/null || true
+    log "Rotated $name backups older than ${KEEP_DAYS} days"
 }
 
 # --- Annie (Supabase PostgreSQL → pg_dump, schema-scoped) ---
