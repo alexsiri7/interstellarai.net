@@ -2,9 +2,9 @@
 created: '2026-05-15'
 github_issue: 30
 id: '016'
-status: idea
+status: done
 title: Set up Lachesis schema in consolidated DB
-updated: '2026-05-15'
+updated: '2026-05-16'
 ---
 
 ## Why

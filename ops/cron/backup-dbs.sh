@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Backup Annie (Supabase PostgreSQL → SQLite), Reli (SQLite), FilmDuel, Kindred (pg_dump)
+# Backup Annie (Supabase PostgreSQL → SQLite), Reli (SQLite), FilmDuel, Kindred, Lachesis (pg_dump)
 # - Local: /mnt/steam-slow/backups/ (7-day rotation)
 # - Remote: Google Drive via rclone (if configured)
 
@@ -14,6 +14,7 @@ SECRETS_FILE="${ARCHON_CRON_SECRETS:-$HOME/.config/archon-cron/secrets.env}"
 : "${RELI_DB_URL:?RELI_DB_URL not set — populate $SECRETS_FILE}"
 : "${FILMDUEL_DB_URL:?FILMDUEL_DB_URL not set — populate $SECRETS_FILE}"
 : "${KINDRED_DB_URL:?KINDRED_DB_URL not set — populate $SECRETS_FILE}"
+: "${LACHESIS_DB_URL:?LACHESIS_DB_URL not set — populate $SECRETS_FILE}"
 
 BACKUP_ROOT="/mnt/steam-slow/backups"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
@@ -85,6 +86,18 @@ else
     log "ERROR: Kindred pg_dump failed"
 fi
 
+# --- Lachesis (Supabase PostgreSQL → pg_dump, schema-scoped) ---
+LACHESIS_BACKUP_DIR="$BACKUP_ROOT/lachesis"
+mkdir -p "$LACHESIS_BACKUP_DIR"
+
+LACHESIS_OUT="$LACHESIS_BACKUP_DIR/lachesis-${TIMESTAMP}.sql.gz"
+if pg_dump "$LACHESIS_DB_URL" --no-owner --no-acl --schema=lachesis 2>&1 | gzip > "$LACHESIS_OUT"; then
+    SIZE=$(du -h "$LACHESIS_OUT" | cut -f1)
+    log "Lachesis backed up: $LACHESIS_OUT ($SIZE)"
+else
+    log "ERROR: Lachesis pg_dump failed"
+fi
+
 # --- Rotate old backups ---
 find "$ANNIE_BACKUP_DIR" -name "*.db" -mtime +$KEEP_DAYS -delete 2>/dev/null && \
     log "Rotated Annie backups older than ${KEEP_DAYS} days" || true
@@ -94,6 +107,8 @@ find "$FILMDUEL_BACKUP_DIR" -name "*.sql.gz" -mtime +$KEEP_DAYS -delete 2>/dev/n
     log "Rotated FilmDuel backups older than ${KEEP_DAYS} days" || true
 find "$KINDRED_BACKUP_DIR" -name "*.sql.gz" -mtime +$KEEP_DAYS -delete 2>/dev/null && \
     log "Rotated Kindred backups older than ${KEEP_DAYS} days" || true
+find "$LACHESIS_BACKUP_DIR" -name "*.sql.gz" -mtime +$KEEP_DAYS -delete 2>/dev/null && \
+    log "Rotated Lachesis backups older than ${KEEP_DAYS} days" || true
 
 # --- Google Drive sync (if rclone configured) ---
 if command -v rclone &>/dev/null && rclone listremotes 2>/dev/null | grep -q "^gdrive:"; then
@@ -101,6 +116,7 @@ if command -v rclone &>/dev/null && rclone listremotes 2>/dev/null | grep -q "^g
     rclone copy "$RELI_BACKUP_DIR" "$RCLONE_REMOTE/reli" --max-age 2d -q
     rclone copy "$FILMDUEL_BACKUP_DIR" "$RCLONE_REMOTE/filmduel" --max-age 2d -q
     rclone copy "$KINDRED_BACKUP_DIR" "$RCLONE_REMOTE/kindred" --max-age 2d -q
+    rclone copy "$LACHESIS_BACKUP_DIR" "$RCLONE_REMOTE/lachesis" --max-age 2d -q
     log "Synced to Google Drive ($RCLONE_REMOTE)"
 else
     log "SKIP: rclone/gdrive not configured, local backup only"
