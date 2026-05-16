@@ -60,9 +60,9 @@ FILMDUEL_BACKUP_DIR="$BACKUP_ROOT/filmduel"
 mkdir -p "$FILMDUEL_BACKUP_DIR"
 
 FILMDUEL_OUT="$FILMDUEL_BACKUP_DIR/filmduel-${TIMESTAMP}.sql.gz"
-if pg_dump "$FILMDUEL_DB_URL" --no-owner --no-acl 2>&1 | gzip > "$FILMDUEL_OUT"; then
+if pg_dump "$FILMDUEL_DB_URL" --no-owner --no-acl --schema=filmduel 2>&1 | gzip > "$FILMDUEL_OUT"; then
     SIZE=$(du -h "$FILMDUEL_OUT" | cut -f1)
-    USERS=$(psql "$FILMDUEL_DB_URL" -t -c "SELECT count(*) FROM users" 2>/dev/null | tr -d ' ' || echo "?")
+    USERS=$(psql "$FILMDUEL_DB_URL" -t -c "SELECT count(*) FROM filmduel.users" 2>/dev/null | tr -d ' ' || echo "?")
     log "FilmDuel backed up: $FILMDUEL_OUT ($SIZE, $USERS users)"
     if [ "$USERS" = "0" ]; then
         log "WARNING: FilmDuel backup has 0 users — possible data loss!"

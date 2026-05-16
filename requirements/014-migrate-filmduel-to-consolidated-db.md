@@ -2,9 +2,9 @@
 created: '2026-05-15'
 github_issue: 28
 id: '014'
-status: idea
+status: in-progress
 title: Migrate FilmDuel to consolidated DB
-updated: '2026-05-15'
+updated: '2026-05-16'
 ---
 
 ## Why
