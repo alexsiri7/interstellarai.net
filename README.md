@@ -54,7 +54,7 @@ Add a Cloudflare redirect rule or page rule sending
 
 1. Pick the next `number` (check `src/content/mementos/` — current max + 1).
 2. Copy an existing ADR as a template.
-3. Fill in frontmatter (`title`, `number`, `status`, `date`, `projects`).
+3. Fill in frontmatter (`title`, `number`, `status`, `date`, and `projects` if the decision spans multiple projects — `projects` is optional and omitted for single-project decisions).
 4. Write Context / Decision / Consequences / Alternatives-considered.
 5. Open a PR. Merging publishes it to `/mementos/<slug>`.
 
