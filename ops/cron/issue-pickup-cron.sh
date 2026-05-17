@@ -170,7 +170,7 @@ auto_triage() {
 # If an issue has been archon:in-progress for a long time and there's no
 # running archon process for it and no open PR that references it, treat it
 # as stuck (e.g. previous run died from rate-limit or crash) and re-queue.
-# Uses the timeline API to find when the in-progress label was last added.
+# Uses the issue events API to find when the in-progress label was last added.
 unstick_stale() {
   local project="$1"
   local repo_dir="$BASE_DIR/$project"
@@ -205,9 +205,14 @@ unstick_stale() {
       continue
     fi
 
-    # Find when archon:in-progress was last added via timeline events.
+    # Find when archon:in-progress was last added via issue events.
+    # Use the /events API (issue-only events: labels, assignments) instead of
+    # /timeline (all events) because timeline results can exceed one page, pushing
+    # the labeled event past what a non-paginated call returns and causing
+    # labeled_at to come back empty, silently skipping the re-queue. The events
+    # endpoint is always short enough to fit on one page. Fixes #50.
     local labeled_at
-    labeled_at=$(gh api "repos/alexsiri7/$project/issues/$num/timeline" \
+    labeled_at=$(gh api "repos/alexsiri7/$project/issues/$num/events" \
       --jq '[.[] | select(.event=="labeled" and .label.name=="archon:in-progress") | .created_at] | last' 2>/dev/null || echo "")
     [ -z "$labeled_at" ] || [ "$labeled_at" = "null" ] && continue
 
