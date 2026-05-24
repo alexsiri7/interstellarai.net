@@ -31,13 +31,18 @@ should_tick() {
         _raw="${_raw%%#*}"
         _raw="${_raw//[[:space:]]/}"
         case "$_raw" in
-            ''|*[!0-9]*) ;;
+            '') ;;
+            *[!0-9]*)
+                echo "$(date -Is) [throttle] ${_name}: WARNING — invalid TICK_INTERVAL_MINUTES='$_raw', using default ${_interval}m" >&2
+                ;;
             *) _interval="$_raw" ;;
         esac
     fi
 
     local _state_dir="$HOME/.config/archon-cron/state"
-    mkdir -p "$_state_dir"
+    if ! mkdir -p "$_state_dir" 2>/dev/null; then
+        echo "$(date -Is) [throttle] ${_name}: WARNING — cannot create state dir $_state_dir, throttle disabled" >&2
+    fi
     local _state_file="$_state_dir/${_name}.last_run"
 
     local _last_run=0
@@ -45,7 +50,11 @@ should_tick() {
         local _content
         _content=$(cat "$_state_file" 2>/dev/null || echo "")
         case "$_content" in
-            ''|*[!0-9]*) _last_run=0 ;;
+            '') _last_run=0 ;;
+            *[!0-9]*)
+                echo "$(date -Is) [throttle] ${_name}: WARNING — corrupt state file, resetting" >&2
+                _last_run=0
+                ;;
             *) _last_run="$_content" ;;
         esac
     fi
@@ -62,6 +71,8 @@ should_tick() {
         return 1
     fi
 
-    echo "$_now" > "$_state_file"
+    if ! echo "$_now" > "$_state_file" 2>/dev/null; then
+        echo "$(date -Is) [throttle] ${_name}: WARNING — cannot write state file $_state_file, next run will not be throttled" >&2
+    fi
     return 0
 }
