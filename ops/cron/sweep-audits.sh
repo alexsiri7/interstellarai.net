@@ -35,7 +35,7 @@ should_tick "sweep-audits" || exit 0
 BASE_DIR="/mnt/ext-fast"
 STATE_DIR="$HOME/.archon/sweep-state"
 LOG_DIR="$HOME/.archon/logs/sweep"
-CLAUDE_ACCOUNTS="${CLAUDE_ACCOUNTS:-$HOME/.claude:$HOME/.claude-secondary}"
+CLAUDE_ACCOUNTS="${CLAUDE_ACCOUNTS:-$HOME/.claude}"
 
 # NTFY_TOPIC loaded from secrets.env. Fail loud if unset.
 SECRETS_FILE="${ARCHON_CRON_SECRETS:-$HOME/.config/archon-cron/secrets.env}"
@@ -121,9 +121,9 @@ if [ -z "$local_path" ]; then
   exit 1
 fi
 
-# Alternate Claude accounts per slot
+# Use the first Claude account profile
 IFS=':' read -ra accounts <<< "$CLAUDE_ACCOUNTS"
-account_dir="${accounts[$((slot % ${#accounts[@]}))]}"
+account_dir="${accounts[0]}"
 export CLAUDE_CONFIG_DIR="$account_dir"
 
 log "repo: $local_path"
