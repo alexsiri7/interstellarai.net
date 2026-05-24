@@ -11,11 +11,14 @@ set -euo pipefail
 SECRETS_FILE="${ARCHON_CRON_SECRETS:-$HOME/.config/archon-cron/secrets.env}"
 # shellcheck source=/dev/null
 [ -r "$SECRETS_FILE" ] && . "$SECRETS_FILE"
-: "${ANNIE_DB_URL:?ANNIE_DB_URL not set — populate $SECRETS_FILE}"
-: "${RELI_DB_URL:?RELI_DB_URL not set — populate $SECRETS_FILE}"
-: "${FILMDUEL_DB_URL:?FILMDUEL_DB_URL not set — populate $SECRETS_FILE}"
-: "${KINDRED_DB_URL:?KINDRED_DB_URL not set — populate $SECRETS_FILE}"
-: "${LACHESIS_DB_URL:?LACHESIS_DB_URL not set — populate $SECRETS_FILE}"
+# Prefer postgresql-client-17 (matches Supabase pg17); fall back to whatever is in PATH.
+if [ -x /usr/lib/postgresql/17/bin/pg_dump ]; then
+    PG_DUMP=/usr/lib/postgresql/17/bin/pg_dump
+    PSQL=/usr/lib/postgresql/17/bin/psql
+else
+    PG_DUMP=$(command -v pg_dump)
+    PSQL=$(command -v psql)
+fi
 
 BACKUP_ROOT="/mnt/steam-slow/backups"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
@@ -39,9 +42,11 @@ ANNIE_OUT="$ANNIE_BACKUP_DIR/annie-${TIMESTAMP}.sql.gz"
 # Note: --schema=annie and annie."Project" assume:
 #   1. 017-annie-schema-isolation.sql has been run against the consolidated DB
 #   2. ANNIE_DB_URL (in secrets.env) has been updated to the consolidated DB URL
-if pg_dump "$ANNIE_DB_URL" --no-owner --no-acl --schema=annie 2>&1 | gzip > "$ANNIE_OUT"; then
+if [ -z "${ANNIE_DB_URL:-}" ]; then
+    log "SKIP: Annie — ANNIE_DB_URL not set (populate $SECRETS_FILE)"
+elif $PG_DUMP "$ANNIE_DB_URL" --no-owner --no-acl --schema=annie 2>&1 | gzip > "$ANNIE_OUT"; then
     SIZE=$(du -h "$ANNIE_OUT" | cut -f1)
-    PROJECTS=$(psql "$ANNIE_DB_URL" -t -c "SELECT count(*) FROM annie.\"Project\"" 2>/dev/null | tr -d ' ' || echo "?")
+    PROJECTS=$($PSQL "$ANNIE_DB_URL" -t -c "SELECT count(*) FROM annie.\"Project\"" 2>/dev/null | tr -d ' ' || echo "?")
     log "Annie backed up: $ANNIE_OUT ($SIZE, $PROJECTS projects)"
     if [ "$PROJECTS" = "0" ]; then
         log "WARNING: Annie backup has 0 projects — possible data loss!"
@@ -55,9 +60,11 @@ RELI_BACKUP_DIR="$BACKUP_ROOT/reli"
 mkdir -p "$RELI_BACKUP_DIR"
 
 RELI_OUT="$RELI_BACKUP_DIR/reli-${TIMESTAMP}.sql.gz"
-if pg_dump "$RELI_DB_URL" --no-owner --no-acl --schema=reli | gzip > "$RELI_OUT"; then
+if [ -z "${RELI_DB_URL:-}" ]; then
+    log "SKIP: Reli — RELI_DB_URL not set (populate $SECRETS_FILE)"
+elif $PG_DUMP "$RELI_DB_URL" --no-owner --no-acl --schema=reli | gzip > "$RELI_OUT"; then
     SIZE=$(du -h "$RELI_OUT" | cut -f1)
-    THINGS=$(psql "$RELI_DB_URL" -t -c "SELECT count(*) FROM reli.things" 2>/dev/null | tr -d ' ' || echo "?")
+    THINGS=$($PSQL "$RELI_DB_URL" -t -c "SELECT count(*) FROM reli.things" 2>/dev/null | tr -d ' ' || echo "?")
     log "Reli backed up: $RELI_OUT ($SIZE, $THINGS things)"
     if [ "$THINGS" = "0" ] || [ "$THINGS" = "?" ]; then
         log "WARNING: Reli backup has 0 or unknown things — possible data loss or schema not yet migrated!"
@@ -74,9 +81,11 @@ FILMDUEL_OUT="$FILMDUEL_BACKUP_DIR/filmduel-${TIMESTAMP}.sql.gz"
 # Note: --schema=filmduel and filmduel.users assume:
 #   1. 014-filmduel-schema-isolation.sql has been run against the consolidated DB
 #   2. FILMDUEL_DB_URL (in Railway) has been updated to the consolidated DB URL
-if pg_dump "$FILMDUEL_DB_URL" --no-owner --no-acl --schema=filmduel | gzip > "$FILMDUEL_OUT"; then
+if [ -z "${FILMDUEL_DB_URL:-}" ]; then
+    log "SKIP: FilmDuel — FILMDUEL_DB_URL not set (populate $SECRETS_FILE)"
+elif $PG_DUMP "$FILMDUEL_DB_URL" --no-owner --no-acl --schema=filmduel | gzip > "$FILMDUEL_OUT"; then
     SIZE=$(du -h "$FILMDUEL_OUT" | cut -f1)
-    USERS=$(psql "$FILMDUEL_DB_URL" -t -c "SELECT count(*) FROM filmduel.users" 2>/dev/null | tr -d ' ' || echo "?")
+    USERS=$($PSQL "$FILMDUEL_DB_URL" -t -c "SELECT count(*) FROM filmduel.users" 2>/dev/null | tr -d ' ' || echo "?")
     log "FilmDuel backed up: $FILMDUEL_OUT ($SIZE, $USERS users)"
     if [ "$USERS" = "0" ]; then
         log "WARNING: FilmDuel backup has 0 users — possible data loss!"
@@ -90,9 +99,11 @@ KINDRED_BACKUP_DIR="$BACKUP_ROOT/kindred"
 mkdir -p "$KINDRED_BACKUP_DIR"
 
 KINDRED_OUT="$KINDRED_BACKUP_DIR/kindred-${TIMESTAMP}.sql.gz"
-if pg_dump "$KINDRED_DB_URL" --no-owner --no-acl --schema=kindred | gzip > "$KINDRED_OUT"; then
+if [ -z "${KINDRED_DB_URL:-}" ]; then
+    log "SKIP: Kindred — KINDRED_DB_URL not set (populate $SECRETS_FILE)"
+elif $PG_DUMP "$KINDRED_DB_URL" --no-owner --no-acl --schema=kindred | gzip > "$KINDRED_OUT"; then
     SIZE=$(du -h "$KINDRED_OUT" | cut -f1)
-    ENTRIES=$(psql "$KINDRED_DB_URL" -t -c "SELECT count(*) FROM kindred.entries" 2>/dev/null | tr -d ' ' || echo "?")
+    ENTRIES=$($PSQL "$KINDRED_DB_URL" -t -c "SELECT count(*) FROM kindred.entries" 2>/dev/null | tr -d ' ' || echo "?")
     log "Kindred backed up: $KINDRED_OUT ($SIZE, $ENTRIES entries)"
     if [ "$ENTRIES" = "0" ] || [ "$ENTRIES" = "?" ]; then
         log "WARNING: Kindred backup has 0 or unknown entries — possible data loss or schema not yet migrated!"
@@ -106,11 +117,13 @@ LACHESIS_BACKUP_DIR="$BACKUP_ROOT/lachesis"
 mkdir -p "$LACHESIS_BACKUP_DIR"
 
 LACHESIS_OUT="$LACHESIS_BACKUP_DIR/lachesis-${TIMESTAMP}.sql.gz"
-if pg_dump "$LACHESIS_DB_URL" --no-owner --no-acl --schema=lachesis | gzip > "$LACHESIS_OUT"; then
+if [ -z "${LACHESIS_DB_URL:-}" ]; then
+    log "SKIP: Lachesis — LACHESIS_DB_URL not set (populate $SECRETS_FILE)"
+elif $PG_DUMP "$LACHESIS_DB_URL" --no-owner --no-acl --schema=lachesis | gzip > "$LACHESIS_OUT"; then
     SIZE=$(du -h "$LACHESIS_OUT" | cut -f1)
     log "Lachesis backed up: $LACHESIS_OUT ($SIZE)"
     # TODO: once lachesis schema is populated, add row count check like FilmDuel/Kindred:
-    # ROWS=$(psql "$LACHESIS_DB_URL" -t -c "SELECT count(*) FROM lachesis.{primary_table}" 2>/dev/null | tr -d ' ' || echo "?")
+    # ROWS=$($PSQL "$LACHESIS_DB_URL" -t -c "SELECT count(*) FROM lachesis.{primary_table}" 2>/dev/null | tr -d ' ' || echo "?")
     # log "Lachesis backup: $ROWS rows in {primary_table}"
     # if [ "$ROWS" = "0" ]; then log "WARNING: Lachesis backup has 0 rows — possible data loss!"; fi
 else
