@@ -29,6 +29,9 @@ set -uo pipefail
 export PATH="$HOME/.bun/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/throttle.sh
+source "$SCRIPT_DIR/lib/throttle.sh"
+should_tick "sweep-audits" || exit 0
 BASE_DIR="/mnt/ext-fast"
 STATE_DIR="$HOME/.archon/sweep-state"
 LOG_DIR="$HOME/.archon/logs/sweep"

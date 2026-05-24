@@ -29,6 +29,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/archon-projects.sh
 source "$SCRIPT_DIR/lib/archon-projects.sh"
 load_archon_projects REPOS
+# shellcheck source=lib/throttle.sh
+source "$SCRIPT_DIR/lib/throttle.sh"
+should_tick "pipeline-health" || exit 0
 BASE_DIR="/mnt/ext-fast"
 STATE_DIR="$HOME/.archon/pipeline-health-state"
 
@@ -43,7 +46,7 @@ LOG_PREFIX="[pipeline-health]"
 # are subject to HTTP health checks + shipped-PR ntfys. Keep in sync with
 # deploy workflows / ntfy steps in each repo's .github/workflows/.
 declare -A DEPLOY_URLS=(
-  ["filmduel"]="https://filmduel.up.railway.app"
+  ["filmduel"]="https://filmduel.interstellarai.net"
   ["word-coach-annie"]="https://annie.interstellarai.net/api/health"
   ["reli"]="https://reli.interstellarai.net"
   ["interstellarai.net"]="https://www.interstellarai.net"
