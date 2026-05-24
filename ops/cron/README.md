@@ -19,10 +19,21 @@ $ARCHON_CRON_SECRETS   (default: ~/.config/archon-cron/secrets.env, chmod 600)
 
 Required keys (see individual scripts for which ones each uses):
 
-- `ANNIE_DB_URL`, `RELI_DB_URL`, `FILMDUEL_DB_URL` — Supabase connection strings used by `backup-dbs.sh`.
+- `ANNIE_DB_URL`, `RELI_DB_URL`, `FILMDUEL_DB_URL`, `KINDRED_DB_URL`, `LACHESIS_DB_URL` — Supabase connection strings used by `backup-dbs.sh`. Missing entries cause that DB to be skipped (not a hard failure).
 - `NTFY_TOPIC` — private ntfy.sh topic for notifications. No fallback default; scripts fail loud if missing.
 
 Set perms: `chmod 600 ~/.config/archon-cron/secrets.env`.
+
+### pg_dump version (required for Supabase pg17)
+
+`backup-dbs.sh` auto-selects `/usr/lib/postgresql/17/bin/pg_dump` if present. Install it once:
+
+```bash
+sudo apt-get install -y curl ca-certificates
+curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg
+echo "deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+sudo apt-get update && sudo apt-get install -y postgresql-client-17
+```
 
 ## Install the crontab
 
