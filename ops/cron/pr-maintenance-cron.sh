@@ -21,6 +21,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/archon-projects.sh
 source "$SCRIPT_DIR/lib/archon-projects.sh"
 load_archon_projects DEFAULT_PROJECTS
+# shellcheck source=lib/throttle.sh
+source "$SCRIPT_DIR/lib/throttle.sh"
+should_tick "pr-maintenance" || exit 0
 BASE_DIR="/mnt/ext-fast"
 LOG_PREFIX="[pr-maintenance]"
 
