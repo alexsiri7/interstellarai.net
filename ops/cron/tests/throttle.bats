@@ -16,6 +16,9 @@ setup() {
 }
 
 teardown() {
+    # Restore throttle.conf if a backup was left behind by a failing test.
+    local backup="$SCRIPT_DIR/throttle.conf.bak"
+    [ -f "$backup" ] && mv "$backup" "$SCRIPT_DIR/throttle.conf"
     rm -rf "$BATS_TMPDIR/home-$$"
 }
 
@@ -82,10 +85,12 @@ teardown() {
 @test "should_tick handles corrupt state file (treats as never ran)" {
     mkdir -p "$HOME/.config/archon-cron/state"
     echo "not-a-number" > "$HOME/.config/archon-cron/state/test-corrupt.last_run"
-    run should_tick "test-corrupt"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"WARNING"* ]]
-    [[ "$output" == *"corrupt"* ]]
+    local _combined
+    _combined=$(should_tick "test-corrupt" 2>&1)
+    local _status=$?
+    [ "$_status" -eq 0 ]
+    [[ "$_combined" == *"WARNING"* ]]
+    [[ "$_combined" == *"corrupt"* ]]
 }
 
 @test "should_tick handles empty state file (treats as never ran)" {
@@ -105,12 +110,14 @@ teardown() {
 
     unset _ARCHON_THROTTLE_SH
     source "$SCRIPT_DIR/lib/throttle.sh"
-    run should_tick "test-badconf"
+    local _combined
+    _combined=$(should_tick "test-badconf" 2>&1)
+    local _status=$?
     mv "$backup" "$conf"
 
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"WARNING"* ]]
-    [[ "$output" == *"invalid TICK_INTERVAL_MINUTES"* ]]
+    [ "$_status" -eq 0 ]
+    [[ "$_combined" == *"WARNING"* ]]
+    [[ "$_combined" == *"invalid TICK_INTERVAL_MINUTES"* ]]
 }
 
 # ── Source guard ─────────────────────────────────────────────────────
