@@ -34,7 +34,6 @@ rotate_backups() {
 }
 
 # --- Annie (Supabase PostgreSQL → pg_dump, schema-scoped) ---
-ANNIE_PROJECT_DIR="/mnt/ext-fast/gc/rigs/annie"
 ANNIE_BACKUP_DIR="$BACKUP_ROOT/annie"
 mkdir -p "$ANNIE_BACKUP_DIR"
 

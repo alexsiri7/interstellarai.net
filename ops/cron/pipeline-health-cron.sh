@@ -49,7 +49,7 @@ declare -A DEPLOY_URLS=(
   ["filmduel"]="https://filmduel.interstellarai.net"
   ["word-coach-annie"]="https://annie.interstellarai.net/api/health"
   ["reli"]="https://reli.interstellarai.net"
-  ["interstellarai.net"]="https://www.interstellarai.net"
+  ["interstellarai.net"]="https://www.interstellarai.net/healthz"
   ["lachesis"]="https://lachesis.interstellarai.net/healthz"
   ["kindred"]="https://kindred.up.railway.app/healthz"
 )
@@ -970,9 +970,9 @@ check_stuck_prs() {
 # ----------------------------------------------------------------------------
 # Check 6: Prod deploy HTTP health.
 #   Ported from archon/scripts/poll-health.sh (check 3). For each project with
-#   a DEPLOY_URLS entry, HEAD the URL; if HTTP status is <200 or >=400, file
-#   a `bug` issue (queued for the normal pickup cron). Dedup per project;
-#   marker is cleared once the deploy recovers.
+#   a DEPLOY_URLS entry, GET the URL (body discarded); if HTTP status is <200
+#   or >=400, file a `bug` issue (queued for the normal pickup cron). Dedup per
+#   project; marker is cleared once the deploy recovers.
 # ----------------------------------------------------------------------------
 check_deploy_http() {
   local project="$1"
@@ -980,7 +980,7 @@ check_deploy_http() {
   [ -n "$deploy_url" ] || return  # No public URL configured — skip
 
   local http_code
-  http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$deploy_url" 2>/dev/null || echo "000")
+  http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$deploy_url" 2>/dev/null)
 
   local marker="$STATE_DIR/deploy-down-$project"
   if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 400 ]; then
@@ -1007,7 +1007,8 @@ EOF
     gh issue create --repo "alexsiri7/$project" \
       --title "Deploy down: $deploy_url returning HTTP $http_code" \
       --label "bug" \
-      --body "$body" >/dev/null 2>&1 || true
+      --body "$body" >/dev/null 2>&1 \
+      || log "$project: WARNING: gh issue create failed (rate limit / auth / network?)"
     return
   fi
 
@@ -1028,7 +1029,7 @@ check_staging_deploy_http() {
   [ -n "$staging_url" ] || return  # No staging URL configured — skip
 
   local http_code
-  http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$staging_url" 2>/dev/null || echo "000")
+  http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$staging_url" 2>/dev/null)
 
   local marker="$STATE_DIR/staging-health/deploy-down-$project"
   if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 400 ]; then
@@ -1067,7 +1068,7 @@ check_shipped_prs() {
   # Only announce if deploy is currently healthy — avoid claiming "shipped"
   # when prod is actually down. check_deploy_http already logged status.
   local http_code
-  http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$deploy_url" 2>/dev/null || echo "000")
+  http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$deploy_url" 2>/dev/null)
   [ "$http_code" -ge 200 ] && [ "$http_code" -lt 400 ] || return
 
   local merged
