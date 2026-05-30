@@ -70,16 +70,16 @@ load_check_deploy_http() {
     # Pre-create marker — simulates a previously-filed issue.
     touch "$STATE_DIR/deploy-down-test-project"
 
-    # Capture gh calls to confirm no new issue is filed.
-    gh_calls=0
-    gh() { gh_calls=$((gh_calls + 1)); }
+    # Sentinel file: if gh is called inside run's subshell, it creates this file.
+    local gh_sentinel="$BATS_TMPDIR/gh-called-$$"
+    gh() { touch "$gh_sentinel"; }
     export -f gh
 
     run check_deploy_http "test-project"
 
     # Marker still present, gh issue create NOT called.
     [ -f "$STATE_DIR/deploy-down-test-project" ]
-    [ "$gh_calls" -eq 0 ]
+    [ ! -f "$gh_sentinel" ]
 }
 
 @test "check_deploy_http clears marker when deploy recovers (200)" {
