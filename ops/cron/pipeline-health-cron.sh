@@ -49,7 +49,7 @@ declare -A DEPLOY_URLS=(
   ["filmduel"]="https://filmduel.interstellarai.net"
   ["word-coach-annie"]="https://annie.interstellarai.net/api/health"
   ["reli"]="https://reli.interstellarai.net"
-  ["interstellarai.net"]="https://www.interstellarai.net"
+  ["interstellarai.net"]="https://www.interstellarai.net/healthz"
   ["lachesis"]="https://lachesis.interstellarai.net/healthz"
   ["kindred"]="https://kindred.up.railway.app/healthz"
 )
@@ -980,7 +980,7 @@ check_deploy_http() {
   [ -n "$deploy_url" ] || return  # No public URL configured — skip
 
   local http_code
-  http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$deploy_url" 2>/dev/null || echo "000")
+  http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$deploy_url" 2>/dev/null)
 
   local marker="$STATE_DIR/deploy-down-$project"
   if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 400 ]; then
@@ -1028,7 +1028,7 @@ check_staging_deploy_http() {
   [ -n "$staging_url" ] || return  # No staging URL configured — skip
 
   local http_code
-  http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$staging_url" 2>/dev/null || echo "000")
+  http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$staging_url" 2>/dev/null)
 
   local marker="$STATE_DIR/staging-health/deploy-down-$project"
   if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 400 ]; then
@@ -1067,7 +1067,7 @@ check_shipped_prs() {
   # Only announce if deploy is currently healthy — avoid claiming "shipped"
   # when prod is actually down. check_deploy_http already logged status.
   local http_code
-  http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$deploy_url" 2>/dev/null || echo "000")
+  http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$deploy_url" 2>/dev/null)
   [ "$http_code" -ge 200 ] && [ "$http_code" -lt 400 ] || return
 
   local merged
