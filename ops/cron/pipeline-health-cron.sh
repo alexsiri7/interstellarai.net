@@ -970,9 +970,9 @@ check_stuck_prs() {
 # ----------------------------------------------------------------------------
 # Check 6: Prod deploy HTTP health.
 #   Ported from archon/scripts/poll-health.sh (check 3). For each project with
-#   a DEPLOY_URLS entry, HEAD the URL; if HTTP status is <200 or >=400, file
-#   a `bug` issue (queued for the normal pickup cron). Dedup per project;
-#   marker is cleared once the deploy recovers.
+#   a DEPLOY_URLS entry, GET the URL (body discarded); if HTTP status is <200
+#   or >=400, file a `bug` issue (queued for the normal pickup cron). Dedup per
+#   project; marker is cleared once the deploy recovers.
 # ----------------------------------------------------------------------------
 check_deploy_http() {
   local project="$1"
@@ -1007,7 +1007,8 @@ EOF
     gh issue create --repo "alexsiri7/$project" \
       --title "Deploy down: $deploy_url returning HTTP $http_code" \
       --label "bug" \
-      --body "$body" >/dev/null 2>&1 || true
+      --body "$body" >/dev/null 2>&1 \
+      || log "$project: WARNING: gh issue create failed (rate limit / auth / network?)"
     return
   fi
 
