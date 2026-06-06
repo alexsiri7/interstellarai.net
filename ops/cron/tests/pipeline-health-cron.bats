@@ -55,7 +55,8 @@ load_check_deploy_http() {
 
 @test "check_deploy_http does NOT file issue when first probe fails but second succeeds" {
     # Stub curl to fail once then succeed on the second call.
-    stub_file="$BATS_TMPDIR/curl-calls-$$"
+    # Use STATE_DIR so teardown cleans it up even if an assertion fails.
+    stub_file="$STATE_DIR/curl-calls"
     printf '0' > "$stub_file"
     curl() {
         local n; n=$(cat "$stub_file")
@@ -73,18 +74,30 @@ load_check_deploy_http() {
     run check_deploy_http "test-project"
 
     [ ! -f "$STATE_DIR/deploy-down-test-project" ]
-    rm -f "$stub_file"
+    # stub_file cleaned by teardown — no explicit rm needed
 }
 
 @test "check_deploy_http files issue only after all 3 probes fail" {
-    curl() { printf '000'; return 6; }
+    # Counter stub to verify curl is called exactly 3 times (all probes attempted).
+    # Use STATE_DIR so teardown cleans it up even if an assertion fails.
+    stub_file="$STATE_DIR/curl-calls3"
+    printf '0' > "$stub_file"
+    curl() {
+        local n; n=$(cat "$stub_file")
+        n=$((n + 1)); printf '%s' "$n" > "$stub_file"
+        printf '000'; return 6
+    }
     export -f curl
+    export stub_file
 
     load_check_deploy_http
 
     run check_deploy_http "test-project"
 
     [ -f "$STATE_DIR/deploy-down-test-project" ]
+    # Verify curl was called exactly 3 times (all probes attempted).
+    [ "$(cat "$stub_file")" -eq 3 ]
+    # stub_file cleaned by teardown — no explicit rm needed
 }
 
 @test "check_deploy_http does NOT create marker when curl returns 200" {
