@@ -977,10 +977,18 @@ check_stuck_prs() {
 check_deploy_http() {
   local project="$1"
   local deploy_url="${DEPLOY_URLS[$project]:-}"
-  [ -n "$deploy_url" ] || return  # No public URL configured — skip
+  [ -n "$deploy_url" ] || return 0  # No public URL configured — skip
 
-  local http_code
-  http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$deploy_url" 2>/dev/null)
+  # Probe up to 3 times (30s apart) before declaring the deploy down.
+  # This avoids filing spurious issues for transient connection failures.
+  local http_code attempt
+  for attempt in 1 2 3; do
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$deploy_url" 2>/dev/null)
+    if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 400 ]; then
+      break
+    fi
+    [ "$attempt" -lt 3 ] && sleep 30
+  done
 
   local marker="$STATE_DIR/deploy-down-$project"
   if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 400 ]; then
