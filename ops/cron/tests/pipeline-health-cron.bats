@@ -14,6 +14,9 @@ setup() {
     gh() { :; }
     export -f gh
 
+    sleep() { :; }
+    export -f sleep
+
     # Declare global arrays expected by the functions under test.
     declare -gA DEPLOY_URLS=(
         ["test-project"]="https://test.example.com/healthz"
@@ -47,6 +50,40 @@ load_check_deploy_http() {
     run check_deploy_http "test-project"
 
     # Marker file must be created (deploy-down path taken).
+    [ -f "$STATE_DIR/deploy-down-test-project" ]
+}
+
+@test "check_deploy_http does NOT file issue when first probe fails but second succeeds" {
+    # Stub curl to fail once then succeed on the second call.
+    stub_file="$BATS_TMPDIR/curl-calls-$$"
+    printf '0' > "$stub_file"
+    curl() {
+        local n; n=$(cat "$stub_file")
+        n=$((n + 1)); printf '%s' "$n" > "$stub_file"
+        if [ "$n" -eq 1 ]; then
+            printf '000'; return 6
+        fi
+        printf '200'; return 0
+    }
+    export -f curl
+    export stub_file
+
+    load_check_deploy_http
+
+    run check_deploy_http "test-project"
+
+    [ ! -f "$STATE_DIR/deploy-down-test-project" ]
+    rm -f "$stub_file"
+}
+
+@test "check_deploy_http files issue only after all 3 probes fail" {
+    curl() { printf '000'; return 6; }
+    export -f curl
+
+    load_check_deploy_http
+
+    run check_deploy_http "test-project"
+
     [ -f "$STATE_DIR/deploy-down-test-project" ]
 }
 
