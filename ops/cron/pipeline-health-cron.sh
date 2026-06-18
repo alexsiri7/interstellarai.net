@@ -377,6 +377,14 @@ check_prod_deploy() {
   head_sha=$(echo "$head_json" | jq -r '.sha')
   head_ts=$(echo "$head_json" | jq -r '.ts')
 
+  # Guard: jq returns the string "null" for missing fields on error responses.
+  # If we got null for either field, the API call failed — skip silently.
+  if [ "$head_sha" = "null" ] || [ -z "$head_sha" ] || \
+     [ "$head_ts" = "null" ] || [ -z "$head_ts" ]; then
+    log "$project: commits/main API returned null SHA/TS — transient failure, skipping"
+    return
+  fi
+
   # --- Source (a): GH Actions deploy workflow ---
   local deploy_sha="" deploy_ts="" deploy_state="" deploy_url=""
   local wf_run
