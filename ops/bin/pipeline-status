@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# pipeline-status — quick project health dashboard.
+# Reads ops/cron/archon-projects.txt for the canonical project list.
+# Usage: pipeline-status [repo-slug ...]
+set -uo pipefail
+
+export PATH="$HOME/.bun/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+PROJECTS_FILE="$SCRIPT_DIR/../cron/archon-projects.txt"
+OWNER="alexsiri7"
+
+# Colours
+BOLD='\033[1m'; RESET='\033[0m'
+RED='\033[0;31m'; YELLOW='\033[0;33m'; GREEN='\033[0;32m'; DIM='\033[2m'
+
+# --- Load project list ---
+if [ $# -gt 0 ]; then
+    PROJECTS=("$@")
+else
+    mapfile -t PROJECTS < <(grep -v '^\s*#' "$PROJECTS_FILE" | grep -v '^\s*$' | sed 's/#.*//' | sed 's/[[:space:]]//g')
+fi
+
+# --- Helpers ---
+label_bucket() {
+    # Summarise issue labels into a short tag
+    local labels="$1"
+    if echo "$labels" | grep -qi "human-needed";       then echo "human-needed"; return; fi
+    if echo "$labels" | grep -qi "factory-gap";        then echo "factory-gap";  return; fi
+    if echo "$labels" | grep -qi "archon:in-progress"; then echo "archon:wip";   return; fi
+    if echo "$labels" | grep -qi "archon:queued";      then echo "archon:queued";return; fi
+    if echo "$labels" | grep -qi "archon:skipped";     then echo "archon:skipped";return; fi
+    echo "open"
+}
+
+ci_status() {
+    local repo="$1"
+    local result
+    # Exclude scheduled monitoring/health workflows (uptime, health, disk, resource, backup checks).
+    # Only count push/pull_request-triggered runs as real CI.
+    result=$(gh api "repos/$OWNER/$repo/commits/HEAD/check-runs" \
+        --jq '[.check_runs[] | select(.status=="completed")
+              | select(.name | test("health|uptime|monitor|disk|backup|resource"; "i") | not)]
+              | if length==0 then "none"
+                elif (map(select(.conclusion!="success" and .conclusion!="skipped" and .conclusion!="neutral")) | length) > 0 then "fail"
+                else "pass" end' 2>/dev/null || echo "err")
+    echo "$result"
+}
+
+# --- Header ---
+echo ""
+printf "${BOLD}%-22s  %4s  %6s  %5s  %s${RESET}\n" "REPO" "PRs" "ISSUES" "CI" "NOTES"
+printf '%s\n' "──────────────────────────────────────────────────────────────"
+
+any_stuck=0
+
+for REPO in "${PROJECTS[@]}"; do
+    # Open PRs
+    pr_count=$(gh pr list --repo "$OWNER/$REPO" --state open --limit 50 --json number \
+        --jq 'length' 2>/dev/null || echo "?")
+
+    # Open issues — group by label bucket
+    issue_json=$(gh issue list --repo "$OWNER/$REPO" --state open --limit 100 \
+        --json number,labels 2>/dev/null || echo "[]")
+    issue_count=$(echo "$issue_json" | jq 'length' 2>/dev/null || echo "?")
+
+    # Bucket counts for notes
+    human_needed=$(echo "$issue_json" | jq '[.[] | select(.labels[].name=="human-needed")] | length' 2>/dev/null || echo 0)
+    factory_gap=$(echo  "$issue_json" | jq '[.[] | select(.labels[].name=="factory-gap")]  | length' 2>/dev/null || echo 0)
+    archon_wip=$(echo   "$issue_json" | jq '[.[] | select(.labels[].name=="archon:in-progress")] | length' 2>/dev/null || echo 0)
+
+    # CI on main
+    ci=$(ci_status "$REPO")
+    case "$ci" in
+        pass) ci_str="${GREEN}pass${RESET}" ;;
+        fail) ci_str="${RED}FAIL${RESET}";  any_stuck=1 ;;
+        none) ci_str="${DIM}none${RESET}" ;;
+        *)    ci_str="${DIM} ?  ${RESET}" ;;
+    esac
+
+    # Notes column
+    notes=""
+    [ "$human_needed" -gt 0 ] 2>/dev/null && notes+="${YELLOW}human-needed:${human_needed}${RESET} "
+    [ "$factory_gap"  -gt 0 ] 2>/dev/null && notes+="factory-gap:${factory_gap} "
+    [ "$archon_wip"   -gt 0 ] 2>/dev/null && notes+="wip:${archon_wip} "
+    [ "$pr_count" -gt 3 ]     2>/dev/null && notes+="${YELLOW}${pr_count} PRs${RESET} "
+
+    printf "%-22s  %4s  %6s  " "$REPO" "$pr_count" "$issue_count"
+    printf "${ci_str}  ${notes}\n"
+done
+
+echo ""
+if [ "$any_stuck" -eq 1 ]; then
+    printf "${RED}CI red on main in at least one project — check above.${RESET}\n\n"
+fi
