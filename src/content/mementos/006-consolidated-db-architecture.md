@@ -33,7 +33,7 @@ staging) using per-project Postgres schemas and scoped roles:
   from 014 onward (014-filmduel, 015-kindred, 016-lachesis, 017-reli). Each
   migration creates the project schema, the scoped role, grants permissions, and
   migrates any existing data from `public` into the new schema. Annie's schema
-  isolation migration is tracked separately in issue #26.
+  isolation migration is tracked separately in that project's own issue tracker.
 
 ## Consequences
 

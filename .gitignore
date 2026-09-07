@@ -5,3 +5,6 @@ dist/
 .env.local
 .DS_Store
 *.log
+
+# Local-only operator script; must never be published with the site.
+ops/cron/bug-bankruptcy.sh

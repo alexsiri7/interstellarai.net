@@ -1,10 +1,11 @@
 /* ============================================================
-   InterstellarAI — colors_and_type.css
-   Core design tokens: color, type, spacing, radius, shadow.
-   Import this file first in any page.
-   ============================================================ */
+   InterstellarAI — design tokens
+   Color, type, spacing, radius, shadow. Imported first by Layout.astro.
 
-@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+   Fonts are loaded with preconnect + <link> in Layout.astro rather than an
+   @import here: a CSS @import cannot start downloading until this stylesheet
+   has itself been fetched and parsed, which serialises the request chain.
+   ============================================================ */
 
 :root {
   /* -------- PAPER / NEUTRALS (warm, slightly cream) -------- */

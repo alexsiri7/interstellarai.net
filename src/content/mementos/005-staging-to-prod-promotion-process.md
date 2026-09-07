@@ -53,8 +53,9 @@ managed across environments.
   (staging env ≠ prod env). They are injected at deploy time by the platform.
 - No `.env` files are committed to version control. Local development uses
   `.env.local`, which is gitignored.
-- The `pipeline-health-cron` reads secrets from
-  `~/.config/archon-cron/secrets.env` on the host machine (not committed).
+- The `pipeline-health-cron` reads its secrets from a file outside the repo,
+  in the pipeline host's own user config directory. Nothing secret is
+  committed.
 
 ## Consequences
 

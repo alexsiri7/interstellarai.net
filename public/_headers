@@ -1,0 +1,23 @@
+/*
+  # Force HTTPS for two years, including subdomains. The zone is Cloudflare-
+  # managed and every host under it is already HTTPS-only.
+  Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
+  # Stop browsers guessing a MIME type that differs from the declared one.
+  X-Content-Type-Options: nosniff
+  # This is a static marketing/handbook site; nothing here should be framed.
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  # Nothing on the site uses these device APIs.
+  Permissions-Policy: geolocation=(), camera=(), microphone=(), payment=(), usb=(), interest-cohort=()
+  X-DNS-Prefetch-Control: off
+  Cross-Origin-Opener-Policy: same-origin
+
+# No Content-Security-Policy: Astro emits scoped <style> blocks and two pages
+# carry inline <style>, so any workable policy would need style-src
+# 'unsafe-inline' and would buy nothing while risking the Google Fonts load.
+
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/og-image.png
+  Cache-Control: public, max-age=604800

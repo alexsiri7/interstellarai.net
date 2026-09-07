@@ -10,9 +10,12 @@ export async function getStaticPaths() {
 const { decision } = Astro.props;
 const { Content } = await decision.render();
 const adrNum = String(decision.data.number).padStart(3, "0");
+const description = `ADR-${adrNum} (${decision.data.status}, ${decision.data.date
+  .toISOString()
+  .slice(0, 10)}): ${decision.data.title} — an InterStellar AI memento.`;
 ---
 
-<Layout title={`ADR-${adrNum}: ${decision.data.title}`}>
+<Layout title={`ADR-${adrNum}: ${decision.data.title}`} description={description}>
   <section class="adr-head">
     <div class="wrap-prose">
       <div class="crumbs"><a href="/mementos">← all mementos</a></div>
