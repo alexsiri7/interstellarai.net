@@ -5,7 +5,8 @@
 #   2. Prod deploy failed or lagging main HEAD → file issue + fire archon (dedup by SHA)
 #   3. Zombie archon DB runs (status=running, age >4h) → abandon
 #   4. Disk >85% on / or /mnt/ext-fast → ntfy
-#   5. No pipeline progress in last tick (no commits, no archon completions):
+#   5. No pipeline progress in last tick (no commits, no archon completions)
+#      while work is pending (queued/in-progress issues or actionable PRs):
 #        - If token-limit markers in recent logs → wait, retry next tick
 #        - Else → fire archon-assist diagnostic (dedup: 2h cooldown)
 #   6. Open archon PRs with failed CI → fire archon-assist to diagnose + fix
@@ -754,6 +755,29 @@ check_progress() {
 
   log "progress: $commits commits on main, $completions archon completions since last tick"
   [ $((commits + completions)) -gt 0 ] && return
+
+  # No progress is only a stall if there was work to make progress on.
+  # An empty backlog (no archon:queued/in-progress issues, no open PR that
+  # pr-maintenance would act on) is idle, not stuck — firing the diagnostic
+  # there burns an archon-assist run every 2h for nothing.
+  local pending=0
+  for project in "${REPOS[@]}"; do
+    local n
+    n=$(gh issue list --repo "alexsiri7/$project" --state open --limit 100 \
+          --json labels \
+          --jq '[.[] | select(.labels | map(.name) | any(. == "archon:queued" or . == "archon:in-progress" or . == "archon:triage-in-progress"))] | length' \
+          2>/dev/null || echo 0)
+    pending=$((pending + n))
+    n=$(gh pr list --repo "alexsiri7/$project" --state open --json isDraft,mergeStateStatus \
+          --jq '[.[] | select(.isDraft == false and (.mergeStateStatus == "CLEAN" or .mergeStateStatus == "BEHIND" or .mergeStateStatus == "DIRTY" or .mergeStateStatus == "UNSTABLE" or .mergeStateStatus == "UNKNOWN"))] | length' \
+          2>/dev/null || echo 0)
+    pending=$((pending + n))
+  done
+  if [ "$pending" -eq 0 ]; then
+    log "no progress, but no queued issues or actionable PRs — idle, not stalled"
+    return
+  fi
+  log "no progress with $pending pending item(s) — checking for token-limit markers"
 
   # No progress — check for token-limit markers
   local token_hint=0
