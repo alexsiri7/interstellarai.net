@@ -1,7 +1,11 @@
 /*
   # Force HTTPS for two years, including subdomains. The zone is Cloudflare-
   # managed and every host under it is already HTTPS-only.
-  Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
+  # No `preload`: that directive declares intent to join the browser preload
+  # list, which is effectively irreversible and would bind every sibling
+  # subdomain (filmduel, reli, annie, kindred, lachesis) to HTTPS-only with no
+  # practical way back. HSTS works fine without it.
+  Strict-Transport-Security: max-age=63072000; includeSubDomains
   # Stop browsers guessing a MIME type that differs from the declared one.
   X-Content-Type-Options: nosniff
   # This is a static marketing/handbook site; nothing here should be framed.
