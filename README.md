@@ -5,10 +5,13 @@ the InterStellar AI project portfolio.
 
 ## What lives here
 
-- **Marketing pages** (`src/pages/`) — what visitors see at the apex domain
+- **Marketing pages** (`src/pages/`) — what visitors see at www.interstellarai.net
 - **Tenets** (`src/pages/tenets.astro`) — the non-negotiable principles
-- **Decision log** (`src/content/mementos/`) — ADRs for cross-project decisions
-- **Project index** (`src/pages/projects.astro`) — catalog with deploy targets
+- **Mementos** (`src/content/mementos/`) — architecture decision records for
+  cross-project decisions
+- **Project index** (`src/pages/projects.astro`) — catalog with deploy targets,
+  rendered from `src/data/projects.ts` (the homepage grid and hero counters
+  read the same file, so they cannot drift apart)
 
 Per-project apps live under subdomains (e.g. `filmduel.interstellarai.net`),
 deployed from their own repos — not from here.
@@ -43,17 +46,33 @@ against the `interstellarai-net` Pages project. Required repo secrets:
 - `CLOUDFLARE_ACCOUNT_ID`
 
 Custom domain `www.interstellarai.net` is attached to the Pages project and
-resolves via Cloudflare's automatic DNS.
+resolves via Cloudflare's automatic DNS. **`www` is the canonical host** — it is
+the value of `site` in `astro.config.mjs` and the origin used for canonical and
+Open Graph URLs.
 
-### Optional apex redirect
+### Apex redirect (not yet configured)
 
-Add a Cloudflare redirect rule or page rule sending
-`interstellarai.net/*` → `https://www.interstellarai.net/$1`.
+The apex `interstellarai.net` currently has **no DNS record**, so it fails to
+resolve. To send it to `www`, in the Cloudflare dashboard for the zone:
 
-## Writing a new ADR
+1. **DNS** → add a *proxied* record for `@` so the hostname resolves at all —
+   either `CNAME @ → <pages-project>.pages.dev` or a placeholder
+   `A @ → 192.0.2.1`. The orange-cloud proxy must be on; Cloudflare flattens
+   the apex CNAME and terminates TLS.
+2. **Rules → Redirect Rules** → create a rule:
+   - When: `http.host eq "interstellarai.net"`
+   - Then: dynamic redirect to
+     `concat("https://www.interstellarai.net", http.request.uri.path)`,
+     status **301**, *preserve query string* enabled.
+
+Attaching the apex as a second custom domain on the Pages project is **not**
+equivalent — that serves the same site on two hosts (duplicate content) rather
+than redirecting one to the other.
+
+## Writing a new memento (ADR)
 
 1. Pick the next `number` (check `src/content/mementos/` — current max + 1).
-2. Copy an existing ADR as a template.
+2. Copy an existing memento as a template.
 3. Fill in frontmatter (`title`, `number`, `status`, `date`, and `projects` if the decision spans multiple projects — `projects` is optional and omitted for single-project decisions).
 4. Write Context / Decision / Consequences / Alternatives-considered.
 5. Open a PR. Merging publishes it to `/mementos/<slug>`.

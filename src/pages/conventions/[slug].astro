@@ -11,7 +11,10 @@ const { convention } = Astro.props;
 const { Content } = await convention.render();
 ---
 
-<Layout title={`${convention.data.title} · Conventions · InterStellar AI`}>
+<Layout
+  title={`${convention.data.title} · Conventions · InterStellar AI`}
+  description={convention.data.summary}
+>
   <section class="adr-head">
     <div class="wrap-prose">
       <div class="crumbs"><a href="/conventions">← all conventions</a></div>

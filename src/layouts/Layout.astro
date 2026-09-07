@@ -5,9 +5,20 @@ import '../styles/global.css';
 interface Props {
   title: string;
   description?: string;
+  /** Overrides the default social-card image. Resolved against `site`. */
+  image?: string;
 }
-const { title, description = "InterStellar AI — building AI-native software, in public." } = Astro.props;
+const {
+  title,
+  description = "InterStellar AI — building AI-native software, in public.",
+  image = "/og-image.png",
+} = Astro.props;
 const path = Astro.url.pathname;
+
+// Social-preview and canonical URLs must be absolute, or crawlers silently
+// drop them. `Astro.site` comes from `site` in astro.config.mjs.
+const canonical = new URL(path, Astro.site);
+const ogImage = new URL(image, Astro.site);
 ---
 
 <!doctype html>
@@ -16,7 +27,34 @@ const path = Astro.url.pathname;
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="sitemap" type="application/xml" href="/sitemap-index.xml" />
+
+    <!-- Fonts: preconnect + link beats an @import inside CSS, which blocks
+         rendering until the stylesheet itself has been fetched and parsed. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+    />
+
+    <!-- Link previews -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="InterStellar AI" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={ogImage} />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="InterStellar AI — small software, shipped by machines." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImage} />
+
     <title>{title}</title>
   </head>
   <body>

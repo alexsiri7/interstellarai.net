@@ -1,0 +1,5 @@
+# interstellarai.net
+User-agent: *
+Allow: /
+
+Sitemap: https://www.interstellarai.net/sitemap-index.xml

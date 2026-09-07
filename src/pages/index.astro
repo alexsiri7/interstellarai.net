@@ -1,22 +1,32 @@
 ---
 import Layout from "../layouts/Layout.astro";
+import { getCollection } from "astro:content";
+import { projects } from "../data/projects";
+
+// Counters are derived at build time so they can never drift from what the
+// page actually shows.
+const repoCount = projects.length;
+const mementoCount = (await getCollection("mementos")).length;
 ---
 
-<Layout title="InterStellar AI">
+<Layout
+  title="InterStellar AI"
+  description="A portfolio of small AI-powered tools and the engineering handbook that keeps them shipping — automation drafts the PRs, staging gates the deploys, humans write the mementos."
+>
   <section class="hero-b">
     <div class="wrap">
       <div class="hero-grid">
         <div>
           <div class="eyebrow">✶ interstellarai.net · est. 2026</div>
           <h1>Small software, <em>shipped</em> by machines.</h1>
-          <p class="lede">A portfolio of tiny AI-powered tools — and the engineering handbook that keeps them shipping. Automation drafts the PRs. Staging gates the deploys. Humans write the ADRs and drink the coffee.</p>
+          <p class="lede">A portfolio of tiny AI-powered tools — and the engineering handbook that keeps them shipping. Automation drafts the PRs. Staging gates the deploys. Humans write the mementos and drink the coffee.</p>
           <div class="ctas">
             <a class="btn btn-primary btn-md" href="/projects">See the projects →</a>
             <a class="btn btn-link btn-md" href="/tenets">Read the tenets</a>
           </div>
           <div class="hero-meta">
-            <span>◉ 5 repos in orbit</span>
-            <span>✶ 4 ADRs, counting</span>
+            <span>◉ {repoCount} repos in orbit</span>
+            <span>✶ {mementoCount} mementos, counting</span>
             <span>· auto-deployed</span>
           </div>
         </div>
@@ -31,21 +41,25 @@ import Layout from "../layouts/Layout.astro";
     <div class="wrap">
       <div class="how-cell">
         <div class="num">◯ 01</div>
-        <h3>A human writes <em>an intent.</em></h3>
+        <h2>A human writes <em>an intent.</em></h2>
         <p>A GitHub issue, a two-line prose spec, or a sticky note. The bar is low; the point is to start.</p>
         <div class="links"><a href="/tenets">Why we write things down →</a></div>
       </div>
       <div class="how-cell">
         <div class="num">◯ 02</div>
-        <h3>A <em>small tool</em> drafts the PR.</h3>
+        <h2>A <em>small tool</em> drafts the PR.</h2>
         <p>A YAML-driven harness turns the intent into a PR: scoped, CI-green, auto-merge armed.</p>
         <div class="links"><a href="/mementos/004-archon-drives-automation">ADR-004: one tool drives the portfolio →</a></div>
       </div>
       <div class="how-cell">
         <div class="num">◯ 03</div>
-        <h3>Staging <em>is the gate.</em></h3>
-        <p>Merges roll to staging, E2E runs, prod promotes if the gate passes. A fourth cron watches the first three.</p>
-        <div class="links"><a href="/mementos/001-staging-before-prod">ADR-001 · ADR-002 →</a></div>
+        <h2>Staging <em>is the gate.</em></h2>
+        <p>Merges roll to staging, E2E runs, prod promotes if the gate passes. A third cron watches the other two.</p>
+        <div class="links">
+          <a href="/mementos/001-staging-before-prod">ADR-001</a>
+          <span class="sep">·</span>
+          <a href="/mementos/002-pipeline-health-auto-fix">ADR-002 →</a>
+        </div>
       </div>
     </div>
   </section>
@@ -56,54 +70,19 @@ import Layout from "../layouts/Layout.astro";
         <h2 class="section-title">What's <em>in orbit</em></h2>
       </div>
       <div class="portfolio-grid">
-        <a class="pf-card" href="https://filmduel.interstellarai.net">
-          <div class="row">
-            <p class="name"><em>Film</em>Duel</p>
-            <span class="badge badge-live">live</span>
-          </div>
-          <p class="blurb">Rank movies and TV via ELO duels.</p>
-          <div class="foot"><span>FastAPI · React</span><span>↗</span></div>
-        </a>
-        <a class="pf-card" href="https://kindred.interstellarai.net">
-          <div class="row">
-            <p class="name">Kindred</p>
-            <span class="badge badge-live">live</span>
-          </div>
-          <p class="blurb">Reflective journaling through your AI assistant.</p>
-          <div class="foot"><span>TypeScript · MCP · React · Supabase</span><span>↗</span></div>
-        </a>
-        <a class="pf-card" href="https://reli.interstellarai.net">
-          <div class="row">
-            <p class="name">Reli</p>
-            <span class="badge badge-wip">wip</span>
-          </div>
-          <p class="blurb">Personal AI assistant with a knowledge graph.</p>
-          <div class="foot"><span>FastAPI · React</span><span>↗</span></div>
-        </a>
-        <a class="pf-card" href="https://annie.interstellarai.net">
-          <div class="row">
-            <p class="name"><em>Word Coach</em> Annie</p>
-            <span class="badge badge-wip">wip</span>
-          </div>
-          <p class="blurb">AI writing assistant for novelists.</p>
-          <div class="foot"><span>Next.js · Supabase</span><span>↗</span></div>
-        </a>
-        <div class="pf-card">
-          <div class="row">
-            <p class="name"><em>Cosmic</em> Match</p>
-            <span class="badge badge-wip">wip</span>
-          </div>
-          <p class="blurb">Space-themed match-3 mobile game.</p>
-          <div class="foot"><span>Flutter · Flame</span><span></span></div>
-        </div>
-        <div class="pf-card">
-          <div class="row">
-            <p class="name">The <em>Un-Reminder</em></p>
-            <span class="badge badge-wip">wip</span>
-          </div>
-          <p class="blurb">Stochastic, context-aware habit prompts.</p>
-          <div class="foot"><span>Android · on-device AI</span><span></span></div>
-        </div>
+        {projects.map((p) => {
+          const Card = p.href ? "a" : "div";
+          return (
+            <Card class="pf-card" href={p.href}>
+              <div class="row">
+                <p class="name">{p.namePre}{p.nameEm && <em>{p.nameEm}</em>}{p.namePost}</p>
+                <span class={`badge badge-${p.status}`}>{p.status}</span>
+              </div>
+              <p class="blurb">{p.blurb}</p>
+              <div class="foot"><span>{p.stackShort}</span><span>{p.href ? "↗" : ""}</span></div>
+            </Card>
+          );
+        })}
       </div>
     </div>
   </section>

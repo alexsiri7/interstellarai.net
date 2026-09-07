@@ -43,9 +43,6 @@ html[data-dir="b"] {
   --border-strong: rgba(255,255,255,0.18);
 }
 html[data-dir="b"] body { background: #0F1115; color: #EFE9DC; }
-html[data-dir="b"] .invert-to-paper { background: var(--paper); color: var(--ink); }
-html[data-dir="b"] .on-ink a { color: #EFE9DC; }
-html[data-dir="b"] .on-ink a:hover { color: var(--terracotta); }
 
 /* ============================================================
    Nav
@@ -116,7 +113,6 @@ section { padding: var(--sp-9) var(--sp-6); }
 .wrap { max-width: var(--max); margin: 0 auto; }
 .wrap-prose { max-width: var(--max-prose); margin: 0 auto; }
 .eyebrow { font-family: var(--font-mono); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-subtle); }
-html[data-dir="b"] .on-ink .eyebrow { color: #A39780; }
 
 /* ============================================================
    Direction A — Hero
@@ -154,14 +150,6 @@ html[data-dir="b"] .on-ink .eyebrow { color: #A39780; }
 .hero-b .hero-meta { font-family: var(--font-mono); font-size: 12px; color: #8A816F; letter-spacing: 0.04em; display: flex; gap: var(--sp-4); flex-wrap: wrap; }
 .hero-b .eyebrow { color: #A39780; }
 
-/* marquee of project names under hero-b */
-.marquee { border-top: 1px solid rgba(255,255,255,0.08); border-bottom: 1px solid rgba(255,255,255,0.08);
-           padding: var(--sp-4) 0; overflow: hidden; }
-.marquee-track { display: flex; gap: var(--sp-6); animation: marquee 60s linear infinite; white-space: nowrap; width: max-content; }
-.marquee-track span { font-family: var(--font-display); font-style: italic; font-size: 22px; color: #786E58; }
-.marquee-track .dot { color: var(--terracotta); font-style: normal; }
-@keyframes marquee { from { transform: translateX(0); } to { transform: translateX(-50%); } }
-
 /* ============================================================
    Section titles (shared)
    ============================================================ */
@@ -182,27 +170,15 @@ html[data-dir="b"] .how { background: #161920; color: #EFE9DC; }
 .how-cell { padding: 0; }
 .how-cell .num { font-family: var(--font-mono); font-size: 12px; color: var(--ink-3); letter-spacing: 0.06em; }
 html[data-dir="b"] .how-cell .num { color: #8A816F; }
-.how-cell h3 { font-family: var(--font-display); font-size: 28px; line-height: 1.15; margin: var(--sp-2) 0 var(--sp-3); font-weight: 400; letter-spacing: -0.01em; color: inherit; }
-.how-cell h3 em { font-style: italic; color: var(--terracotta); }
+.how-cell h2 { font-family: var(--font-display); font-size: 28px; line-height: 1.15; margin: var(--sp-2) 0 var(--sp-3); font-weight: 400; letter-spacing: -0.01em; color: inherit; }
+.how-cell h2 em { font-style: italic; color: var(--terracotta); }
 .how-cell p { font-size: 15px; line-height: 1.6; color: var(--fg-muted); margin: 0; }
 html[data-dir="b"] .how-cell p { color: #B4AB96; }
 .how-cell .links { margin-top: var(--sp-3); font-family: var(--font-mono); font-size: 12px; }
 .how-cell .links a { color: var(--slate); text-decoration: underline; text-underline-offset: 3px; }
 html[data-dir="b"] .how-cell .links a { color: #B9C6E8; }
 .how-cell .links a:hover { color: var(--terracotta); }
-
-/* ============================================================
-   Home — Featured project block (one hero card)
-   ============================================================ */
-.feature { background: var(--section-alt); }
-.feature .wrap { display: grid; grid-template-columns: 1fr 1.2fr; gap: var(--sp-8); align-items: center; }
-.feature-art { aspect-ratio: 4/5; background: var(--paper-2); border-radius: var(--r-lg); border: 1px solid var(--border); position: relative; overflow: hidden; display: flex; align-items: center; justify-content: center; }
-html[data-dir="b"] .feature-art { background: #161920; border-color: rgba(255,255,255,0.08); }
-.feature-art svg { width: 80%; height: 80%; }
-.feature h2 { font-family: var(--font-display); font-size: clamp(2rem, 4vw, 3.2rem); line-height: 1.05; letter-spacing: -0.02em; margin: var(--sp-3) 0 var(--sp-4); font-weight: 400; text-wrap: balance; }
-.feature h2 em { font-style: italic; color: var(--terracotta); }
-.feature p { font-size: 17px; line-height: 1.6; color: var(--fg-muted); margin: 0 0 var(--sp-5); max-width: 50ch; }
-html[data-dir="b"] .feature p { color: #B4AB96; }
+.how-cell .links .sep { opacity: 0.5; margin: 0 var(--sp-1); }
 
 /* ============================================================
    Home — Portfolio grid (mini project cards, 4 up)
@@ -231,8 +207,8 @@ html[data-dir="b"] .tenet { border-top-color: rgba(255,255,255,0.08); }
 html[data-dir="b"] .tenet:last-child { border-bottom-color: rgba(255,255,255,0.08); }
 .tenet-num { font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.06em; color: var(--ink-3); padding-top: 8px; }
 .tenet-num::before { content: '0' counter(ten); }
-.tenet h3 { font-family: var(--font-display); font-size: 32px; line-height: 1.2; margin: 0 0 var(--sp-3); font-weight: 400; letter-spacing: -0.01em; text-wrap: balance; padding-bottom: 0.12em; }
-.tenet h3 em { font-style: italic; color: var(--terracotta); }
+.tenet h2 { font-family: var(--font-display); font-size: 32px; line-height: 1.2; margin: 0 0 var(--sp-3); font-weight: 400; letter-spacing: -0.01em; text-wrap: balance; padding-bottom: 0.12em; }
+.tenet h2 em { font-style: italic; color: var(--terracotta); }
 .tenet p { font-size: 16px; line-height: 1.7; color: var(--fg-muted); margin: 0; max-width: 60ch; text-wrap: pretty; }
 html[data-dir="b"] .tenet p { color: #B4AB96; }
 
@@ -257,12 +233,6 @@ html[data-dir="b"] .dec .meta-date { color: #8A816F; }
 
 /* filter row */
 .filter-row { display: flex; gap: var(--sp-2); padding: var(--sp-4) 0; flex-wrap: wrap; align-items: center; }
-.chip { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase;
-        padding: 4px 10px; border-radius: var(--r-pill); border: 1px solid var(--border); background: transparent; color: inherit; cursor: pointer; transition: all 120ms var(--ease-out); }
-html[data-dir="b"] .chip { border-color: rgba(255,255,255,0.14); }
-.chip:hover { border-color: var(--border-strong); }
-.chip.is-on { background: var(--ink); color: var(--paper); border-color: var(--ink); }
-html[data-dir="b"] .chip.is-on { background: var(--paper); color: var(--ink); border-color: var(--paper); }
 .filter-label { font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-3); margin-right: var(--sp-2); }
 
 /* ============================================================
@@ -295,12 +265,20 @@ html[data-dir="b"] .adr-body .wrap-prose ul li strong { color: #EFE9DC; }
 .adr-body code { font-family: var(--font-mono); font-size: 0.88em; background: var(--paper-2); padding: 2px 6px; border-radius: var(--r-xs); color: var(--ink); }
 html[data-dir="b"] .adr-body code { background: #161920; color: #EFE9DC; border: 1px solid rgba(255,255,255,0.08); }
 
-.adr-table { width: 100%; border-collapse: collapse; margin: var(--sp-4) 0; font-size: 14px; }
-.adr-table th, .adr-table td { text-align: left; padding: var(--sp-3) var(--sp-3); border-bottom: 1px solid var(--border); vertical-align: top; }
-html[data-dir="b"] .adr-table th, html[data-dir="b"] .adr-table td { border-bottom-color: rgba(255,255,255,0.08); }
-.adr-table th { font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-3); font-weight: 400; }
-.adr-table td { line-height: 1.55; color: var(--ink-2); }
-html[data-dir="b"] .adr-table td { color: #C6BFAE; }
+/* Markdown tables render as bare <table>, so the prose selectors carry the
+   same styling as the explicit .adr-table class. Wrapped for narrow screens. */
+.adr-table,
+.adr-body .wrap-prose table { width: 100%; border-collapse: collapse; margin: var(--sp-4) 0; font-size: 14px; display: block; overflow-x: auto; }
+.adr-table th, .adr-table td,
+.adr-body .wrap-prose th, .adr-body .wrap-prose td { text-align: left; padding: var(--sp-3) var(--sp-3); border-bottom: 1px solid var(--border); vertical-align: top; }
+html[data-dir="b"] .adr-table th, html[data-dir="b"] .adr-table td,
+html[data-dir="b"] .adr-body .wrap-prose th, html[data-dir="b"] .adr-body .wrap-prose td { border-bottom-color: rgba(255,255,255,0.08); }
+.adr-table th,
+.adr-body .wrap-prose th { font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-3); font-weight: 400; white-space: nowrap; }
+.adr-table td,
+.adr-body .wrap-prose td { line-height: 1.55; color: var(--ink-2); }
+html[data-dir="b"] .adr-table td,
+html[data-dir="b"] .adr-body .wrap-prose td { color: #C6BFAE; }
 
 .adr-nav { display: flex; justify-content: space-between; padding: var(--sp-6) 0; border-top: 1px solid var(--border); margin-top: var(--sp-7); gap: var(--sp-5); flex-wrap: wrap; }
 html[data-dir="b"] .adr-nav { border-top-color: rgba(255,255,255,0.08); }
@@ -362,18 +340,14 @@ html[data-dir="b"] .footer { background: #07080B; }
 .footer-foot { position: relative; z-index: 2; max-width: var(--max); margin: var(--sp-7) auto 0; padding-top: var(--sp-4); border-top: 1px solid rgba(250,247,242,0.12); display: flex; justify-content: space-between; font-family: var(--font-mono); font-size: 11px; color: var(--ink-4); letter-spacing: 0.04em; flex-wrap: wrap; gap: var(--sp-2); }
 
 /* ---------- Dir B: force light headings on dark surfaces ----------
-   The root h1..h4 rule in colors_and_type.css sets color: var(--fg) (=--ink,
+   The root h1..h4 rule in tokens.css sets color: var(--fg) (=--ink,
    near-black). Class-level colors on cards can't override that without
    extra specificity. Sweep all headings to light in dir-b; paper surfaces
-   (.on-paper, .invert-to-paper) override back to ink. */
+   (.on-paper) override back to ink. */
 html[data-dir="b"] h1,
 html[data-dir="b"] h2,
 html[data-dir="b"] h3,
 html[data-dir="b"] h4 { color: #EFE9DC; }
-html[data-dir="b"] .invert-to-paper h1,
-html[data-dir="b"] .invert-to-paper h2,
-html[data-dir="b"] .invert-to-paper h3,
-html[data-dir="b"] .invert-to-paper h4,
 html[data-dir="b"] .on-paper h1,
 html[data-dir="b"] .on-paper h2,
 html[data-dir="b"] .on-paper h3,
@@ -383,13 +357,12 @@ html[data-dir="b"] h2 em,
 html[data-dir="b"] h3 em,
 html[data-dir="b"] h4 em { color: var(--terracotta); }
 
-html[data-dir="b"] .tenet h3,
-html[data-dir="b"] .feature h2,
+html[data-dir="b"] .tenet h2,
 html[data-dir="b"] .pf-card .name,
 html[data-dir="b"] .dec .title,
 html[data-dir="b"] .pf-shape-head h2,
 html[data-dir="b"] .pf-row .name,
-html[data-dir="b"] .how-cell h3,
+html[data-dir="b"] .how-cell h2,
 html[data-dir="b"] .section-title,
 html[data-dir="b"] .pf-hero h1,
 html[data-dir="b"] .adr-head h1,
@@ -412,14 +385,55 @@ html[data-dir="b"] .hero-b em,
 html[data-dir="b"] .footer em { color: var(--terracotta); }
 
 /* Direction A: ensure .how headings are dark ink on the light paper-2 rail */
-html[data-dir="a"] .how-cell h3 { color: var(--ink); }
-html[data-dir="a"] .how-cell h3 em { color: var(--terracotta); }
+html[data-dir="a"] .how-cell h2 { color: var(--ink); }
+html[data-dir="a"] .how-cell h2 em { color: var(--terracotta); }
+
+/* ============================================================
+   Accessibility
+   ============================================================ */
+/* Keyboard focus must be visible everywhere. `:focus-visible` keeps the ring
+   off mouse clicks, so this costs nothing visually for pointer users. */
+:focus-visible {
+  outline: 2px solid var(--terracotta);
+  outline-offset: 3px;
+  border-radius: var(--r-xs);
+}
+.nav-link:focus-visible,
+.nav-brand:focus-visible,
+.nav-ghost-link:focus-visible,
+.nav-mobile-links a:focus-visible,
+.nav-hamburger:focus-visible,
+.footer-cols a:focus-visible,
+.pf-card:focus-visible,
+.pf-row:focus-visible,
+.dec:focus-visible,
+.btn:focus-visible {
+  outline: 2px solid var(--terracotta);
+  outline-offset: 3px;
+  opacity: 1;
+}
+/* The card/row hover treatments double as focus treatments. */
+.pf-card:focus-visible { transform: translateY(-2px); box-shadow: var(--shadow-md); }
+.dec:focus-visible { background: var(--paper-2); }
+html[data-dir="b"] .dec:focus-visible { background: rgba(255,255,255,0.03); }
+
+/* Respect a reduced-motion preference: kill the 80s hero rotation and any
+   other decorative animation or transition rather than merely slowing it. */
+@media (prefers-reduced-motion: reduce) {
+  .drift { animation: none; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
 
 /* ============================================================
    Responsive
    ============================================================ */
 @media (max-width: 960px) {
-  .hero-a .wrap, .hero-b .hero-grid, .feature .wrap { grid-template-columns: 1fr; }
+  .hero-a .wrap, .hero-b .hero-grid { grid-template-columns: 1fr; }
   .hero-a .art, .hero-b .diagram { max-width: 360px; margin: 0 auto; }
   .how .wrap { grid-template-columns: 1fr; gap: var(--sp-5); }
   .portfolio-grid { grid-template-columns: repeat(2, 1fr); }

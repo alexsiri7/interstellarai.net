@@ -1,8 +1,12 @@
 ---
 import Layout from "../layouts/Layout.astro";
+import { projects, shapeGroups } from "../data/projects";
 ---
 
-<Layout title="Projects · InterStellar AI">
+<Layout
+  title="Projects · InterStellar AI"
+  description="The InterStellar AI portfolio: FilmDuel, Kindred, Reli, Word Coach Annie, Lachesis, Cosmic Match and The Un-Reminder — with the stack and deploy target behind each one."
+>
   <section class="pf-hero">
     <div class="wrap">
       <h1>The <em>portfolio</em></h1>
@@ -11,59 +15,27 @@ import Layout from "../layouts/Layout.astro";
   </section>
   <section class="pf-body">
     <div class="wrap">
-      <div class="pf-shape-group">
-        <div class="pf-shape-head">
-          <h2>Web backends</h2>
-          <span class="pf-shape-meta eyebrow">Railway · managed Postgres</span>
-        </div>
-        <div class="pf-list-row">
-          <a class="pf-row" href="https://filmduel.interstellarai.net">
-            <span class="name"><em>Film</em>Duel</span>
-            <span class="desc">Movie and TV ranking via ELO duels. FastAPI + React, PostgreSQL/Supabase.</span>
-            <span class="stack">FastAPI · React · Postgres</span>
-            <span class="status"><span class="badge badge-live">live</span></span>
-          </a>
-          <a class="pf-row" href="https://kindred.interstellarai.net">
-            <span class="name">Kindred</span>
-            <span class="desc">An MCP server + web app for reflective journaling. You talk to your AI assistant; Kindred provides the memory, structure, and patterns. No streaks, no nudges — just a quiet companion that remembers.</span>
-            <span class="stack">TypeScript · MCP · React · Supabase · Railway</span>
-            <span class="status"><span class="badge badge-live">live</span></span>
-          </a>
-          <a class="pf-row" href="https://reli.interstellarai.net">
-            <span class="name">Reli</span>
-            <span class="desc">Personal AI assistant with a knowledge graph. Python/FastAPI + React, Postgres with pgvector.</span>
-            <span class="stack">FastAPI · React · pgvector</span>
-            <span class="status"><span class="badge badge-wip">wip</span></span>
-          </a>
-          <a class="pf-row" href="https://annie.interstellarai.net">
-            <span class="name"><em>Word Coach</em> Annie</span>
-            <span class="desc">AI writing assistant for novelists. Next.js 15, PostgreSQL/Supabase, Prisma, with an MCP server exposing 48 tools.</span>
-            <span class="stack">Next.js · Supabase · Prisma</span>
-            <span class="status"><span class="badge badge-wip">wip</span></span>
-          </a>
-        </div>
-      </div>
-
-      <div class="pf-shape-group">
-        <div class="pf-shape-head">
-          <h2>Mobile</h2>
-          <span class="pf-shape-meta eyebrow">Android · on-device</span>
-        </div>
-        <div class="pf-list-row">
-          <div class="pf-row">
-            <span class="name"><em>Cosmic</em> Match</span>
-            <span class="desc">Space-themed match-3 mobile game. Flutter + Flame, Android.</span>
-            <span class="stack">Flutter · Flame</span>
-            <span class="status"><span class="badge badge-wip">wip</span></span>
+      {shapeGroups.map((group) => (
+        <div class="pf-shape-group">
+          <div class="pf-shape-head">
+            <h2>{group.title}</h2>
+            <span class="pf-shape-meta eyebrow">{group.meta}</span>
           </div>
-          <div class="pf-row">
-            <span class="name">The <em>Un-Reminder</em></span>
-            <span class="desc">Stochastic, context-aware habit prompts designed to defeat notification blindness. Native Android, on-device AI, no backend.</span>
-            <span class="stack">Android · on-device AI</span>
-            <span class="status"><span class="badge badge-wip">wip</span></span>
+          <div class="pf-list-row">
+            {projects.filter((p) => p.shape === group.shape).map((p) => {
+              const Row = p.href ? "a" : "div";
+              return (
+                <Row class="pf-row" href={p.href}>
+                  <span class="name">{p.namePre}{p.nameEm && <em>{p.nameEm}</em>}{p.namePost}</span>
+                  <span class="desc">{p.desc}</span>
+                  <span class="stack">{p.stack}</span>
+                  <span class="status"><span class={`badge badge-${p.status}`}>{p.status}</span></span>
+                </Row>
+              );
+            })}
           </div>
         </div>
-      </div>
+      ))}
     </div>
   </section>
 </Layout>

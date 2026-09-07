@@ -1,0 +1,66 @@
+---
+import Layout from "../layouts/Layout.astro";
+
+// Astro emits this as `dist/404.html`. Cloudflare Pages serves that file with
+// a real 404 status for any unmatched path, which replaces the previous
+// soft-404 behaviour (every unknown path returned the homepage with a 200).
+---
+
+<Layout
+  title="404 · Not found · InterStellar AI"
+  description="That page drifted out of orbit. Head back to the handbook or the portfolio."
+>
+  <section class="hero-b nf">
+    <div class="wrap">
+      <div class="eyebrow">✶ error 404 · lost in transit</div>
+      <h1>This page drifted <em>out of orbit.</em></h1>
+      <p class="lede">The path you followed doesn't exist here — it may have been renamed, or it may never have shipped. The handbook is still where you left it.</p>
+      <div class="ctas">
+        <a class="btn btn-primary btn-md" href="/">Back to home →</a>
+        <a class="btn btn-link btn-md" href="/projects">See the projects</a>
+      </div>
+      <div class="nf-links">
+        <a href="/tenets">Tenets</a>
+        <span class="sep">·</span>
+        <a href="/mementos">Mementos</a>
+        <span class="sep">·</span>
+        <a href="/conventions">Conventions</a>
+        <span class="sep">·</span>
+        <a href="/projects">Projects</a>
+      </div>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .nf {
+    min-height: 62vh;
+    display: flex;
+    align-items: center;
+  }
+  .nf .lede {
+    max-width: 52ch;
+    margin-bottom: var(--sp-6);
+  }
+  .nf-links {
+    margin-top: var(--sp-6);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    letter-spacing: 0.04em;
+    display: flex;
+    gap: var(--sp-2);
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .nf-links a {
+    color: #b9c6e8;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+  .nf-links a:hover {
+    color: var(--terracotta);
+  }
+  .nf-links .sep {
+    color: #8a816f;
+  }
+</style>

@@ -3,12 +3,12 @@ title: Pipeline-health cron for self-healing automation
 number: 2
 status: accepted
 date: 2026-04-18
-projects: [reli, word-coach-annie, filmduel, cosmic-match, un-reminder, beads]
+projects: [reli, word-coach-annie, filmduel, cosmic-match, un-reminder]
 ---
 
 ## Context
 
-The ecosystem relies on three crons to keep code flowing to prod:
+The ecosystem relies on two crons to keep code flowing to prod:
 
 - `issue-pickup-cron` — picks open GH issues and launches archon to draft fixes
 - `pr-maintenance-cron` — merges clean PRs, rebases dirty ones, fixes failing CI
@@ -25,7 +25,7 @@ nothing comes back to fix the pipeline itself:
 
 ## Decision
 
-A fourth cron, `pipeline-health-cron`, runs every 30 minutes and detects these
+A third cron, `pipeline-health-cron`, runs every 30 minutes and detects these
 meta-failures. When it finds one, it either files an issue tagged for archon
 pickup (self-heal) or fires archon-assist directly (urgent bottleneck).
 
@@ -47,8 +47,8 @@ Specifically, each tick:
 - Zero cost when the pipeline is healthy — nothing fires.
 - AI cost is bounded by the 2h diagnostic cooldown and per-SHA dedup.
 - Adds one more thing to forget to deploy if the machine is reimaged — the cron
-  needs to be re-installed. Mitigation: crontab lives in the memory reference
-  file, re-install is documented.
+  needs to be re-installed. Mitigation: the crontab is version-controlled at
+  `ops/cron/crontab` in this repo, so re-installing is a single command.
 
 ## Alternatives considered
 
