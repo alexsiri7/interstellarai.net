@@ -38,6 +38,9 @@ load_archon_projects DEFAULT_PROJECTS
 # shellcheck source=lib/throttle.sh
 source "$SCRIPT_DIR/lib/throttle.sh"
 should_tick "pr-review" || exit 0
+# shellcheck source=lib/archon-active-runs.sh
+source "$SCRIPT_DIR/lib/archon-active-runs.sh"
+archon_runs_snapshot
 
 BASE_DIR="/mnt/ext-fast"
 STATE_DIR="$HOME/.archon/state/pr-review"
@@ -127,9 +130,14 @@ process_project() {
     # Dedupe against a live archon process for THIS repo + PR. Anchor on the
     # project name inside the command line (cd "$repo_dir" puts the project
     # slug in the process's cwd/command) and on "#$pr_num" to be precise.
-    if pgrep -fa "archon workflow run archon-smart-pr-review" 2>/dev/null \
+    if pgrep -fa "archon workflow run archon-(review|smart-pr-review)" 2>/dev/null \
          | grep -E "(^|[[:space:]=/])$project([[:space:]/]|\$)" \
          | grep -qE "#${pr_num}\\b"; then
+      skipped_running=$((skipped_running + 1))
+      continue
+    fi
+    # Parked-run guard: DB-active run (running or paused) for this repo + PR.
+    if archon_run_active "$repo_dir" "$project" '^archon-(review|smart-pr-review)$' "#${pr_num}([^0-9]|$)"; then
       skipped_running=$((skipped_running + 1))
       continue
     fi
@@ -139,7 +147,7 @@ process_project() {
       cd "$repo_dir" || exit 1
       mkdir -p .archon-logs
       local logf=".archon-logs/pr-review-${pr_num}-$(date +%Y%m%d-%H%M%S).log"
-      CLAUDECODE=0 nohup archon workflow run archon-smart-pr-review "#${pr_num}" \
+      CLAUDECODE=0 nohup archon workflow run archon-review --input "scope=${pr_num}" "review PR #${pr_num}" \
         >"$logf" 2>&1 &
       disown
       echo "$!:$sha" > "$STATE_DIR/${project}-${pr_num}.pid"
@@ -151,7 +159,7 @@ process_project() {
     rm -f /tmp/.pr-review-fire.$$
     if [ "$fire_rc" -eq 0 ] && echo "$fire_out" | grep -q '^LAUNCHED '; then
       fired=$((fired + 1))
-      log "$project: PR #$pr_num — fired archon-smart-pr-review at SHA ${sha:0:10} (${fire_out#LAUNCHED })"
+      log "$project: PR #$pr_num — fired archon-review at SHA ${sha:0:10} (${fire_out#LAUNCHED })"
     else
       log "$project: PR #$pr_num — failed to launch archon: $fire_out"
     fi

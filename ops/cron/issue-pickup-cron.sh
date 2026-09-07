@@ -18,6 +18,9 @@ load_archon_projects DEFAULT_PROJECTS
 # shellcheck source=lib/throttle.sh
 source "$SCRIPT_DIR/lib/throttle.sh"
 should_tick "issue-pickup" || exit 0
+# shellcheck source=lib/archon-active-runs.sh
+source "$SCRIPT_DIR/lib/archon-active-runs.sh"
+archon_runs_snapshot
 
 # Age (seconds) after which an issue labeled archon:in-progress with no
 # corresponding live archon process and no open PR is considered stuck and
@@ -122,6 +125,10 @@ auto_triage() {
       | grep -qE "(^|[[:space:]=/])$project([[:space:]/]|\$)"; then
     return
   fi
+  # Parked-run guard: sdlc runs suspended at a wait: node have no process.
+  if archon_run_active "$repo_dir" "$project" '^archon-(ship|fix-github-issue|triage-issue)$'; then
+    return
+  fi
 
   local issues
   issues=$(gh issue list --repo "alexsiri7/$project" --state open --limit 100 \
@@ -195,8 +202,14 @@ unstick_stale() {
     # command line which includes the issue number in "fix #N".
     # Anchor project match to $repo_dir so e.g. `reli` does not substring-match
     # a worktree path containing `reliability`.
-    if pgrep -fa "archon workflow run archon-fix-github-issue.*#$num\\b" >/dev/null 2>&1 \
-        && pgrep -fa "archon workflow run archon-fix-github-issue" | grep -qE "(^|[[:space:]=/])$project([[:space:]/]|\$)"; then
+    if pgrep -fa "archon workflow run archon-(ship|fix-github-issue).*#$num\\b" >/dev/null 2>&1 \
+        && pgrep -fa "archon workflow run archon-(ship|fix-github-issue)" | grep -qE "(^|[[:space:]=/])$project([[:space:]/]|\$)"; then
+      continue
+    fi
+
+    # Parked-run guard: an archon-ship run waiting durably on CI has status
+    # paused and no live process — it is working, not stuck. Never re-queue it.
+    if archon_run_active "$repo_dir" "$project" '^archon-(ship|fix-github-issue)$' "#$num([^0-9]|$)"; then
       continue
     fi
 
@@ -234,7 +247,7 @@ unstick_stale() {
       continue
     fi
 
-    log "$project: #$num is stuck (in-progress for ${age}s, no process, no PR) — re-queuing"
+    log "$project: #$num is stuck (in-progress for ${age}s, no live or parked run, no PR) — re-queuing"
     gh issue edit "$num" --repo "alexsiri7/$project" \
       --remove-label "archon:in-progress" --add-label "archon:queued" 2>/dev/null || {
         log "$project: #$num — could not swap labels"
@@ -242,7 +255,7 @@ unstick_stale() {
       }
     SUMMARY_STALE=$((SUMMARY_STALE + 1))
     gh issue comment "$num" --repo "alexsiri7/$project" \
-      --body "archon was labeled in-progress ${age}s ago but no live run and no linked PR were found. Re-queued for another attempt." 2>/dev/null || true
+      --body "archon was labeled in-progress ${age}s ago but no live or parked (paused) run and no linked PR were found. Re-queued for another attempt." 2>/dev/null || true
   done
 }
 
@@ -348,7 +361,7 @@ pick_and_fire() {
   # Don't stack — if an archon run is already in flight for this repo, skip.
   # Capture the issue number from the cmdline ("fix #N") for the summary note.
   local running_for
-  running_for=$(pgrep -fa "archon workflow run archon-fix-github-issue.*--cwd.*$repo_dir" 2>/dev/null \
+  running_for=$(pgrep -fa "archon workflow run archon-(ship|fix-github-issue).*--cwd.*$repo_dir" 2>/dev/null \
     | grep -oE 'fix #[0-9]+' | head -1 | tr -d '#')
   if [ -n "$running_for" ]; then
     log "$project: archon already running, skipping"
@@ -359,12 +372,22 @@ pick_and_fire() {
   # Fallback detector: look for runs started via direct cd (no --cwd).
   # Anchor project match so e.g. `reli` does not false-positive on
   # `reliability` or another slug containing the substring.
-  running_for=$(pgrep -fa "archon workflow run archon-fix-github-issue" 2>/dev/null \
+  running_for=$(pgrep -fa "archon workflow run archon-(ship|fix-github-issue)" 2>/dev/null \
     | grep -E "(^|[[:space:]=/])$project([[:space:]/]|\$)" | grep -oE 'fix #[0-9]+' | head -1 | tr -d '#')
   if [ -n "$running_for" ]; then
     log "$project: archon already running (cwd match), skipping"
     SUMMARY_ACTION="skip-running"
     SUMMARY_NOTE="archon already running for #$running_for"
+    return
+  fi
+  # Parked-run guard: an archon-ship run suspended at a durable wait (CI pause)
+  # has no process but is still active — do not stack a second run on the repo.
+  running_for=$(archon_run_active_msg "$repo_dir" "$project" '^archon-(ship|fix-github-issue)$' \
+    | grep -oE 'fix #[0-9]+' | head -1 | tr -d '#')
+  if [ -n "$running_for" ]; then
+    log "$project: archon run active in DB (running or parked), skipping"
+    SUMMARY_ACTION="skip-running"
+    SUMMARY_NOTE="archon run active (possibly parked) for #$running_for"
     return
   fi
 
@@ -383,7 +406,7 @@ pick_and_fire() {
   cd "$repo_dir"
   mkdir -p .archon-logs
   local logf=".archon-logs/cron-issue-$issue-$(date +%Y%m%d-%H%M%S).log"
-  CLAUDECODE=0 nohup archon workflow run archon-fix-github-issue "fix #$issue" \
+  CLAUDECODE=0 nohup archon workflow run archon-ship "fix #$issue" \
     >"$logf" 2>&1 &
   disown
   log "$project: archon launched for #$issue (pid=$!, log=$logf)"

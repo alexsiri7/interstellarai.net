@@ -350,7 +350,7 @@ EOF
   local logf="$repo_dir/.archon-logs/health-ci-fix-${sha:0:8}-$(date +%Y%m%d-%H%M%S).log"
   (
     cd "$repo_dir"
-    CLAUDECODE=0 nohup archon workflow run archon-fix-github-issue "fix #$issue_num" \
+    CLAUDECODE=0 nohup archon workflow run archon-ship "fix #$issue_num" \
       > "$logf" 2>&1 &
     disown
   )
@@ -494,7 +494,7 @@ EOF
     local logf="$repo_dir/.archon-logs/health-prod-deploy-${deploy_sha:0:8}-$(date +%Y%m%d-%H%M%S).log"
     (
       cd "$repo_dir"
-      CLAUDECODE=0 nohup archon workflow run archon-fix-github-issue "fix #$issue_num" \
+      CLAUDECODE=0 nohup archon workflow run archon-ship "fix #$issue_num" \
         > "$logf" 2>&1 &
       disown
     )
@@ -562,7 +562,8 @@ reconcile_zombies() {
   [ -n "$status_out" ] || return
 
   echo "$status_out" | awk '
-    /^ *ID: / { id = $2 }
+    /^ *ID: / { id = $2; runstatus = "" }
+    /^ *Status: / { runstatus = $2 }
     /^ *Age: / {
       age_str = $2
       age_hours = 0
@@ -573,7 +574,9 @@ reconcile_zombies() {
         gsub(/h$/, "", n)
         age_hours = n + 0
       }
-      if (age_hours >= 4) print id
+      # Paused runs are parked at a durable wait — the server resumes them;
+      # age alone does not make them zombies. Only reap stale RUNNING rows.
+      if (age_hours >= 4 && runstatus == "running") print id
     }
   ' | while read -r stale_id; do
     [ -n "$stale_id" ] || continue
