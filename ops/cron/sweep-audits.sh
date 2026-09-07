@@ -2,7 +2,7 @@
 # sweep-audits.sh — nightly codebase sweep, rotating through audit workflows.
 #
 # Runs one archon audit workflow per night on one project, cycling through:
-#   4 repos × 3 sweep types = 12-day rotation (keyed off day-of-year).
+#   4 repos × 4 sweep types = 16-day rotation (keyed off day-of-year).
 #
 # Night 1:  filmduel         — architect
 # Night 2:  word-coach-annie — architect
@@ -16,6 +16,10 @@
 # Night 10: word-coach-annie — test-audit
 # Night 11: reli             — test-audit
 # Night 12: cosmic-match     — test-audit
+# Night 13: filmduel         — requirements-audit
+# Night 14: word-coach-annie — requirements-audit
+# Night 15: reli             — requirements-audit
+# Night 16: cosmic-match     — requirements-audit
 # (cycle repeats)
 #
 # Ported from archon/scripts/poll-sweep.sh. Matches the style of the other
@@ -58,7 +62,7 @@ notify() {
 }
 
 # Rotation config. Deliberately hardcoded (not loaded from archon-projects.txt):
-# the 12-slot rotation depends on exactly 4 repos × 3 sweep types. Projects
+# the 16-slot rotation depends on exactly 4 repos × 4 sweep types. Projects
 # without substantial codebases to audit (un-reminder, interstellarai.net
 # landing page) are intentionally excluded.
 REPOS=(
@@ -72,11 +76,12 @@ SWEEPS=(
   "archon-architect|Analyze the codebase architecture — identify complexity hotspots, unnecessary abstractions, and opportunities for simplification"
   "archon-security-audit|Perform a deep security and privacy audit of the entire codebase — check OWASP top 10, auth, data privacy, dependencies, and business logic"
   "archon-test-audit|Audit test coverage and stability — fix flaky tests, add tests for critical uncovered code paths, improve test quality"
+  "archon-requirements-audit|Audit requirements-to-code traceability — verify each requirement in requirements/requirements.yaml is implemented and tested, regenerate requirements/coverage.yaml, and file requirements-gap issues for uncovered or stale requirements and orphaned behavior"
 )
 
-# 4 repos × 3 sweeps = 12-day cycle, keyed off day-of-year.
+# 4 repos × 4 sweeps = 16-day cycle, keyed off day-of-year.
 day_of_year=$(date +%j)
-slot=$(( (10#$day_of_year - 1) % 12 ))
+slot=$(( (10#$day_of_year - 1) % 16 ))
 
 sweep_idx=$(( slot / 4 ))
 repo_idx=$(( slot % 4 ))
@@ -88,7 +93,7 @@ workflow="${sweep_entry%%|*}"
 prompt="${sweep_entry#*|}"
 sweep_name="${workflow#archon-}"
 
-log "=== nightly sweep: $sweep_name on $repo_name (slot $slot of 12) ==="
+log "=== nightly sweep: $sweep_name on $repo_name (slot $slot of 16) ==="
 
 # Skip if a sweep is already running for this repo (lock TTL: 2h)
 lock_file="$STATE_DIR/${repo_name}.lock"
