@@ -550,6 +550,9 @@ EOF
 
 # ----------------------------------------------------------------------------
 # Check 3: Abandon archon DB runs marked "running" for >4h — likely orphaned.
+# NOTE (archon 0.10 cutover): `archon workflow abandon` did not exist in 0.3.6 —
+# this cleanup was a silent no-op there. It works as intended on archon >= 0.10.
+# Status output format (`  ID:` / `  Age:` lines) verified unchanged in 0.10.1.
 # ----------------------------------------------------------------------------
 reconcile_zombies() {
   local status_out
