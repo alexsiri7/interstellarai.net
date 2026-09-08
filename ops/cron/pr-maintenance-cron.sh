@@ -24,6 +24,9 @@ load_archon_projects DEFAULT_PROJECTS
 # shellcheck source=lib/throttle.sh
 source "$SCRIPT_DIR/lib/throttle.sh"
 should_tick "pr-maintenance" || exit 0
+# shellcheck source=lib/archon-active-runs.sh
+source "$SCRIPT_DIR/lib/archon-active-runs.sh"
+archon_runs_snapshot
 BASE_DIR="/mnt/ext-fast"
 LOG_PREFIX="[pr-maintenance]"
 
@@ -35,6 +38,36 @@ else
 fi
 
 log() { echo "$(date -Is) $LOG_PREFIX $*"; }
+
+# pr_owned_by_live_run <headRefName> <body>
+# True when the PR's head is an archon task branch and a running or paused
+# archon-ship / archon-fix-github-issue run for this project still owns it
+# (matched on the run's "fix #N" message via the PR's closing keyword, or any
+# such run for the project when the body has no closing keyword).
+#
+# Such a PR is still being worked: the run's review, corrections, CI wait and
+# ready flip have not finished. Merging it here with --delete-branch deletes
+# the local branch and its worktree from under the run (2026-09-08: lachesis
+# PR #132 merged at 05:30 while its run was mid-review; the run died two
+# minutes later with ENOENT on its cwd, reported as "'uv' executable not found",
+# and its three Important review findings were never applied). Leave the flip
+# and the merge until the run has exited.
+pr_owned_by_live_run() {
+  local head="$1" body="$2" wf issue
+  case "$head" in
+    archon/task-archon-ship-*) wf='^archon-ship$' ;;
+    archon/task-archon-fix-github-issue-*) wf='^archon-fix-github-issue$' ;;
+    *) return 1 ;;
+  esac
+  issue=$(printf '%s' "$body" \
+    | grep -oiE '(close[sd]?|fix(e[sd])?|resolve[sd]?) #[0-9]+' | head -1 \
+    | grep -oE '[0-9]+$' || true)
+  if [ -n "$issue" ]; then
+    archon_run_active "$REPO_DIR" "$PROJECT" "$wf" "#${issue}([^0-9]|$)"
+  else
+    archon_run_active "$REPO_DIR" "$PROJECT" "$wf"
+  fi
+}
 
 for PROJECT in "${PROJECTS[@]}"; do
   REPO_DIR="$BASE_DIR/$PROJECT"
@@ -51,21 +84,31 @@ for PROJECT in "${PROJECTS[@]}"; do
   # draft has nothing left to gate on, but the Phase 1 merge filter skips
   # drafts — so left alone a green draft sits forever. Flip it to ready so
   # Phase 1 can merge it on this same tick.
-  GREEN_DRAFTS=$(gh pr list --state open --json number,mergeStateStatus,isDraft \
-    --jq '[.[] | select(.isDraft == true and .mergeStateStatus == "CLEAN")] | .[].number' 2>/dev/null || true)
+  GREEN_DRAFTS=$(gh pr list --state open --json number,mergeStateStatus,isDraft,headRefName,body \
+    --jq '.[] | select(.isDraft == true and .mergeStateStatus == "CLEAN") | [.number, .headRefName, ((.body // "") | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null || true)
 
-  for PR in $GREEN_DRAFTS; do
+  while IFS=$'\t' read -r PR HEAD BODY; do
+    [ -n "$PR" ] || continue
+    if pr_owned_by_live_run "$HEAD" "$BODY"; then
+      log "$PROJECT: draft PR #$PR ($HEAD) is owned by a live archon run — leaving the ready flip to it"
+      continue
+    fi
     log "$PROJECT: promoting draft PR #$PR to ready (CI CLEAN)"
     if ! gh pr ready "$PR" 2>>"/tmp/pr-maintenance-errors.log"; then
       log "$PROJECT: PR #$PR — could not mark ready (see /tmp/pr-maintenance-errors.log)"
     fi
-  done
+  done <<< "$GREEN_DRAFTS"
 
   # --- Phase 1: Merge CLEAN PRs directly (bash only, zero AI cost) ---
-  CLEAN_PRS=$(gh pr list --state open --json number,mergeStateStatus,isDraft \
-    --jq '[.[] | select(.isDraft == false and .mergeStateStatus == "CLEAN")] | .[].number' 2>/dev/null || true)
+  CLEAN_PRS=$(gh pr list --state open --json number,mergeStateStatus,isDraft,headRefName,body \
+    --jq '.[] | select(.isDraft == false and .mergeStateStatus == "CLEAN") | [.number, .headRefName, ((.body // "") | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null || true)
 
-  for PR in $CLEAN_PRS; do
+  while IFS=$'\t' read -r PR HEAD BODY; do
+    [ -n "$PR" ] || continue
+    if pr_owned_by_live_run "$HEAD" "$BODY"; then
+      log "$PROJECT: PR #$PR ($HEAD) is owned by a live archon run — merging after it exits"
+      continue
+    fi
     log "$PROJECT: PR #$PR is CLEAN — merging directly"
     # Surface stderr to the cron log so actual failures (permissions, branch
     # protection, etc.) are diagnosable on the next tick instead of vanishing.
@@ -74,7 +117,7 @@ for PROJECT in "${PROJECTS[@]}"; do
         log "$PROJECT: PR #$PR — could not merge, skipping"
       fi
     fi
-  done
+  done <<< "$CLEAN_PRS"
 
   # --- Phase 2: Check for one PR needing AI attention ---
   ACTIONABLE=$(gh pr list --state open --json number,mergeStateStatus,isDraft \

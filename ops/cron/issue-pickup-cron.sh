@@ -238,6 +238,16 @@ unstick_stale() {
       continue
     fi
 
+    # A run that ended with a "nothing to deliver" verdict is not stuck: park it
+    # instead of paying for the same triage again. Reads the newest run log for
+    # this issue; see lib/settle-ship-outcome.sh.
+    local last_log
+    last_log=$(ls -t "$repo_dir"/.archon-logs/cron-issue-"$num"-*.log 2>/dev/null | head -1)
+    if [ -n "$last_log" ] && "$SCRIPT_DIR/lib/settle-ship-outcome.sh" "$project" "$num" "$last_log"; then
+      SUMMARY_STALE=$((SUMMARY_STALE + 1))
+      continue
+    fi
+
     # Don't re-queue issues that a human has explicitly parked (manual-review etc.)
     local issue_labels
     issue_labels=$(gh issue view "$num" --repo "alexsiri7/$project" --json labels \
@@ -406,8 +416,17 @@ pick_and_fire() {
   cd "$repo_dir"
   mkdir -p .archon-logs
   local logf=".archon-logs/cron-issue-$issue-$(date +%Y%m%d-%H%M%S).log"
-  CLAUDECODE=0 nohup archon workflow run archon-ship "fix #$issue" \
-    >"$logf" 2>&1 &
+  # The wrapper settles a no-PR verdict on the issue as soon as the run exits
+  # (lib/settle-ship-outcome.sh); its own output lands in this cron's log.
+  # Only the archon child may look like a live run to the pgrep guards: the
+  # wrapper's command line carries the literal "fix #$1", never "#<issue>",
+  # and the helper path and project travel in the environment so no path
+  # substring can match another project's anchor.
+  CLAUDECODE=0 SETTLE_SCRIPT="$SCRIPT_DIR/lib/settle-ship-outcome.sh" SETTLE_PROJECT="$project" \
+    nohup bash -c '
+      archon workflow run archon-ship "fix #$1" >"$2" 2>&1
+      "$SETTLE_SCRIPT" "$SETTLE_PROJECT" "$1" "$2"' \
+    ship-wrapper "$issue" "$logf" 2>/dev/null &
   disown
   log "$project: archon launched for #$issue (pid=$!, log=$logf)"
 }

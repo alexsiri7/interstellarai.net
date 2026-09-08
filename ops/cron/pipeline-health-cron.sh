@@ -1029,13 +1029,27 @@ check_deploy_http() {
   done
 
   local marker="$STATE_DIR/deploy-down-$project"
+  local suspect="$STATE_DIR/deploy-suspect-$project"
   if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 400 ]; then
     if [ -f "$marker" ]; then
       log "$project: deploy still down (HTTP $http_code at $deploy_url) — issue already filed, skipping"
       return
     fi
 
-    log "$project: deploy down (HTTP $http_code at $deploy_url) — filing issue"
+    # File only on the second consecutive down tick. The 3x30s probe above
+    # covers ~90s, but a Railway container restart can refuse connections for
+    # ~4 minutes; reli's nightly restart at 03:01 UTC produced 26 identical
+    # "HTTP 000" issues (reli #1153 … #1402), each costing an archon-ship run
+    # that found the site up. One tick of confirmation (30 min) is the
+    # cheapest window that outlasts a restart without blocking this cron.
+    if [ ! -f "$suspect" ]; then
+      touch "$suspect"
+      log "$project: deploy down (HTTP $http_code at $deploy_url) — first sighting, confirming next tick before filing"
+      return
+    fi
+    rm -f "$suspect"
+
+    log "$project: deploy down (HTTP $http_code at $deploy_url) — down two consecutive ticks, filing issue"
     touch "$marker"
 
     local body
@@ -1058,8 +1072,8 @@ EOF
     return
   fi
 
-  # Healthy — clear marker
-  rm -f "$marker"
+  # Healthy — clear markers
+  rm -f "$marker" "$suspect"
   log "$project: deploy OK (HTTP $http_code at $deploy_url)"
 }
 
