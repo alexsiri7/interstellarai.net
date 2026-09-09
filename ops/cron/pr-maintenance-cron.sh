@@ -120,8 +120,25 @@ for PROJECT in "${PROJECTS[@]}"; do
   done <<< "$CLEAN_PRS"
 
   # --- Phase 2: Check for one PR needing AI attention ---
-  ACTIONABLE=$(gh pr list --state open --json number,mergeStateStatus,isDraft \
-    --jq '[.[] | select(.isDraft == false and (.mergeStateStatus == "BEHIND" or .mergeStateStatus == "DIRTY" or .mergeStateStatus == "UNSTABLE" or .mergeStateStatus == "UNKNOWN"))] | .[0].number // empty' 2>/dev/null || true)
+  # Drafts count only when DIRTY. GitHub runs no pull_request workflow on a
+  # conflicting PR, so a draft that goes DIRTY has no CI for the health cron's
+  # PR-CI retry to see, never becomes CLEAN for Phase 0, and its issue stays
+  # archon:in-progress behind a linked PR nobody touches (2026-09-09:
+  # word-coach-annie #1121 sat conflicted for 2.5h after #1122 merged the same
+  # file). Other draft states are still the opening run's to finish.
+  CANDIDATES=$(gh pr list --state open --json number,mergeStateStatus,isDraft,headRefName,body \
+    --jq '.[] | select((.isDraft == false and (.mergeStateStatus == "BEHIND" or .mergeStateStatus == "DIRTY" or .mergeStateStatus == "UNSTABLE" or .mergeStateStatus == "UNKNOWN")) or (.isDraft == true and .mergeStateStatus == "DIRTY")) | [.number, .headRefName, ((.body // "") | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null || true)
+
+  ACTIONABLE=""
+  while IFS=$'\t' read -r PR HEAD BODY; do
+    [ -n "$PR" ] || continue
+    if pr_owned_by_live_run "$HEAD" "$BODY"; then
+      log "$PROJECT: PR #$PR ($HEAD) needs maintenance but is owned by a live archon run — leaving it to the run"
+      continue
+    fi
+    ACTIONABLE="$PR"
+    break
+  done <<< "$CANDIDATES"
 
   if [ -z "$ACTIONABLE" ]; then
     log "$PROJECT: no PRs need AI maintenance"
