@@ -161,6 +161,23 @@ JSON
 
 # ── promote_unblocked → pick_and_fire ────────────────────────────────────────
 
+# The everyday path: the issue was queued on an earlier tick, so the search is
+# the only thing that can supply it — nothing to fall back on from this tick's
+# promotions. One candidate, so this asserts pickup happens, not pick order.
+@test "pick_and_fire picks a queued issue the search reports with no promotion this tick" {
+    echo '[{"number":20}]' > "$T/fixtures/queued.json"
+    load_fn promote_unblocked
+    load_fn pick_and_fire
+
+    promote_unblocked testproj
+    pick_and_fire testproj
+
+    [ "$SUMMARY_PROMOTED" -eq 0 ]
+    [ "$SUMMARY_QUEUED" -eq 1 ]
+    [ "$SUMMARY_ACTION" = "pickup #20" ]
+    grep -q -- "issue edit 20 --repo alexsiri7/testproj --remove-label archon:queued --add-label archon:in-progress" "$GH_ARGV"
+}
+
 @test "pick_and_fire picks an issue promoted this tick that the search misses" {
     echo '[{"number":10}]' > "$T/fixtures/blocked.json"
     load_fn promote_unblocked
