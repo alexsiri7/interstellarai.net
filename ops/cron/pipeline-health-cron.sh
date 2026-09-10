@@ -49,7 +49,7 @@ LOG_PREFIX="[pipeline-health]"
 declare -A DEPLOY_URLS=(
   ["filmduel"]="https://filmduel.interstellarai.net"
   ["word-coach-annie"]="https://annie.interstellarai.net/api/health"
-  ["reli"]="https://reli.interstellarai.net"
+  ["reli"]="https://reli.interstellarai.net/healthz"
   ["interstellarai.net"]="https://www.interstellarai.net/healthz"
   ["lachesis"]="https://lachesis.interstellarai.net/healthz"
   ["kindred"]="https://kindred.up.railway.app/healthz"
@@ -59,7 +59,7 @@ declare -A DEPLOY_URLS=(
 # Health checks here detect staging regressions before they block prod gates.
 declare -A STAGING_DEPLOY_URLS=(
   ["filmduel"]="https://filmduel-staging.up.railway.app"
-  ["reli"]="https://reli-staging.up.railway.app"
+  ["reli"]="https://reli-staging.up.railway.app/healthz"
   ["word-coach-annie"]="https://word-coach-annie-staging.up.railway.app/api/health"
 )
 

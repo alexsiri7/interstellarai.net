@@ -159,3 +159,19 @@ load_check_deploy_http() {
     [ "$status" -eq 0 ]
     [ ! -f "$STATE_DIR/deploy-down-no-such-project" ]
 }
+
+# ── URL map regression tests ─────────────────────────────────────────────────
+# Reli's backend (v4) serves nothing at "/" (404); health lives at /healthz.
+# Probing the root would file a false "Deploy down" issue every tick.
+
+@test "DEPLOY_URLS probes reli at /healthz, not the site root" {
+    # shellcheck disable=SC1090
+    source <(awk '/^declare -A DEPLOY_URLS=\(/{p=1} p{print} p && /^\)$/{p=0}' "$SCRIPT_FILE")
+    [ "${DEPLOY_URLS[reli]}" = "https://reli.interstellarai.net/healthz" ]
+}
+
+@test "STAGING_DEPLOY_URLS probes reli staging at /healthz, not the site root" {
+    # shellcheck disable=SC1090
+    source <(awk '/^declare -A STAGING_DEPLOY_URLS=\(/{p=1} p{print} p && /^\)$/{p=0}' "$SCRIPT_FILE")
+    [ "${STAGING_DEPLOY_URLS[reli]}" = "https://reli-staging.up.railway.app/healthz" ]
+}
