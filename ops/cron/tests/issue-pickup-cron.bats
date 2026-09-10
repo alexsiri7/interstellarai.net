@@ -84,14 +84,38 @@ gh_calls() {
 
 # ── auto_triage ──────────────────────────────────────────────────────────────
 
-# The reli case from #63: a blocked_by chain filed in one burst. Timestamps are
-# identical here, so ordering cannot be what saves the root — the blocker check
-# is: the leaves are parked without spending the tick's one triage run.
-@test "auto_triage parks a same-second blocked chain and triages only its root" {
+# The #63 case: members of a blocked_by chain that sort ahead of a runnable
+# candidate. Every blocked one is parked as the scan passes it, and the tick's
+# single triage run still goes to the issue that can actually be worked on.
+# Timestamps are distinct so the scan order is the sort, not jq's tie-break.
+@test "auto_triage parks every blocked candidate it scans past and triages the runnable one" {
     cat > "$T/fixtures/open.json" <<'JSON'
-[{"number":3,"labels":[],"createdAt":"2026-01-01T00:00:00Z"},
- {"number":2,"labels":[],"createdAt":"2026-01-01T00:00:00Z"},
+[{"number":3,"labels":[],"createdAt":"2026-01-03T00:00:00Z"},
+ {"number":2,"labels":[],"createdAt":"2026-01-02T00:00:00Z"},
  {"number":1,"labels":[],"createdAt":"2026-01-01T00:00:00Z"}]
+JSON
+    echo 1 > "$T/fixtures/blockers-1"
+    echo 1 > "$T/fixtures/blockers-2"
+    load_fn auto_triage
+
+    auto_triage testproj
+
+    grep -q -- "issue edit 1 --repo alexsiri7/testproj --add-label archon:blocked" "$GH_ARGV"
+    grep -q -- "issue edit 2 --repo alexsiri7/testproj --add-label archon:blocked" "$GH_ARGV"
+    grep -q -- "issue edit 3 --repo alexsiri7/testproj --add-label archon:triage-in-progress" "$GH_ARGV"
+    [ "$(gh_calls 'archon:triage-in-progress')" -eq 1 ]
+    [ "$SUMMARY_ACTION" = "triage #3" ]
+    grep -q "triage launched for #3" "$LOGGED"
+}
+
+# Steady state for a chain whose root is the oldest: the root was triaged on an
+# earlier tick and is skipped on archon:triage-in-progress, so this tick has no
+# runnable candidate to break on and drains every blocked leaf in one pass.
+@test "auto_triage parks a whole blocked chain on a tick with no runnable candidate" {
+    cat > "$T/fixtures/open.json" <<'JSON'
+[{"number":3,"labels":[],"createdAt":"2026-01-03T00:00:00Z"},
+ {"number":2,"labels":[],"createdAt":"2026-01-02T00:00:00Z"},
+ {"number":1,"labels":[{"name":"archon:triage-in-progress"}],"createdAt":"2026-01-01T00:00:00Z"}]
 JSON
     echo 1 > "$T/fixtures/blockers-3"
     echo 1 > "$T/fixtures/blockers-2"
@@ -99,12 +123,11 @@ JSON
 
     auto_triage testproj
 
-    grep -q -- "issue edit 3 --repo alexsiri7/testproj --add-label archon:blocked" "$GH_ARGV"
     grep -q -- "issue edit 2 --repo alexsiri7/testproj --add-label archon:blocked" "$GH_ARGV"
-    grep -q -- "issue edit 1 --repo alexsiri7/testproj --add-label archon:triage-in-progress" "$GH_ARGV"
-    [ "$(gh_calls 'archon:triage-in-progress')" -eq 1 ]
-    [ "$SUMMARY_ACTION" = "triage #1" ]
-    grep -q "triage launched for #1" "$LOGGED"
+    grep -q -- "issue edit 3 --repo alexsiri7/testproj --add-label archon:blocked" "$GH_ARGV"
+    [ "$(gh_calls 'archon:triage-in-progress')" -eq 0 ]
+    [ "$SUMMARY_ACTION" = "none" ]
+    [ "$SUMMARY_BLOCKED" -eq 2 ]
 }
 
 @test "auto_triage triages the oldest candidate, not the first row gh returns" {
