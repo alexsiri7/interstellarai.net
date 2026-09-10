@@ -42,7 +42,7 @@ should_tick "pr-review" || exit 0
 source "$SCRIPT_DIR/lib/archon-active-runs.sh"
 archon_runs_snapshot
 
-BASE_DIR="/mnt/ext-fast"
+BASE_DIR="${BASE_DIR:-/mnt/ext-fast}"
 STATE_DIR="$HOME/.archon/state/pr-review"
 LOG_PREFIX="[pr-review]"
 mkdir -p "$STATE_DIR"
@@ -98,19 +98,27 @@ process_project() {
 
   local prs_json
   prs_json=$(gh pr list --repo "alexsiri7/$project" --state open \
-    --json number,headRefOid,isDraft,updatedAt --limit 50 2>/dev/null || echo "[]")
+    --json number,headRefOid,isDraft,labels,updatedAt --limit 50 2>/dev/null || echo "[]")
 
   local n_open n_nondraft
   n_open=$(echo "$prs_json" | jq 'length' 2>/dev/null || echo 0)
   n_nondraft=$(echo "$prs_json" | jq '[.[] | select(.isDraft == false)] | length' 2>/dev/null || echo 0)
 
-  local reviewed=0 skipped_running=0 fired=0 in_flight=0
+  local reviewed=0 skipped_running=0 fired=0 in_flight=0 held=0
 
+  # Third column: "true" when the PR carries the `hold` label (see
+  # pr-maintenance-cron.sh) — a held PR gets no automated review either.
   local rows
-  rows=$(echo "$prs_json" | jq -r '.[] | select(.isDraft == false) | "\(.number) \(.headRefOid)"' 2>/dev/null || true)
+  rows=$(echo "$prs_json" | jq -r '.[] | select(.isDraft == false) | "\(.number) \(.headRefOid) \(((.labels // []) | map(.name) | index("hold")) != null)"' 2>/dev/null || true)
 
-  while IFS=' ' read -r pr_num sha; do
+  while IFS=' ' read -r pr_num sha on_hold; do
     [ -z "${pr_num:-}" ] && continue
+
+    if [ "${on_hold:-false}" = "true" ]; then
+      held=$((held + 1))
+      log "$project: PR #$pr_num is on hold — skipping"
+      continue
+    fi
 
     local pidfile="$STATE_DIR/${project}-${pr_num}.pid"
     local reviewed_file="$STATE_DIR/${project}-${pr_num}-reviewed.sha"
@@ -165,7 +173,7 @@ process_project() {
     fi
   done <<< "$rows"
 
-  log "$project: $n_open open, $n_nondraft non-draft, $reviewed reviewed-at-this-SHA, $in_flight in-flight, $skipped_running skipped-running, $fired fired"
+  log "$project: $n_open open, $n_nondraft non-draft, $reviewed reviewed-at-this-SHA, $in_flight in-flight, $skipped_running skipped-running, $held on-hold, $fired fired"
 }
 
 for PROJECT in "${PROJECTS[@]}"; do

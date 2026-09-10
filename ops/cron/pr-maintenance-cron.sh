@@ -27,8 +27,12 @@ should_tick "pr-maintenance" || exit 0
 # shellcheck source=lib/archon-active-runs.sh
 source "$SCRIPT_DIR/lib/archon-active-runs.sh"
 archon_runs_snapshot
-BASE_DIR="/mnt/ext-fast"
+BASE_DIR="${BASE_DIR:-/mnt/ext-fast}"
 LOG_PREFIX="[pr-maintenance]"
+# A PR carrying this label is left alone by every phase below (and by
+# pr-review-cron.sh). It is how a human parks a PR that must stay open and
+# unmerged — e.g. an asset-upload PR whose head another workflow fetches from.
+HOLD_LABEL="hold"
 
 # Use arguments if provided, otherwise all projects
 if [ $# -gt 0 ]; then
@@ -38,6 +42,20 @@ else
 fi
 
 log() { echo "$(date -Is) $LOG_PREFIX $*"; }
+
+# ensure_hold_label <project> — create the hold label once per repo (same
+# idempotent pattern as issue-pickup-cron's ensure_labels; exists => no-op).
+ensure_hold_label() {
+  gh label create "$HOLD_LABEL" --repo "alexsiri7/$1" \
+    --color "5319E7" --description "Do not auto-merge, auto-review or auto-maintain" 2>/dev/null || true
+}
+
+# pr_on_hold <number> <hold-flag> — true (with a log line) when the PR list
+# row's hold column is "true", i.e. the PR carries $HOLD_LABEL.
+pr_on_hold() {
+  [ "$2" = "true" ] || return 1
+  log "$PROJECT: PR #$1 is on hold — skipping"
+}
 
 # pr_owned_by_live_run <number> <headRefName> <body>
 # True when the PR's head is an archon task branch and a running or paused
@@ -87,17 +105,19 @@ for PROJECT in "${PROJECTS[@]}"; do
   fi
 
   cd "$REPO_DIR"
+  ensure_hold_label "$PROJECT"
 
   # --- Phase 0: Promote CLEAN draft PRs to ready-for-review ---
   # Archon workflows create PRs as drafts by default. When CI is green the
   # draft has nothing left to gate on, but the Phase 1 merge filter skips
   # drafts — so left alone a green draft sits forever. Flip it to ready so
   # Phase 1 can merge it on this same tick.
-  GREEN_DRAFTS=$(gh pr list --state open --json number,mergeStateStatus,isDraft,headRefName,body \
-    --jq '.[] | select(.isDraft == true and .mergeStateStatus == "CLEAN") | [.number, .headRefName, ((.body // "") | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null || true)
+  GREEN_DRAFTS=$(gh pr list --state open --json number,mergeStateStatus,isDraft,headRefName,labels,body \
+    --jq '.[] | select(.isDraft == true and .mergeStateStatus == "CLEAN") | [.number, .headRefName, (((.labels // []) | map(.name) | index("hold")) != null), ((.body // "") | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null || true)
 
-  while IFS=$'\t' read -r PR HEAD BODY; do
+  while IFS=$'\t' read -r PR HEAD HOLD BODY; do
     [ -n "$PR" ] || continue
+    pr_on_hold "$PR" "$HOLD" && continue
     if pr_owned_by_live_run "$PR" "$HEAD" "$BODY"; then
       log "$PROJECT: draft PR #$PR ($HEAD) is owned by a live archon run — leaving the ready flip to it"
       continue
@@ -109,11 +129,12 @@ for PROJECT in "${PROJECTS[@]}"; do
   done <<< "$GREEN_DRAFTS"
 
   # --- Phase 1: Merge CLEAN PRs directly (bash only, zero AI cost) ---
-  CLEAN_PRS=$(gh pr list --state open --json number,mergeStateStatus,isDraft,headRefName,body \
-    --jq '.[] | select(.isDraft == false and .mergeStateStatus == "CLEAN") | [.number, .headRefName, ((.body // "") | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null || true)
+  CLEAN_PRS=$(gh pr list --state open --json number,mergeStateStatus,isDraft,headRefName,labels,body \
+    --jq '.[] | select(.isDraft == false and .mergeStateStatus == "CLEAN") | [.number, .headRefName, (((.labels // []) | map(.name) | index("hold")) != null), ((.body // "") | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null || true)
 
-  while IFS=$'\t' read -r PR HEAD BODY; do
+  while IFS=$'\t' read -r PR HEAD HOLD BODY; do
     [ -n "$PR" ] || continue
+    pr_on_hold "$PR" "$HOLD" && continue
     if pr_owned_by_live_run "$PR" "$HEAD" "$BODY"; then
       log "$PROJECT: PR #$PR ($HEAD) is owned by a live archon run — merging after it exits"
       continue
@@ -135,12 +156,13 @@ for PROJECT in "${PROJECTS[@]}"; do
   # archon:in-progress behind a linked PR nobody touches (2026-09-09:
   # word-coach-annie #1121 sat conflicted for 2.5h after #1122 merged the same
   # file). Other draft states are still the opening run's to finish.
-  CANDIDATES=$(gh pr list --state open --json number,mergeStateStatus,isDraft,headRefName,body \
-    --jq '.[] | select((.isDraft == false and (.mergeStateStatus == "BEHIND" or .mergeStateStatus == "DIRTY" or .mergeStateStatus == "UNSTABLE" or .mergeStateStatus == "UNKNOWN")) or (.isDraft == true and .mergeStateStatus == "DIRTY")) | [.number, .headRefName, ((.body // "") | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null || true)
+  CANDIDATES=$(gh pr list --state open --json number,mergeStateStatus,isDraft,headRefName,labels,body \
+    --jq '.[] | select((.isDraft == false and (.mergeStateStatus == "BEHIND" or .mergeStateStatus == "DIRTY" or .mergeStateStatus == "UNSTABLE" or .mergeStateStatus == "UNKNOWN")) or (.isDraft == true and .mergeStateStatus == "DIRTY")) | [.number, .headRefName, (((.labels // []) | map(.name) | index("hold")) != null), ((.body // "") | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null || true)
 
   ACTIONABLE=""
-  while IFS=$'\t' read -r PR HEAD BODY; do
+  while IFS=$'\t' read -r PR HEAD HOLD BODY; do
     [ -n "$PR" ] || continue
+    pr_on_hold "$PR" "$HOLD" && continue
     if pr_owned_by_live_run "$PR" "$HEAD" "$BODY"; then
       log "$PROJECT: PR #$PR ($HEAD) needs maintenance but is owned by a live archon run — leaving it to the run"
       continue
