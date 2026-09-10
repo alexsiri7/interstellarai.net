@@ -39,11 +39,13 @@ fi
 
 log() { echo "$(date -Is) $LOG_PREFIX $*"; }
 
-# pr_owned_by_live_run <headRefName> <body>
+# pr_owned_by_live_run <number> <headRefName> <body>
 # True when the PR's head is an archon task branch and a running or paused
 # archon-ship / archon-fix-github-issue run for this project still owns it
 # (matched on the run's "fix #N" message via the PR's closing keyword, or any
-# such run for the project when the body has no closing keyword).
+# such run for the project when the body has no closing keyword). Also true,
+# with a log line, when this tick has no run snapshot: an archon branch whose
+# run state is unknown is deferred rather than merged.
 #
 # Such a PR is still being worked: the run's review, corrections, CI wait and
 # ready flip have not finished. Merging it here with --delete-branch deletes
@@ -53,12 +55,19 @@ log() { echo "$(date -Is) $LOG_PREFIX $*"; }
 # and its three Important review findings were never applied). Leave the flip
 # and the merge until the run has exited.
 pr_owned_by_live_run() {
-  local head="$1" body="$2" wf issue
+  local pr="$1" head="$2" body="$3" wf issue
   case "$head" in
     archon/task-archon-ship-*) wf='^archon-ship$' ;;
     archon/task-archon-fix-github-issue-*) wf='^archon-fix-github-issue$' ;;
     *) return 1 ;;
   esac
+  # Merging is the destructive branch (--delete-branch removes the run's
+  # worktree), so an unreadable run DB fails closed for archon branches only;
+  # human PRs are unaffected. The snapshot failure itself is already on stderr.
+  if ! archon_runs_known; then
+    log "$PROJECT: PR #$pr ($head) — no archon run snapshot this tick, treating as owned by a live run"
+    return 0
+  fi
   issue=$(printf '%s' "$body" \
     | grep -oiE '(close[sd]?|fix(e[sd])?|resolve[sd]?) #[0-9]+' | head -1 \
     | grep -oE '[0-9]+$' || true)
@@ -89,7 +98,7 @@ for PROJECT in "${PROJECTS[@]}"; do
 
   while IFS=$'\t' read -r PR HEAD BODY; do
     [ -n "$PR" ] || continue
-    if pr_owned_by_live_run "$HEAD" "$BODY"; then
+    if pr_owned_by_live_run "$PR" "$HEAD" "$BODY"; then
       log "$PROJECT: draft PR #$PR ($HEAD) is owned by a live archon run — leaving the ready flip to it"
       continue
     fi
@@ -105,7 +114,7 @@ for PROJECT in "${PROJECTS[@]}"; do
 
   while IFS=$'\t' read -r PR HEAD BODY; do
     [ -n "$PR" ] || continue
-    if pr_owned_by_live_run "$HEAD" "$BODY"; then
+    if pr_owned_by_live_run "$PR" "$HEAD" "$BODY"; then
       log "$PROJECT: PR #$PR ($HEAD) is owned by a live archon run — merging after it exits"
       continue
     fi
@@ -132,7 +141,7 @@ for PROJECT in "${PROJECTS[@]}"; do
   ACTIONABLE=""
   while IFS=$'\t' read -r PR HEAD BODY; do
     [ -n "$PR" ] || continue
-    if pr_owned_by_live_run "$HEAD" "$BODY"; then
+    if pr_owned_by_live_run "$PR" "$HEAD" "$BODY"; then
       log "$PROJECT: PR #$PR ($HEAD) needs maintenance but is owned by a live archon run — leaving it to the run"
       continue
     fi
