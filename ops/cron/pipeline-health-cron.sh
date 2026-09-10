@@ -1205,6 +1205,53 @@ sweep_stale_labels() {
 }
 
 # ----------------------------------------------------------------------------
+# Check 9: DB backup freshness. backup-dbs.sh (cron, every 3h) writes
+#   $STATE_DIR/db-backup-status with last_ok=<epoch of the last run in which
+#   every configured project produced a verified archive>. A failed run ntfys
+#   on its own; this check catches the quieter failures — the script not
+#   running at all, crashing before it logs, or failing repeatedly — by
+#   alerting once when no verified backup landed within DB_BACKUP_MAX_AGE_H
+#   hours (default 7: two missed 3-hourly runs).
+# ----------------------------------------------------------------------------
+check_db_backup() {
+  local status_file="$STATE_DIR/db-backup-status"
+  local marker="$STATE_DIR/db-backup-alerted"
+  local max_age_h="${DB_BACKUP_MAX_AGE_H:-7}"
+  local max_age=$(( max_age_h * 3600 ))
+  local now last_ok=0 last_status="" last_failed="" problem=""
+  now=$(date +%s)
+
+  if [ -f "$status_file" ]; then
+    last_ok=$(grep -s '^last_ok=' "$status_file" | cut -d= -f2)
+    last_status=$(grep -s '^last_run_status=' "$status_file" | cut -d= -f2)
+    last_failed=$(grep -s '^last_run_failed=' "$status_file" | cut -d= -f2)
+    [[ "$last_ok" =~ ^[0-9]+$ ]] || last_ok=0
+  fi
+
+  if [ "$last_ok" -eq 0 ]; then
+    problem="no successful DB backup recorded ($status_file missing or never ok)"
+  elif [ $(( now - last_ok )) -gt "$max_age" ]; then
+    problem="last verified DB backup $(( (now - last_ok) / 3600 ))h ago (limit ${max_age_h}h)"
+    [ -n "$last_status" ] && problem="$problem; last run: $last_status${last_failed:+ ($last_failed)}"
+  fi
+
+  if [ -z "$problem" ]; then
+    if [ -f "$marker" ]; then
+      rm -f "$marker"
+      log "db-backup: recovered — verified backup landed"
+    fi
+    return 0
+  fi
+
+  log "db-backup: $problem"
+  [ -f "$marker" ] && return 0   # alert once per stale episode
+  notify "DB backups stale" \
+    "$problem. Check /tmp/db-backup.log and run ops/cron/backup-dbs.sh by hand." \
+    high floppy_disk
+  touch "$marker"
+}
+
+# ----------------------------------------------------------------------------
 log "=== pipeline health check ==="
 for project in "${REPOS[@]}"; do
   check_main_ci "$project"
@@ -1218,5 +1265,6 @@ for project in "${REPOS[@]}"; do
 done
 reconcile_zombies
 check_disk
+check_db_backup
 check_progress
 log "=== done ==="
