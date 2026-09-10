@@ -1,10 +1,14 @@
 ---
 title: 'Consolidated Supabase DB architecture: shared instances with per-project schemas'
 number: 6
-status: accepted
+status: superseded
 date: 2026-05-16
 projects: [annie, reli, filmduel, kindred, lachesis]
 ---
+
+*Superseded by [ADR-007](/mementos/007-staging-super-database-role-convention):
+prod was never consolidated and stays per project, and staging uses
+`<proj>_staging` login roles instead of the `{project}_app` roles below.*
 
 ## Context
 
