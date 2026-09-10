@@ -53,6 +53,9 @@ SUMMARY_BLOCKED=0
 SUMMARY_PROMOTED=0
 SUMMARY_ACTION="none"
 SUMMARY_NOTE=""
+# Issue numbers promote_unblocked flipped to archon:queued this tick, for
+# pick_and_fire to union with its own search — see the comment there.
+PROMOTED_ISSUES=()
 
 ensure_labels() {
   local repo="$1"
@@ -106,7 +109,8 @@ has_human_label() {
 # --- Phase 0.5: auto-triage one issue that has no ingest label ---
 # Picks the oldest untriaged issue (no archon:* and no bug/enhancement label,
 # no human-intent label) and fires archon-triage-issue as a background workflow.
-# One issue per tick, matching the pick_and_fire pattern for fixes.
+# One issue per tick, matching the pick_and_fire pattern for fixes. Blocked
+# candidates are parked as archon:blocked on the way past, without a triage run.
 # Only called when no fix workflow is already running for this repo (gated in
 # the main loop by checking SUMMARY_ACTION after pick_and_fire).
 auto_triage() {
@@ -157,9 +161,24 @@ auto_triage() {
 
     has_human_label "$labels_json" && continue
 
+    # An untriaged issue with open blockers cannot be picked up until they
+    # close, so classifying it now buys nothing. Park it directly and keep
+    # scanning — otherwise a freshly-filed blocked_by chain spends every tick's
+    # one triage run on leaves and the root waits for the whole chain. Fixes #63.
+    if has_open_blockers "$project" "$num"; then
+      log "$project: labeling #$num archon:blocked (untriaged, open blockers)"
+      if gh issue edit "$num" --repo "alexsiri7/$project" \
+          --add-label "archon:blocked" 2>/dev/null; then
+        SUMMARY_BLOCKED=$((SUMMARY_BLOCKED + 1))
+      else
+        log "$project: #$num — could not add archon:blocked label"
+      fi
+      continue
+    fi
+
     triage_issue="$num"
     break
-  done < <(echo "$issues" | jq -c '.[]' 2>/dev/null)
+  done < <(echo "$issues" | jq -c 'sort_by(.createdAt)[]' 2>/dev/null)
 
   [ -z "$triage_issue" ] && return
 
@@ -322,6 +341,7 @@ auto_queue() {
 # get picked up on the same tick.
 promote_unblocked() {
   local project="$1"
+  PROMOTED_ISSUES=()
   local blocked_json
   blocked_json=$(gh issue list --repo "alexsiri7/$project" --state open \
     --label "archon:blocked" --limit 100 --json number 2>/dev/null || echo "[]")
@@ -339,6 +359,7 @@ promote_unblocked() {
     log "$project: #$num unblocked — promoting archon:blocked → archon:queued"
     if gh issue edit "$num" --repo "alexsiri7/$project" \
         --remove-label "archon:blocked" --add-label "archon:queued" 2>/dev/null; then
+      PROMOTED_ISSUES+=("$num")
       SUMMARY_PROMOTED=$((SUMMARY_PROMOTED + 1))
       SUMMARY_BLOCKED=$((SUMMARY_BLOCKED - 1))
     else
@@ -359,7 +380,20 @@ pick_and_fire() {
   local queued_json
   queued_json=$(gh issue list --repo "alexsiri7/$project" --state open \
     --label "archon:queued" --limit 50 --json number 2>/dev/null || echo "[]")
-  SUMMARY_QUEUED=$(echo "$queued_json" | jq 'length' 2>/dev/null || echo 0)
+
+  local -a candidates=()
+  local num
+  while IFS= read -r num; do
+    [ -n "$num" ] && candidates+=("$num")
+  done < <(echo "$queued_json" | jq -r '.[].number' 2>/dev/null)
+
+  # GitHub's search index lags label writes, so an issue promote_unblocked just
+  # flipped to archon:queued can still be missing from the list above. Union in
+  # what it promoted this tick or the promotion idles until the next one.
+  for num in "${PROMOTED_ISSUES[@]}"; do
+    printf '%s\n' "${candidates[@]}" | grep -qx "$num" || candidates+=("$num")
+  done
+  SUMMARY_QUEUED=${#candidates[@]}
 
   if [ ! -d "$repo_dir/.git" ]; then
     log "$project: no repo at $repo_dir, skipping"
@@ -401,8 +435,7 @@ pick_and_fire() {
     return
   fi
 
-  local issue
-  issue=$(echo "$queued_json" | jq -r '.[0].number // empty' 2>/dev/null || echo "")
+  local issue="${candidates[0]:-}"
 
   if [ -z "$issue" ]; then
     return  # nothing queued; SUMMARY_ACTION stays "none"
