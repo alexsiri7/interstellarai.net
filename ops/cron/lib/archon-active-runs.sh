@@ -18,7 +18,7 @@
 #
 # Requires: archon >= 0.10 (workflow runs --json), python3, awk.
 
-ARCHON_RUNS_SNAPSHOT="/tmp/.archon-active-runs.$(basename "${0:-tick}" .sh)"
+ARCHON_RUNS_SNAPSHOT="${ARCHON_RUNS_SNAPSHOT:-/tmp/.archon-active-runs.$(basename "${0:-tick}" .sh)}"
 
 # The CLI refuses to start outside a git checkout, even for `workflow runs
 # --all`, which does not scope by project. Cron starts every script in $HOME,
