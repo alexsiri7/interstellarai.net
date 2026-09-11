@@ -1,4 +1,13 @@
 -- =============================================================
+-- SUPERSEDED on 2026-09-10 by ADR-007 (shared staging
+-- super-database with per-project login roles). DO NOT RUN.
+-- Kept as history. Staging uses a `<proj>_staging` LOGIN role
+-- owning a schema of the same name; prod stays per project
+-- with its tables in `public`.
+-- https://www.interstellarai.net/mementos/007-staging-super-database-role-convention
+-- =============================================================
+
+-- =============================================================
 -- 017: Annie schema isolation — PROD DB
 -- Run against: prod Supabase (default / consolidated DB)
 -- Prerequisites: Annie tables must be migrated one-shot first
@@ -66,7 +75,7 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA annie
   GRANT USAGE, SELECT ON SEQUENCES TO annie_app;
 
 -- Connection string note:
--- After running this migration, update the Annie app's DATABASE_URL
--- to include the search_path. Examples:
---   Prisma:    postgresql://user:pass@host:5432/postgres?schema=annie
---   Direct:    postgresql://user:pass@host:5432/postgres?options=-csearch_path%3Dannie
+-- The pooler ignores `options=-c search_path` in the URL, so the
+-- pattern this file used to document never took effect. For staging,
+-- ADR-007 has the connection string that works: authenticate as the
+-- `<proj>_staging` role, whose own `search_path` selects the schema.

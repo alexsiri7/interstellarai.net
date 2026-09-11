@@ -1,4 +1,13 @@
 -- =============================================================
+-- SUPERSEDED on 2026-09-10 by ADR-007 (shared staging
+-- super-database with per-project login roles). DO NOT RUN.
+-- Kept as history. Staging uses a `<proj>_staging` LOGIN role
+-- owning a schema of the same name; prod stays per project
+-- with its tables in `public`.
+-- https://www.interstellarai.net/mementos/007-staging-super-database-role-convention
+-- =============================================================
+
+-- =============================================================
 -- 011: Staging DB initialization — all project schemas & roles
 -- Run against: staging Supabase (consolidated staging instance)
 -- Note: empty schemas — no data migration needed
@@ -108,7 +117,7 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA lachesis
 --   ORDER BY schema_name;
 
 -- Connection string note:
--- After running this migration, update each app's DATABASE_URL
--- to include the search_path. Examples:
---   Prisma:    postgresql://user:pass@host:5432/postgres?schema={project}
---   Direct:    postgresql://user:pass@host:5432/postgres?options=-csearch_path%3D{project}
+-- The pooler ignores `options=-c search_path` in the URL, so the
+-- pattern this file used to document never took effect. For staging,
+-- ADR-007 has the connection string that works: authenticate as the
+-- `<proj>_staging` role, whose own `search_path` selects the schema.
