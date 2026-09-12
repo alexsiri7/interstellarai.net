@@ -47,6 +47,10 @@ load_check_deploy_http() {
 
     load_check_deploy_http
 
+    # check_deploy_http files only on the second consecutive down tick, so the
+    # suspect marker stands in for the first one.
+    touch "$STATE_DIR/deploy-suspect-test-project"
+
     run check_deploy_http "test-project"
 
     # Marker file must be created (deploy-down path taken).
@@ -91,6 +95,9 @@ load_check_deploy_http() {
     export stub_file
 
     load_check_deploy_http
+
+    # Second consecutive down tick — the first only arms the suspect marker.
+    touch "$STATE_DIR/deploy-suspect-test-project"
 
     run check_deploy_http "test-project"
 
