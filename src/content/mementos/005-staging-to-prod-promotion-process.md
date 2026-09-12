@@ -30,7 +30,9 @@ managed across environments.
 - Main-branch CI must be green at the exact commit being promoted.
 - The `pipeline-health-cron` (ADR-002) serves as the detection layer: if a
   staging deploy fails or CI goes red, the cron fires a self-healing issue
-  within 30 minutes.
+  within 30 minutes on a first occurrence. A per-project 2h cooldown throttles
+  re-filing while main stays red across repeated SHAs, so a repeat red inside
+  that window waits for it (see `ops/cron/README.md`).
 
 **Approval authority** — who can promote to prod:
 
