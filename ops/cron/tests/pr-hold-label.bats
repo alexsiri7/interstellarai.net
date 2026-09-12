@@ -35,9 +35,19 @@ setup() {
     # merge when this comes back empty, so every merge test needs it set.
     export GH_PR_VIEW='{"title":"stub title","body":"stub body"}'
 
+    # Set to make `gh pr merge --auto` fail, so the non---auto fallback runs.
+    export GH_MERGE_AUTO_FAILS=""
+
+    # The real token predicate, so no test re-declares what lib/ci-skip.sh owns.
+    unset _ARCHON_CI_SKIP_SH
+    source "$CRON_DIR/lib/ci-skip.sh"
+
     cat > "$STUB_BIN/gh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$STUB_GH_ARGV"
+if [ -n "$GH_MERGE_AUTO_FAILS" ] && [ "$1 $2" = "pr merge" ]; then
+  case "$*" in *--auto*) exit 1 ;; esac
+fi
 if [ "$1 $2" = "pr list" ]; then
   jqf="" prev=""
   for a in "$@"; do [ "$prev" = "--jq" ] && jqf="$a"; prev="$a"; done
@@ -164,6 +174,22 @@ merge_argv() { grep -E "^pr merge $1 " "$STUB_GH_ARGV"; }
     run "$CRON_DIR/pr-maintenance-cron.sh"
     [ "$status" -eq 0 ]
     merge_argv 300 | grep -qF -- '--subject Merge pull request #300'
+}
+
+@test "maintenance: the fallback merge carries the same sanitized subject and body" {
+    export GH_PR_LIST="[$(pr 300 false CLEAN '[]')]"
+    export GH_PR_VIEW='{"title":"chore: bump deps [skip ci]","body":"routine [ci skip]"}'
+    export GH_MERGE_AUTO_FAILS=1
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    [ "$status" -eq 0 ]
+    # --auto is what GitHub honours when checks are still pending; when it is
+    # refused the immediate merge is what lands on main, so it needs the same
+    # message. Nothing else distinguishes the two lines in the argv log.
+    fallback="$(merge_argv 300 | grep -v -- '--auto')"
+    [ -n "$fallback" ]
+    grep -qF -- '--subject chore: bump deps (#300)' <<<"$fallback"
+    grep -qF -- '--body routine' <<<"$fallback"
+    ! has_ci_skip_token "$fallback"
 }
 
 @test "maintenance: an unreadable title/body defers the merge to the next tick" {
