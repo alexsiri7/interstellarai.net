@@ -129,6 +129,17 @@ merge_argv() { grep -E "^pr merge $1 " "$STUB_GH_ARGV"; }
 
 # ── squash merge message sanitising (interstellarai.net#76) ──────────────────
 
+@test "maintenance: every merge carries an explicit subject and body, token or not" {
+    export GH_PR_LIST="[$(pr 300 false CLEAN '[]')]"
+    export GH_PR_VIEW='{"title":"feat: normal change","body":"nothing special"}'
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    [ "$status" -eq 0 ]
+    # The poisoned token lives in an intermediate commit subject, which neither
+    # the title nor the body shows — so the override can never be conditional.
+    merge_argv 300 | grep -qF -e '--subject feat: normal change (#300)'
+    merge_argv 300 | grep -qF -e '--body nothing special'
+}
+
 @test "maintenance: a skip-ci token in the PR title is stripped from the merge subject" {
     export GH_PR_LIST="[$(pr 300 false CLEAN '[]')]"
     export GH_PR_VIEW='{"title":"chore: bump deps [skip ci]","body":"routine"}'
