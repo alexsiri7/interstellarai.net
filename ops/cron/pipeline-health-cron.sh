@@ -481,9 +481,9 @@ check_main_push_ci() {
   # work in, and creating branches under it has killed a run before
   # (lachesis PR #132, 2026-09-08).
   #
-  # None of the three write failures below sets $marker: a SHA is only "handled"
-  # once something actually happened to it, so a token expiry or a 5xx is retried
-  # on the next tick instead of leaving main with no CI and nobody looking.
+  # None of the three write failures below sets $marker: a SHA counts as handled
+  # only once it has been notified or remediated, so a failed write is attempted
+  # again on the next tick.
   local new_commit
   new_commit=$(gh api "repos/alexsiri7/$project/git/commits" \
     -f message="chore: re-trigger CI for $short" \

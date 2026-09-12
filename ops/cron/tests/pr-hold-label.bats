@@ -8,7 +8,8 @@
 # scripts prepend $HOME/.local/bin ahead of /usr/local/bin, where a real
 # archon may be installed, so this is the one place a stub reliably wins. The
 # gh stub answers `pr list` with $GH_PR_LIST (applying the script's own --jq
-# filter), `pr view` with $GH_PR_VIEW, and records every invocation.
+# filter), `pr view` with $GH_PR_VIEW, fails `pr merge --auto` when
+# $GH_MERGE_AUTO_FAILS is set, and records every invocation.
 #
 # Run: npx bats@1.11.0 ops/cron/tests/pr-hold-label.bats
 
