@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # pipeline-health-cron.sh — runs every 30 minutes from cron.
 # Detects and responds to pipeline-bottleneck states:
-#   1. Main CI red → file issue tagged archon:in-progress + fire archon immediately (dedup by SHA)
-#  1b. Main HEAD produced zero push workflow runs → ntfy; if its commit message
-#      carries a CI-skip token, also auto-open an empty-commit re-trigger PR
-#      (dedup per SHA, plus a 2h per-project cooldown on opening a PR)
+#   1. Main CI red (newest push-triggered run of each workflow at main HEAD)
+#      → file issue tagged archon:in-progress + fire archon immediately
+#      (dedup by SHA, by any tracked open "Main CI" issue, and by a 2h per-project cooldown)
+#  1b. Scheduled workflows red on main → ntfy the operator only, no issue and no
+#      archon: a missing secret is not something a commit can fix
+#      (dedup per project+workflow in scheduled-health/ subdir)
 #   2. Prod deploy failed or lagging main HEAD → file issue + fire archon (dedup by SHA)
 #   3. Zombie archon DB runs (status=running, age >4h) → abandon
 #   4. Disk >85% on / or /mnt/ext-fast → ntfy
@@ -99,8 +101,8 @@ add_to_project() {
 mkdir -p "$STATE_DIR"
 mkdir -p "$STATE_DIR/prciretry" "$STATE_DIR/escalated" \
          "$STATE_DIR/main-ci" "$STATE_DIR/escalated-main" \
-         "$STATE_DIR/staging-health" "$STATE_DIR/parked" \
-         "$STATE_DIR/main-ci-missing"
+         "$STATE_DIR/staging-health" "$STATE_DIR/scheduled-health" \
+         "$STATE_DIR/parked"
 
 # Max archon-remediation attempts against a single head SHA before we stop
 # re-firing and ntfy the operator that the factory is stuck.
@@ -254,6 +256,35 @@ sha_attempt_decide() {
   echo "SKIP"
 }
 
+# Labels that mean "this issue already has an owner" — any archon:* pipeline
+# state, or a human-intent label. Keep TRACKED_HUMAN_LABELS in sync with
+# HUMAN_LABELS in issue-pickup-cron.sh. Filing a second issue beside one of
+# these is the #75 refile loop.
+TRACKED_HUMAN_LABELS='["manual-review","factory-gap","human-needed","wontfix","duplicate","question"]'
+# archon:* states that mean a run is actually moving. The other archon:* states
+# (failed/done/skipped/blocked) track an issue nobody is working — still a
+# reason not to refile, but a reason to tell the operator once.
+TRACKED_ACTIVE_LABELS='["archon:queued","archon:in-progress","archon:triage-in-progress"]'
+
+# ----------------------------------------------------------------------------
+# find_tracked_issue: echo "<number> active|stalled" for the first open issue on
+# $1 whose title matches $2 and which carries a tracked label; nothing if none.
+# Callers split with ${v%% *} / ${v##* }, as check_main_ci already does for
+# sha_attempt_decide. jq runs as a pipeline stage rather than via `gh --jq` so
+# the predicate stays exercisable against a stubbed gh.
+# ----------------------------------------------------------------------------
+find_tracked_issue() {
+  local repo="$1" title_search="$2"
+  gh issue list --repo "$repo" --state open \
+    --search "$title_search in:title" --json number,labels 2>/dev/null \
+    | jq -r --argjson human "$TRACKED_HUMAN_LABELS" --argjson active "$TRACKED_ACTIVE_LABELS" \
+        '[ .[] | select([.labels[].name] | any(startswith("archon:") or IN($human[]))) ]
+         | .[0] // empty
+         | "\(.number) \(if ([.labels[].name] | any(IN($active[]) or IN($human[])))
+                          then "active" else "stalled" end)"' \
+        2>/dev/null || echo ""
+}
+
 # ----------------------------------------------------------------------------
 # Check 1: Main CI red — file issue + fire archon immediately, dedup by SHA.
 # ----------------------------------------------------------------------------
@@ -262,38 +293,84 @@ check_main_ci() {
   local repo_dir="$BASE_DIR/$project"
   [ -d "$repo_dir/.git" ] || return
 
-  local latest
-  latest=$(gh run list --repo "alexsiri7/$project" --branch main --limit 1 \
-    --json databaseId,conclusion,headSha --jq '.[0] // empty' 2>/dev/null || echo "")
-  [ -n "$latest" ] || return
+  # Only push-triggered workflows are "main CI": a failing schedule/workflow_run
+  # run is not something a commit on main can fix (#75). Repos run more than one
+  # push workflow (un-reminder CI+Release, kindred CI+Migrate, reli CI+scan), so
+  # take the newest run of EACH workflow at the current head SHA rather than the
+  # single newest run, which alternates between them.
+  local runs
+  runs=$(gh run list --repo "alexsiri7/$project" --branch main --event push --limit 20 \
+    --json databaseId,conclusion,headSha,workflowName 2>/dev/null || echo "")
+  [ -n "$runs" ] || return
 
-  local conclusion sha run_id
-  conclusion=$(echo "$latest" | jq -r '.conclusion // "pending"')
-  sha=$(echo "$latest" | jq -r '.headSha')
-  run_id=$(echo "$latest" | jq -r '.databaseId')
+  local sha
+  sha=$(echo "$runs" | jq -r '.[0].headSha // empty')
+  [ -n "$sha" ] || return
+
+  local at_head
+  at_head=$(echo "$runs" | jq --arg sha "$sha" \
+    '[.[] | select(.headSha == $sha)] | group_by(.workflowName) | map(.[0])')
 
   local marker="$STATE_DIR/main-ci/$project"
-  if [ "$conclusion" = "success" ]; then
-    # Green again — clear stale markers for this repo (new-style marker dir
-    # plus any legacy single-file markers from earlier versions of this script).
-    rm -f "$marker" 2>/dev/null || true
-    find "$STATE_DIR/escalated-main" -maxdepth 1 -name "$project-*" -delete 2>/dev/null || true
-    find "$STATE_DIR" -maxdepth 1 -name "main-ci-fired-$project-*" -delete 2>/dev/null || true
+  local failed run_id wf_name
+  failed=$(echo "$at_head" | jq -r '[.[] | select(.conclusion == "failure")] | .[0] // empty')
+  if [ -z "$failed" ]; then
+    # Clear markers only when every push workflow at this SHA went green. A run
+    # still in flight, or cancelled, is neither red nor a recovery.
+    if [ "$(echo "$at_head" | jq -r \
+         'if (length > 0) and (all(.[]; .conclusion == "success")) then "yes" else "no" end')" = "yes" ]; then
+      rm -f "$marker" "$STATE_DIR/main-ci-cooldown-$project" 2>/dev/null || true
+      find "$STATE_DIR/escalated-main" -maxdepth 1 -name "$project-*" -delete 2>/dev/null || true
+      find "$STATE_DIR" -maxdepth 1 -name "main-ci-fired-$project-*" -delete 2>/dev/null || true
+    fi
     return
   fi
-  # Still running, cancelled, or pending — not actionable yet
-  [ "$conclusion" = "failure" ] || return
+  run_id=$(echo "$failed" | jq -r '.databaseId')
+  wf_name=$(echo "$failed" | jq -r '.workflowName')
 
-  # Also skip if a human (or earlier tick) already filed an open "Main CI" issue
-  # that is queued or in-progress. Avoids duplicating triage on SHA changes.
-  local existing
-  existing=$(gh issue list --repo "alexsiri7/$project" --state open \
-    --search "Main CI in:title" --json number,labels \
-    --jq '[.[] | select((.labels | map(.name)) as $l | ($l | index("archon:queued")) or ($l | index("archon:in-progress")))] | .[0].number // empty' \
-    2>/dev/null || echo "")
-  if [ -n "$existing" ]; then
-    log "$project: main CI red, but open CI issue #$existing already queued/in-progress — skipping"
+  # Dedup: any open "Main CI" issue with an archon:* state or a human-intent
+  # label means someone already owns this. Relabelling an auto-filed issue
+  # `human-needed` used to slip past this guard and refile every tick (#75).
+  # A `stalled` match (terminal archon state, no human label) means nobody is
+  # on it — still don't refile, but say so once, since this guard returns
+  # before sha_attempt_decide and so before any "factory stuck" escalation.
+  local tracked tracked_num tracked_state
+  tracked=$(find_tracked_issue "alexsiri7/$project" "Main CI")
+  if [ -n "$tracked" ]; then
+    tracked_num="${tracked%% *}"
+    tracked_state="${tracked##* }"
+    if [ "$tracked_state" = "stalled" ]; then
+      # Lives in escalated-main/ so the green branch's existing $project-* sweep
+      # re-arms the alert when main recovers.
+      local stall_marker="$STATE_DIR/escalated-main/$project-stalled-$tracked_num"
+      if [ ! -f "$stall_marker" ]; then
+        touch "$stall_marker"
+        notify "main CI still red: $project" \
+          "Open issue #$tracked_num tracks it but no archon run is active.
+https://github.com/alexsiri7/$project/issues/$tracked_num" \
+          high warning
+      fi
+    fi
+    log "$project: main CI red, but open CI issue #$tracked_num is already tracked ($tracked_state) — skipping"
     return
+  fi
+
+  # Per-project cooldown (2h), mirroring check_prod_deploy: archon can "fix" a
+  # config-caused red by landing a trivial commit and closing the issue, which
+  # produces a new SHA, a reset attempt budget and an immediate re-fire. Cleared
+  # whenever main goes green, so a genuine first red is never delayed. Returning
+  # here does not consume an attempt — the cooldown throttles fires, it does not
+  # spend the budget.
+  local cooldown_marker="$STATE_DIR/main-ci-cooldown-$project"
+  local now_epoch; now_epoch=$(date +%s)
+  if [ -f "$cooldown_marker" ]; then
+    local last_filed elapsed
+    last_filed=$(cat "$cooldown_marker" 2>/dev/null || echo 0)
+    elapsed=$(( now_epoch - last_filed ))
+    if [ "$elapsed" -lt 7200 ]; then
+      log "$project: main CI red at ${sha:0:10} — cooldown active (${elapsed}s < 2h since last issue filed), skipping"
+      return
+    fi
   fi
 
   # SHA-scoped attempt tracking: new SHA resets counter, same SHA retries up
@@ -322,9 +399,13 @@ check_main_ci() {
       ;;
   esac
 
-  local failed_jobs
+  local failed_jobs failed_workflows
   failed_jobs=$(gh run view "$run_id" --repo "alexsiri7/$project" --json jobs \
     --jq '[.jobs[] | select(.conclusion == "failure") | .name] | join(", ")' 2>/dev/null || echo "unknown")
+  # group_by sorts by workflow name, so $wf_name/$run_id are the alphabetically
+  # first failing workflow. Title-based dedup means the others never get an
+  # issue of their own, so name them all here.
+  failed_workflows=$(echo "$at_head" | jq -r '[.[] | select(.conclusion == "failure") | .workflowName] | join(", ")')
 
   log "$project: main CI red ($failed_jobs) at $sha — filing issue + firing archon (attempt $attempts/$MAX_ATTEMPTS)"
 
@@ -335,6 +416,8 @@ check_main_ci() {
 **Repo**: alexsiri7/$project
 **SHA**: \`$sha\`
 **Run**: https://github.com/alexsiri7/$project/actions/runs/$run_id
+**Workflow**: $wf_name
+**Failing workflows at this SHA**: $failed_workflows
 **Failed jobs**: $failed_jobs
 
 Auto-filed by \`pipeline-health-cron.sh\`. Main CI is a pipeline bottleneck, so archon has been fired immediately on this issue rather than queued. This issue is tagged \`archon:in-progress\` so the regular pickup cron will not double-fire.
@@ -358,6 +441,7 @@ EOF
     return
   fi
 
+  echo "$now_epoch" > "$cooldown_marker"
   add_to_project "$project" "$issue_num"
 
   mkdir -p "$repo_dir/.archon-logs"
@@ -372,167 +456,49 @@ EOF
 }
 
 # ----------------------------------------------------------------------------
-# Check 1b: a main HEAD that produced no push workflow run at all.
-#   check_main_ci reads the latest run's conclusion, so a SHA that triggered
-#   zero runs is invisible to it — the previous green run keeps surfacing.
-#   That is exactly what a CI-skip token in a merge commit message does
-#   (interstellarai.net#76): CI, release and the prod deploy silently never
-#   happen. When the HEAD message explains it, open an empty-commit PR whose
-#   merge produces a clean push; when it does not, the cause is something else
-#   (Actions outage, disabled workflows, a paths: filter) so only ntfy.
+# Check 1b: Scheduled workflows red on main — operator ntfy only.
+#   A schedule-triggered workflow (uptime/disk/health monitors) failing is
+#   almost always environment or config — a missing secret — not something a
+#   commit on main can fix. Firing archon at one burns runs against an
+#   unfixable target (#75), so this check only tells the operator.
+#   workflow_run deploy runs are NOT handled here: Check 2 owns those.
+#   Dedup per (project, workflow) in scheduled-health/, cleared on recovery.
+#   Reads only the Actions API, so unlike Check 1 it needs no local clone.
 # ----------------------------------------------------------------------------
-check_main_push_ci() {
+check_scheduled_workflows() {
   local project="$1"
-  local repo_dir="$BASE_DIR/$project"
-  [ -d "$repo_dir/.git" ] || return
+  local runs latest
+  runs=$(gh run list --repo "alexsiri7/$project" --branch main --event schedule --limit 30 \
+    --json conclusion,status,workflowName,url 2>/dev/null || echo "")
+  [ -n "$runs" ] || return
+  latest=$(echo "$runs" | jq -c \
+    '[.[] | select(.status == "completed")] | group_by(.workflowName) | map(.[0]) | .[]' 2>/dev/null)
+  [ -n "$latest" ] || return
 
-  local head_json head_sha head_ts head_msg head_tree
-  head_json=$(gh api "repos/alexsiri7/$project/commits/main" \
-    --jq '{sha: .sha, ts: .commit.committer.date, msg: .commit.message, tree: .commit.tree.sha}' 2>/dev/null || echo "")
-  [ -n "$head_json" ] || return
-  head_sha=$(echo "$head_json" | jq -r '.sha')
-  head_ts=$(echo "$head_json" | jq -r '.ts')
-  head_msg=$(echo "$head_json" | jq -r '.msg // ""')
-  head_tree=$(echo "$head_json" | jq -r '.tree')
-
-  if [ "$head_sha" = "null" ] || [ -z "$head_sha" ] || \
-     [ "$head_ts" = "null" ] || [ -z "$head_ts" ] || \
-     [ "$head_tree" = "null" ] || [ -z "$head_tree" ]; then
-    log "$project: commits/main API returned null fields — transient failure, skipping"
-    return
-  fi
-
-  # GitHub registers a run within seconds of a push; 10 minutes is slack for
-  # API lag, not a wait for the run to finish.
-  local now_epoch head_epoch age
-  now_epoch=$(date +%s)
-  head_epoch=$(date -d "$head_ts" +%s 2>/dev/null || echo 0)
-  age=$(( now_epoch - head_epoch ))
-  [ "$age" -gt 600 ] || return
-
-  # A repo whose workflows simply do not run on push to main is not stuck.
-  local ever
-  ever=$(gh api "repos/alexsiri7/$project/actions/runs?branch=main&event=push&per_page=1" \
-    --jq '.total_count' 2>/dev/null || echo "")
-  case "$ever" in ''|*[!0-9]*) return ;; esac
-  [ "$ever" -gt 0 ] || return
-
-  local runs
-  runs=$(gh api "repos/alexsiri7/$project/actions/runs?head_sha=$head_sha&event=push&per_page=1" \
-    --jq '.total_count' 2>/dev/null || echo "")
-  # An API failure is not evidence that no run exists.
-  case "$runs" in ''|*[!0-9]*) return ;; esac
-
-  local marker_dir="$STATE_DIR/main-ci-missing"
-  if [ "$runs" -gt 0 ]; then
-    find "$marker_dir" -maxdepth 1 -name "$project-*" -delete 2>/dev/null || true
-    return
-  fi
-
-  local marker="$marker_dir/$project-${head_sha:0:12}"
-  if [ -f "$marker" ]; then
-    log "$project: ${head_sha:0:10} still has no push CI run — already handled, skipping"
-    return
-  fi
-
-  local age_m=$(( age / 60 ))
-  if ! has_ci_skip_token "$head_msg"; then
-    log "$project: main HEAD ${head_sha:0:10} (${age_m}m old) produced no push workflow run and carries no CI-skip token — ntfying, cause unknown"
-    notify "no CI on $project main" \
-      "${head_sha:0:10} landed ${age_m}m ago with zero push workflow runs and no CI-skip token in its message. Check for an Actions outage, disabled workflows, or a new paths: filter." \
-      high warning
-    touch "$marker"
-    return
-  fi
-
-  # Chain breaker: if the re-trigger commit is itself skipped, the new SHA gets
-  # a fresh marker but this stops a second PR, same as check_prod_deploy's.
-  local cooldown_marker="$STATE_DIR/main-ci-missing-cooldown-$project"
-  if [ -f "$cooldown_marker" ]; then
-    local last_filed elapsed
-    last_filed=$(cat "$cooldown_marker" 2>/dev/null || echo 0)
-    case "$last_filed" in ''|*[!0-9]*) last_filed=0 ;; esac
-    elapsed=$(( now_epoch - last_filed ))
-    if [ "$elapsed" -lt 7200 ]; then
-      log "$project: main HEAD ${head_sha:0:10} has no push CI run — cooldown active (${elapsed}s < 2h since the last re-trigger PR), ntfying instead"
-      notify "factory stuck: $project main has no CI" \
-        "${head_sha:0:10} produced no push workflow run and a re-trigger PR was already opened within the last 2h. Re-trigger CI by hand." \
-        high warning
+  local run name conclusion url safe marker
+  while IFS= read -r run; do
+    [ -n "$run" ] || continue
+    name=$(echo "$run" | jq -r '.workflowName')
+    conclusion=$(echo "$run" | jq -r '.conclusion')
+    url=$(echo "$run" | jq -r '.url')
+    safe=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '-')
+    marker="$STATE_DIR/scheduled-health/$project-$safe"
+    if [ "$conclusion" = "failure" ]; then
+      if [ -f "$marker" ]; then
+        log "$project: scheduled workflow '$name' still red — already notified, skipping"
+        continue
+      fi
       touch "$marker"
-      return
+      log "$project: scheduled workflow '$name' red ($url) — notifying operator, no archon"
+      notify "Scheduled workflow red: $project" \
+        "$name failed on main — $url
+No archon run fired: fix the workflow or its config." \
+        default warning
+    else
+      [ -f "$marker" ] && log "$project: scheduled workflow '$name' recovered"
+      rm -f "$marker"
     fi
-  fi
-
-  local open_retrigger
-  open_retrigger=$(gh pr list --repo "alexsiri7/$project" --state open \
-    --json number,headRefName \
-    --jq '[.[] | select(.headRefName | startswith("ci/retrigger-"))] | .[0].number // empty' \
-    2>/dev/null || echo "")
-  if [ -n "$open_retrigger" ]; then
-    log "$project: main HEAD ${head_sha:0:10} has no push CI run — re-trigger PR #$open_retrigger already open, skipping"
-    touch "$marker"
-    return
-  fi
-
-  local short="${head_sha:0:8}"
-  log "$project: main HEAD $short produced no push workflow run and its message carries a CI-skip token — opening a re-trigger PR"
-
-  # Built entirely through the API: $repo_dir is the live clone archon runs
-  # work in, and creating branches under it has killed a run before
-  # (lachesis PR #132, 2026-09-08).
-  #
-  # None of the three write failures below sets $marker: a SHA counts as handled
-  # only once it has been notified or remediated, so a failed write is attempted
-  # again on the next tick.
-  local new_commit
-  new_commit=$(gh api "repos/alexsiri7/$project/git/commits" \
-    -f message="chore: re-trigger CI for $short" \
-    -f tree="$head_tree" -f "parents[]=$head_sha" \
-    --jq '.sha' 2>/dev/null || echo "")
-  if [ -z "$new_commit" ] || [ "$new_commit" = "null" ]; then
-    log "$project: could not create the re-trigger commit for $short — skipping"
-    return
-  fi
-
-  local branch="ci/retrigger-$short"
-  local new_ref
-  new_ref=$(gh api "repos/alexsiri7/$project/git/refs" \
-    -f ref="refs/heads/$branch" -f sha="$new_commit" \
-    --jq '.ref' 2>/dev/null || echo "")
-  if [ -z "$new_ref" ] || [ "$new_ref" = "null" ]; then
-    log "$project: could not create branch $branch — skipping"
-    return
-  fi
-
-  local pr_body
-  pr_body=$(cat <<EOF
-## Re-trigger CI for \`$short\`
-
-\`$head_sha\` landed on \`main\` ${age_m} minutes ago carrying an instruction that
-tells GitHub not to run workflows, so it produced **zero** push workflow runs —
-no CI, no release, no prod deploy.
-
-This PR is an empty commit on top of that SHA. Merging it puts a clean commit
-message on \`main\`, which is enough for the push workflows to run.
-
-Auto-opened by \`pipeline-health-cron.sh\` (\`check_main_push_ci\`); see
-alexsiri7/interstellarai.net#76.
-EOF
-)
-  local pr_url
-  pr_url=$(gh pr create --repo "alexsiri7/$project" --base main --head "$branch" \
-    --title "chore: re-trigger CI for $short" --body "$pr_body" 2>/dev/null | tail -1)
-  if [ -z "$pr_url" ]; then
-    log "$project: could not open the re-trigger PR for $short — skipping"
-    return
-  fi
-
-  touch "$marker"
-  echo "$now_epoch" > "$cooldown_marker"
-  log "$project: opened re-trigger PR $pr_url for $short"
-  notify "no CI on $project main — re-trigger PR opened" \
-    "$short landed on main with no push workflow run. Opened $pr_url to produce a clean push." \
-    high warning
+  done <<< "$latest"
 }
 
 # ----------------------------------------------------------------------------
@@ -1490,7 +1456,7 @@ archon workflow get $run_id --json" \
 log "=== pipeline health check ==="
 for project in "${REPOS[@]}"; do
   check_main_ci "$project"
-  check_main_push_ci "$project"
+  check_scheduled_workflows "$project"
   check_prod_deploy "$project"
   check_pr_ci_retry "$project"
   check_stuck_prs "$project"
