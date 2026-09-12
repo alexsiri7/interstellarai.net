@@ -8,7 +8,8 @@
 # Reads TICK_INTERVAL_MINUTES from the throttle.conf file that lives alongside
 # the lib/ directory. Defaults to 60 if the file is missing or the key is
 # absent. State is kept in ~/.config/archon-cron/state/<script-name>.last_run
-# as a Unix timestamp.
+# as a Unix timestamp. ARCHON_CRON_FORCE_TICK=1 bypasses the gate without
+# touching that state.
 
 # Guard against being sourced more than once.
 [ -n "${_ARCHON_THROTTLE_SH:-}" ] && return 0
@@ -18,6 +19,17 @@ _ARCHON_THROTTLE_SH=1
 # Args: $1 = script-name (used as state file key)
 should_tick() {
     local _name="$1"
+
+    # A forced tick runs the script now and leaves the stamp alone, so a
+    # manual nudge (an operator loop re-running a script for one project)
+    # never consumes the system cron's own tick. Deleting the stamp instead
+    # starves every project the nudge did not name: a 20-minute nudge loop
+    # against the 30-minute interval kept the system cron skipping for
+    # 15 hours on 2026-09-11.
+    if [ "${ARCHON_CRON_FORCE_TICK:-}" = "1" ]; then
+        echo "$(date -Is) [throttle] ${_name}: forced tick (ARCHON_CRON_FORCE_TICK=1), stamp untouched"
+        return 0
+    fi
     local _lib_dir
     _lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     local _conf="${_lib_dir}/../throttle.conf"

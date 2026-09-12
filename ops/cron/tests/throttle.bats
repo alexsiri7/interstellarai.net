@@ -55,6 +55,23 @@ teardown() {
     [ "$status" -eq 0 ]
 }
 
+@test "ARCHON_CRON_FORCE_TICK=1 runs within the interval and leaves the stamp untouched" {
+    mkdir -p "$HOME/.config/archon-cron/state"
+    local stamp="$HOME/.config/archon-cron/state/test-script.last_run"
+    local recent_ts=$(( $(date +%s) - 60 ))
+    echo "$recent_ts" > "$stamp"
+    ARCHON_CRON_FORCE_TICK=1 run should_tick "test-script"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"forced tick"* ]]
+    [ "$(cat "$stamp")" = "$recent_ts" ]
+}
+
+@test "ARCHON_CRON_FORCE_TICK=1 does not create a stamp on first run" {
+    ARCHON_CRON_FORCE_TICK=1 run should_tick "test-script"
+    [ "$status" -eq 0 ]
+    [ ! -f "$HOME/.config/archon-cron/state/test-script.last_run" ]
+}
+
 # ── Config parsing ───────────────────────────────────────────────────
 
 @test "should_tick uses default interval (60) when config is missing" {
