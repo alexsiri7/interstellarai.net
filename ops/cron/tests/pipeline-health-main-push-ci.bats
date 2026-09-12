@@ -32,6 +32,8 @@ setup() {
     export EVER_COUNT="94"
     export SHA_COUNT="1"
     export OPEN_RETRIGGER=""
+    # Substring of the one gh call that should fail; empty means all succeed.
+    export FAIL_API=""
 
     log() { echo "$*"; }
     export -f log
@@ -40,6 +42,9 @@ setup() {
 
     gh() {
         printf '%s\n' "$*" >> "$GH_ARGV"
+        if [ -n "$FAIL_API" ]; then
+            case "$*" in *"$FAIL_API"*) return 1 ;; esac
+        fi
         case "$*" in
             *"commits/main"*)
                 printf '{"sha":"%s","ts":"%s","msg":"%s","tree":"treesha"}' \
@@ -139,7 +144,8 @@ marker_count() { find "$STATE_DIR/main-ci-missing" -maxdepth 1 -name 'proj-*' | 
     export SHA_COUNT="0"
     export HEAD_MSG="chore: update snapshots [skip ci]"
     run check_main_push_ci proj
-    ! grep -qiE '\[(skip ci|ci skip|no ci|skip actions|actions skip)\]|\*\*\*NO_CI\*\*\*' "$GH_ARGV"
+    gh_called 'pr create'
+    ! has_ci_skip_token "$(cat "$GH_ARGV")"
 }
 
 # ── dedup and loop control ───────────────────────────────────────────────────
@@ -174,6 +180,48 @@ marker_count() { find "$STATE_DIR/main-ci-missing" -maxdepth 1 -name 'proj-*' | 
     [[ "$output" == *"re-trigger PR #500 already open"* ]]
     ! gh_called 'pr create'
     ! gh_called 'git/commits'
+}
+
+# ── a failed remediation is retried, not marked handled ──────────────────────
+
+@test "a failed re-trigger commit leaves no marker and is retried next tick" {
+    export SHA_COUNT="0"
+    export HEAD_MSG="chore: update snapshots [skip ci]"
+    export FAIL_API="git/commits"
+    run check_main_push_ci proj
+    [[ "$output" == *"could not create the re-trigger commit"* ]]
+    [ "$(marker_count)" -eq 0 ]
+    [ ! -f "$STATE_DIR/main-ci-missing-cooldown-proj" ]
+    : > "$GH_ARGV"
+    run check_main_push_ci proj
+    gh_called 'git/commits'
+}
+
+@test "a failed branch creation leaves no marker and is retried next tick" {
+    export SHA_COUNT="0"
+    export HEAD_MSG="chore: update snapshots [skip ci]"
+    export FAIL_API="git/refs"
+    run check_main_push_ci proj
+    [[ "$output" == *"could not create branch ci/retrigger-aaaaaaaa"* ]]
+    [ "$(marker_count)" -eq 0 ]
+    [ ! -f "$STATE_DIR/main-ci-missing-cooldown-proj" ]
+    : > "$GH_ARGV"
+    run check_main_push_ci proj
+    gh_called 'git/refs'
+}
+
+@test "a failed PR creation leaves no marker and is retried next tick" {
+    export SHA_COUNT="0"
+    export HEAD_MSG="chore: update snapshots [skip ci]"
+    export FAIL_API="pr create"
+    run check_main_push_ci proj
+    [[ "$output" == *"could not open the re-trigger PR"* ]]
+    [ "$(marker_count)" -eq 0 ]
+    [ ! -f "$STATE_DIR/main-ci-missing-cooldown-proj" ]
+    [ ! -f "$NTFY_SENTINEL" ]
+    : > "$GH_ARGV"
+    run check_main_push_ci proj
+    gh_called 'pr create'
 }
 
 # ── recovery ─────────────────────────────────────────────────────────────────

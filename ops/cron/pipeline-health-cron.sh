@@ -434,7 +434,6 @@ check_main_push_ci() {
     log "$project: ${head_sha:0:10} still has no push CI run — already handled, skipping"
     return
   fi
-  touch "$marker"
 
   local age_m=$(( age / 60 ))
   if ! has_ci_skip_token "$head_msg"; then
@@ -442,6 +441,7 @@ check_main_push_ci() {
     notify "no CI on $project main" \
       "${head_sha:0:10} landed ${age_m}m ago with zero push workflow runs and no CI-skip token in its message. Check for an Actions outage, disabled workflows, or a new paths: filter." \
       high warning
+    touch "$marker"
     return
   fi
 
@@ -458,6 +458,7 @@ check_main_push_ci() {
       notify "factory stuck: $project main has no CI" \
         "${head_sha:0:10} produced no push workflow run and a re-trigger PR was already opened within the last 2h. Re-trigger CI by hand." \
         high warning
+      touch "$marker"
       return
     fi
   fi
@@ -469,6 +470,7 @@ check_main_push_ci() {
     2>/dev/null || echo "")
   if [ -n "$open_retrigger" ]; then
     log "$project: main HEAD ${head_sha:0:10} has no push CI run — re-trigger PR #$open_retrigger already open, skipping"
+    touch "$marker"
     return
   fi
 
@@ -478,6 +480,10 @@ check_main_push_ci() {
   # Built entirely through the API: $repo_dir is the live clone archon runs
   # work in, and creating branches under it has killed a run before
   # (lachesis PR #132, 2026-09-08).
+  #
+  # None of the three write failures below sets $marker: a SHA is only "handled"
+  # once something actually happened to it, so a token expiry or a 5xx is retried
+  # on the next tick instead of leaving main with no CI and nobody looking.
   local new_commit
   new_commit=$(gh api "repos/alexsiri7/$project/git/commits" \
     -f message="chore: re-trigger CI for $short" \
@@ -521,6 +527,7 @@ EOF
     return
   fi
 
+  touch "$marker"
   echo "$now_epoch" > "$cooldown_marker"
   log "$project: opened re-trigger PR $pr_url for $short"
   notify "no CI on $project main — re-trigger PR opened" \
