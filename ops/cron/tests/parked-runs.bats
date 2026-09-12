@@ -76,7 +76,7 @@ parked_row() {
 
     check_parked_runs
     [ "$(wc -l < "$NOTIFIED")" -eq 1 ]
-    grep -q 'resolved' "$NOTIFIED"
+    grep -q '(resolved)' "$NOTIFIED"
 }
 
 @test "a gate is reported to a human and never answered by cron" {

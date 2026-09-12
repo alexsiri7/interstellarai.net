@@ -1287,7 +1287,7 @@ check_parked_runs() {
     # the recovery; a `gate` is owed an answer cron must never give.
     if { [ "$class" = wait ] || [ "$class" = resolved ]; } && [ ! -e "$marker_dir/resumed-$run_id" ]; then
       overdue="no resume deadline recorded"
-      [ "$deadline" -gt 0 ] && overdue="$(( $(date +%s) - deadline ))s past its recorded resume deadline"
+      [ "${deadline:-0}" -gt 0 ] && overdue="$(( $(date +%s) - deadline ))s past its recorded resume deadline"
       log "parked-runs: $wf $run_id parked ($class), $overdue — resuming"
       ack=$(CLAUDECODE=0 ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING=1 \
         archon workflow resume "$run_id" --detach --json --cwd "$ARCHON_RUNS_CWD" 2>&1 | tail -1)
