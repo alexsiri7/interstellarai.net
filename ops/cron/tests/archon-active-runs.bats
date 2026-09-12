@@ -11,16 +11,24 @@ setup() {
     CRON_DIR="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 
     # Stub archon: prints $STUB_PAYLOAD, exits $STUB_RC, records its argv.
+    # $STUB_PAYLOAD_PAUSED, when set, answers the `--status paused` listing
+    # instead — a paused run is only ever in that one, and a snapshot that
+    # carries it twice hides duplicate rows from every assertion below.
     cat > "$T/bin/archon" <<'STUB'
 #!/usr/bin/env bash
 printf '%s ' "$@" >> "$STUB_ARGV"
-printf '%s' "$STUB_PAYLOAD"
+if [ -n "${STUB_PAYLOAD_PAUSED:-}" ] && [[ " $* " == *" --status paused "* ]]; then
+  printf '%s' "$STUB_PAYLOAD_PAUSED"
+else
+  printf '%s' "$STUB_PAYLOAD"
+fi
 exit "${STUB_RC:-0}"
 STUB
     chmod +x "$T/bin/archon"
     export PATH="$T/bin:$PATH"
     export STUB_ARGV="$T/argv"
     export STUB_RC=0
+    export STUB_PAYLOAD_PAUSED=""
 
     # shellcheck disable=SC1091
     source "$CRON_DIR/lib/archon-active-runs.sh"
@@ -105,4 +113,104 @@ load_pr_owned_by_live_run() {
     ! pr_owned_by_live_run 556 archon/task-archon-ship-1789045232999 "Closes #530"
     # No closing keyword: any live ship run for the project owns it.
     pr_owned_by_live_run 557 archon/task-archon-ship-1789045232999 "no keyword here"
+}
+
+# ── Pause classification and archon_parked_runs ──────────────────────────────
+#
+# Fixtures mirror the metadata shapes archon writes: a `wait:` node records
+# metadata.wait, an approval gate records metadata.approval, and a scheduler
+# deferring after a failed resume stamps a top-level continuation_retry_at.
+
+paused_run() {
+    # $1 run id, $2 metadata JSON body (without workflow_source)
+    printf '{"runs": [{"id": "%s", "workflow_name": "archon-ship", "status": "paused",
+      "user_message": "fix #361", "metadata": {"workflow_source": {"origin": "/mnt/ext-fast/un-reminder"}, %s}}]}' \
+      "$1" "$2"
+}
+
+iso() { date -u -d "@$(( $(date +%s) + $1 ))" +%Y-%m-%dT%H:%M:%S.000Z; }
+
+ci_wait() {
+    # $1 seconds until resumeAt, $2 seconds since waitingSince
+    printf '"wait": {"owner": "loop_group", "nodeId": "deliver__await-checks", "bodyWaitId": "ci-pause",
+      "kind": "time", "iteration": 1, "sessionId": null, "sessionProvider": null,
+      "waitingSince": "%s", "resumeAt": "%s"}' "$(iso "-$2")" "$(iso "$1")"
+}
+
+snapshot_field() { awk -F'\t' -v n="$1" 'NR==1 { print $n }' "$ARCHON_RUNS_SNAPSHOT"; }
+
+no_running() { export STUB_PAYLOAD='{"runs": []}'; }
+
+@test "a fresh CI wait classifies as wait, is not parked, and still counts as active" {
+    no_running
+    export STUB_PAYLOAD_PAUSED="$(paused_run 500946af-aaaa "$(ci_wait 240 60)")"
+    archon_runs_snapshot
+    [ "$(snapshot_field 5)" = "500946af-aaaa" ]
+    [ "$(snapshot_field 6)" = "wait" ]
+    [ -z "$(archon_parked_runs 1800)" ]
+    # The guard relaxation #77 asked for is exactly what must NOT happen here.
+    archon_run_active /mnt/ext-fast/un-reminder un-reminder '^archon-ship$'
+}
+
+@test "a CI wait two hours past its resumeAt is parked, with that deadline in the row" {
+    no_running
+    export STUB_PAYLOAD_PAUSED="$(paused_run 500946af-bbbb "$(ci_wait -7200 7500)")"
+    archon_runs_snapshot
+    row=$(archon_parked_runs 1800)
+    [ "$(printf '%s' "$row" | cut -f1)" = "500946af-bbbb" ]
+    [ "$(printf '%s' "$row" | cut -f2)" = "wait" ]
+    [ "$(printf '%s' "$row" | cut -f3)" = "archon-ship" ]
+    [ "$(printf '%s' "$row" | cut -f5)" = "fix #361" ]
+    deadline=$(printf '%s' "$row" | cut -f6)
+    [ "$deadline" -gt 0 ]
+    [ "$(( $(date +%s) - deadline ))" -gt 7000 ]
+}
+
+@test "a stale resumeAt with a fresh continuation_retry_at is the server still retrying" {
+    no_running
+    export STUB_PAYLOAD_PAUSED="$(paused_run 500946af-cccc \
+      "$(ci_wait -7200 7500), \"continuation_retry_at\": \"$(iso -10)\"")"
+    archon_runs_snapshot
+    [ "$(snapshot_field 6)" = "wait" ]
+    # Deadline path clears, but three hours at one wait trips the backstop.
+    [ -z "$(archon_parked_runs 1800 14400)" ]
+    [ "$(archon_parked_runs 1800 7200 | cut -f1)" = "500946af-cccc" ]
+}
+
+@test "an unresolved approval gate classifies as gate and is parked immediately" {
+    no_running
+    export STUB_PAYLOAD_PAUSED="$(paused_run 500946af-dddd \
+      '"approval": {"nodeId": "review-gate", "message": "Ship it?", "type": "approval"}')"
+    archon_runs_snapshot
+    [ "$(snapshot_field 6)" = "gate" ]
+    [ "$(archon_parked_runs 1800 | cut -f2)" = "gate" ]
+}
+
+@test "a resolved gate is the machine's to resume, not a human's to answer" {
+    no_running
+    export STUB_PAYLOAD_PAUSED="$(paused_run 500946af-eeee \
+      '"approval": {"nodeId": "review-gate", "message": "Ship it?", "resolved": "approved"}')"
+    archon_runs_snapshot
+    [ "$(snapshot_field 6)" = "resolved" ]
+    [ -z "$(archon_parked_runs 1800)" ]
+}
+
+@test "paused with neither a gate nor a usable wait is unreadable and parked" {
+    no_running
+    export STUB_PAYLOAD_PAUSED="$(paused_run 500946af-ffff '"note": "nothing describes this pause"')"
+    archon_runs_snapshot
+    [ "$(snapshot_field 6)" = "unreadable" ]
+    [ "$(archon_parked_runs 1800 | cut -f2)" = "unreadable" ]
+
+    no_running
+    export STUB_PAYLOAD_PAUSED="$(paused_run 500946af-0000 '"approval": {"nodeId": "", "message": "x"}')"
+    archon_runs_snapshot
+    [ "$(snapshot_field 6)" = "unreadable" ]
+}
+
+@test "a running run carries an empty class and is never parked" {
+    export STUB_PAYLOAD="$ONE_SHIP_RUN"
+    archon_runs_snapshot
+    [ "$(snapshot_field 6)" = "" ]
+    [ -z "$(archon_parked_runs 1800)" ]
 }

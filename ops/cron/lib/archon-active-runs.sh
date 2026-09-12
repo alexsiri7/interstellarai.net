@@ -9,12 +9,17 @@
 # tick and let guards treat running|paused runs as active, alongside (never
 # instead of) the existing pgrep checks.
 #
+# That deference is only safe while something does eventually resume a paused
+# run, so the snapshot also records WHY each one is paused (see the pause class
+# below) and archon_parked_runs names the ones nothing will resume on its own.
+#
 # Usage:
 #   source "$SCRIPT_DIR/lib/archon-active-runs.sh"
 #   archon_runs_snapshot                # once per tick, after PATH includes archon
 #   if archon_run_active "$repo_dir" "$project" '^archon-ship$' "#42\\b"; then ...
 #   msg=$(archon_run_active_msg "$repo_dir" "$project" '^archon-ship$') # first match's user_message
 #   archon_runs_known || ...            # false when this tick's snapshot failed
+#   archon_parked_runs 1800             # rows for paused runs nothing will resume
 #
 # Requires: archon >= 0.10 (workflow runs --json), python3, awk.
 
@@ -33,7 +38,35 @@ ARCHON_RUNS_CWD="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ARCHON_RUNS_SNAPSHOT_OK=0
 
 # Snapshot all running + paused runs to $ARCHON_RUNS_SNAPSHOT as TSV:
-#   workflow_name <TAB> status <TAB> origin_path <TAB> user_message
+#   $1 workflow_name  $2 status  $3 origin_path  $4 user_message
+#   $5 run_id         $6 pause class            $7 deadline    $8 waiting_since
+# Fields 5-8 are appended so every $1..$4 matcher keeps working unchanged.
+#
+# The pause class is "" for a running run; for a paused one it mirrors
+# `runAttention` in archon's packages/workflows/src/schemas/workflow-run.ts
+# (isApprovalContext / isGateResolved), so the two can be diffed when the engine
+# moves:
+#   wait       no approval gate and a durable `wait:` with a readable resumeAt.
+#              The server's continuation scan owns the resume.
+#   resolved   a gate that was already approved or rejected — also the machine's
+#              to resume, not anyone's to answer.
+#   gate       a readable, unresolved approval gate. Something outside the run
+#              owes it a response.
+#   unreadable any other paused shape: no gate and no usable wait, or a gate
+#              whose nodeId/message fail the field check. Nothing resumes it.
+# runAttention's `child_workflow` and `writeback` variants collapse into `gate`:
+# the sdlc pack composes with `include:` (inlined, no sub-runs) and nothing here
+# is containerized, and either way the cron response is the same — tell a human,
+# touch nothing.
+#
+# $7 is the latest moment the engine said it would be back, as a unix epoch, and
+# is 0 for every class but `wait`: max(wait.resumeAt, continuation_retry_at),
+# the two fields listDueWorkflowContinuations selects on
+# (archon packages/core/src/db/workflows.ts). continuation_retry_at is top-level
+# in metadata and rolls forward 60s per failed resume, while resumeAt is never
+# rewritten, so taking the max keeps a scheduler that is actively retrying from
+# ever looking stale. $8 is wait.waitingSince as an epoch, 0 otherwise.
+#
 # A listing failure leaves the snapshot short and sets ARCHON_RUNS_SNAPSHOT_OK=0
 # with one stderr line per failed status (cron captures stderr into the tick
 # log). Matchers then report "no active run" — the pgrep guards still stand —
@@ -51,6 +84,34 @@ archon_runs_snapshot() {
     # {"ok": false, "error": ...} with exit 1 rather than a bare failure).
     if problem=$(printf '%s' "$raw" | python3 -c '
 import json, sys
+from datetime import datetime
+
+def epoch(value):
+    if not isinstance(value, str):
+        return 0
+    try:
+        return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return 0
+
+def classify(meta):
+    """(class, deadline, waiting_since) for a paused run — see the header."""
+    wait = meta.get("wait")
+    wait = wait if isinstance(wait, dict) else {}
+    resume_at = epoch(wait.get("resumeAt"))
+    approval = meta.get("approval")
+    if approval is None:
+        if not resume_at:
+            return ("unreadable", 0, 0)
+        deadline = max(resume_at, epoch(meta.get("continuation_retry_at")))
+        return ("wait", deadline, epoch(wait.get("waitingSince")))
+    if not isinstance(approval, dict) or not isinstance(approval.get("nodeId"), str) \
+            or not isinstance(approval.get("message"), str) or approval["nodeId"] == "":
+        return ("unreadable", 0, 0)
+    if approval.get("resolved") in ("approved", "rejected"):
+        return ("resolved", 0, 0)
+    return ("gate", 0, 0)
+
 raw = sys.stdin.read()
 try:
     d = json.loads(raw)
@@ -68,7 +129,9 @@ for r in runs:
     meta = r.get("metadata") or {}
     origin = ((meta.get("workflow_source") or {}).get("origin")) or ""
     status = r.get("status") or ""
-    print(f"{name}\t{status}\t{origin}\t{msg}")
+    run_id = r.get("id") or ""
+    pause, deadline, since = classify(meta) if status == "paused" else ("", 0, 0)
+    print(f"{name}\t{status}\t{origin}\t{msg}\t{run_id}\t{pause}\t{deadline}\t{since}")
 ' 2>&1 >> "$ARCHON_RUNS_SNAPSHOT"); then
       continue
     fi
@@ -100,4 +163,28 @@ archon_run_active_msg() {
 # archon_run_active — same match, no output.
 archon_run_active() {
   archon_run_active_msg "$@" >/dev/null
+}
+
+# archon_parked_runs <stale_seconds> [hard_max_seconds]
+# Print one TSV row per paused run that nothing will resume on its own:
+#   run_id <TAB> class <TAB> workflow_name <TAB> origin <TAB> user_message <TAB> deadline_epoch
+# Call after archon_runs_snapshot, and only when archon_runs_known — an
+# unreadable snapshot has no paused rows and would look like a quiet pipeline.
+#
+# A `gate` or `unreadable` run is owed something from outside and is reported
+# immediately. A `wait` run is reported only once the engine has missed its own
+# deadline by <stale_seconds> — which a live continuation scan cannot do, since
+# a scheduler deferring after failed resumes keeps continuation_retry_at within
+# 60s of now — or once it has sat at one wait for <hard_max_seconds>, the only
+# way to see a scheduler that is alive but failing every retry. hard_max
+# defaults to 4x stale; runs with no readable waitingSince skip that backstop
+# rather than trip it every tick.
+archon_parked_runs() {
+  local stale="$1" hard_max="${2:-$(( $1 * 4 ))}"
+  [ -s "$ARCHON_RUNS_SNAPSHOT" ] || return 0
+  awk -F'\t' -v now="$(date +%s)" -v stale="$stale" -v hard="$hard_max" '
+    function report() { print $5 "\t" $6 "\t" $1 "\t" $3 "\t" $4 "\t" $7 }
+    $6 == "gate" || $6 == "unreadable" { report(); next }
+    $6 == "wait" && (now - $7 > stale || ($8 > 0 && now - $8 > hard)) { report() }
+  ' "$ARCHON_RUNS_SNAPSHOT"
 }
