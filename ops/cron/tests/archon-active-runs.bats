@@ -186,13 +186,34 @@ no_running() { export STUB_PAYLOAD='{"runs": []}'; }
     [ "$(archon_parked_runs 1800 | cut -f2)" = "gate" ]
 }
 
-@test "a resolved gate is the machine's to resume, not a human's to answer" {
+@test "a resolved gate is reported: the machine owed the resume and did not make it" {
     no_running
     export STUB_PAYLOAD_PAUSED="$(paused_run 500946af-eeee \
       '"approval": {"nodeId": "review-gate", "message": "Ship it?", "resolved": "approved"}')"
     archon_runs_snapshot
     [ "$(snapshot_field 6)" = "resolved" ]
+    # No continuation scan ever looks at metadata.approval, so a resolved gate
+    # still here on the next tick has nothing left that would resume it.
+    [ "$(archon_parked_runs 1800 | cut -f2)" = "resolved" ]
+}
+
+@test "a parent blocked on a live child is progress, not a stall" {
+    no_running
+    export STUB_PAYLOAD_PAUSED="$(paused_run 500946af-7777 \
+      '"approval": {"nodeId": "sub-run", "message": "child paused", "type": "child_workflow",
+        "childRunId": "500946af-8888"}')"
+    archon_runs_snapshot
+    [ "$(snapshot_field 6)" = "blocked_on_child" ]
     [ -z "$(archon_parked_runs 1800)" ]
+}
+
+@test "a child_workflow pause with no child to follow is unreadable" {
+    no_running
+    export STUB_PAYLOAD_PAUSED="$(paused_run 500946af-9999 \
+      '"approval": {"nodeId": "sub-run", "message": "child paused", "type": "child_workflow"}')"
+    archon_runs_snapshot
+    [ "$(snapshot_field 6)" = "unreadable" ]
+    [ "$(archon_parked_runs 1800 | cut -f1)" = "500946af-9999" ]
 }
 
 @test "paused with neither a gate nor a usable wait is unreadable and parked" {
@@ -201,6 +222,7 @@ no_running() { export STUB_PAYLOAD='{"runs": []}'; }
     archon_runs_snapshot
     [ "$(snapshot_field 6)" = "unreadable" ]
     [ "$(archon_parked_runs 1800 | cut -f2)" = "unreadable" ]
+
 
     no_running
     export STUB_PAYLOAD_PAUSED="$(paused_run 500946af-0000 '"approval": {"nodeId": "", "message": "x"}')"

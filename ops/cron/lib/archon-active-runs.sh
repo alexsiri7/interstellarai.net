@@ -48,16 +48,26 @@ ARCHON_RUNS_SNAPSHOT_OK=0
 # moves:
 #   wait       no approval gate and a durable `wait:` with a readable resumeAt.
 #              The server's continuation scan owns the resume.
-#   resolved   a gate that was already approved or rejected — also the machine's
-#              to resume, not anyone's to answer.
+#   resolved   a gate that was already approved or rejected — the machine's to
+#              resume, not anyone's to answer. It still gets reported, because
+#              the auto-resume is a single synchronous attempt the approver
+#              makes (`--json` approve skips it entirely) and the continuation
+#              scan selects on metadata.wait, never metadata.approval — so a
+#              resolved gate that survives one tick has nothing left to resume
+#              it.
 #   gate       a readable, unresolved approval gate. Something outside the run
-#              owes it a response.
-#   unreadable any other paused shape: no gate and no usable wait, or a gate
-#              whose nodeId/message fail the field check. Nothing resumes it.
-# runAttention's `child_workflow` and `writeback` variants collapse into `gate`:
-# the sdlc pack composes with `include:` (inlined, no sub-runs) and nothing here
-# is containerized, and either way the cron response is the same — tell a human,
-# touch nothing.
+#              owes it a response. runAttention's `writeback` variant lands
+#              here too: it is an awaiting_response gate there as well.
+#   blocked_on_child  a `workflow:` sub-run node whose child is still going.
+#              Normal progress, not a stall: the parent is resumed by the
+#              child's own termination hook rather than by the continuation
+#              scan, so nothing here is owed. Not reachable in the current sdlc
+#              pack (no `container:`, no sub-run node), and the approval context
+#              carries no timestamp to age it by, so it is excluded outright
+#              rather than given a staleness backstop.
+#   unreadable any other paused shape: no gate and no usable wait, a gate whose
+#              nodeId/message fail the field check, or a child_workflow pause
+#              with no child to follow. Nothing resumes it.
 #
 # $7 is the latest moment the engine said it would be back, as a unix epoch, and
 # is 0 for every class but `wait`: max(wait.resumeAt, continuation_retry_at),
@@ -110,6 +120,11 @@ def classify(meta):
         return ("unreadable", 0, 0)
     if approval.get("resolved") in ("approved", "rejected"):
         return ("resolved", 0, 0)
+    if approval.get("type") == "child_workflow":
+        child = approval.get("childRunId")
+        if not isinstance(child, str) or child == "":
+            return ("unreadable", 0, 0)
+        return ("blocked_on_child", 0, 0)
     return ("gate", 0, 0)
 
 raw = sys.stdin.read()
@@ -171,8 +186,10 @@ archon_run_active() {
 # Call after archon_runs_snapshot, and only when archon_runs_known — an
 # unreadable snapshot has no paused rows and would look like a quiet pipeline.
 #
-# A `gate` or `unreadable` run is owed something from outside and is reported
-# immediately. A `wait` run is reported only once the engine has missed its own
+# A `gate`, `resolved` or `unreadable` run is reported immediately: the first
+# two have nothing left that would resume them on its own, and the last cannot
+# say. A `blocked_on_child` run is never reported — its child's termination
+# resumes it. A `wait` run is reported only once the engine has missed its own
 # deadline by <stale_seconds> — which a live continuation scan cannot do, since
 # a scheduler deferring after failed resumes keeps continuation_retry_at within
 # 60s of now — or once it has sat at one wait for <hard_max_seconds>, the only
@@ -184,7 +201,7 @@ archon_parked_runs() {
   [ -s "$ARCHON_RUNS_SNAPSHOT" ] || return 0
   awk -F'\t' -v now="$(date +%s)" -v stale="$stale" -v hard="$hard_max" '
     function report() { print $5 "\t" $6 "\t" $1 "\t" $3 "\t" $4 "\t" $7 }
-    $6 == "gate" || $6 == "unreadable" { report(); next }
+    $6 == "gate" || $6 == "resolved" || $6 == "unreadable" { report(); next }
     $6 == "wait" && (now - $7 > stale || ($8 > 0 && now - $8 > hard)) { report() }
   ' "$ARCHON_RUNS_SNAPSHOT"
 }

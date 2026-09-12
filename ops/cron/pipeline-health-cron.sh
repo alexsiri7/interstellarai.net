@@ -1273,7 +1273,7 @@ check_db_backup() {
 # ----------------------------------------------------------------------------
 check_parked_runs() {
   local marker_dir="$STATE_DIR/parked"
-  local run_id class wf origin msg deadline seen="" ack marker id
+  local run_id class wf origin msg deadline seen="" ack marker id overdue
   # A failed listing has no paused rows and would read as a quiet pipeline —
   # never let that delete markers or look like a recovery.
   if ! archon_runs_known; then
@@ -1283,8 +1283,12 @@ check_parked_runs() {
   while IFS=$'\t' read -r run_id class wf origin msg deadline; do
     [ -n "$run_id" ] || continue
     seen="$seen $run_id"
-    if [ "$class" = wait ] && [ ! -e "$marker_dir/resumed-$run_id" ]; then
-      log "parked-runs: $wf $run_id is $(( $(date +%s) - deadline ))s past its recorded resume deadline — resuming"
+    # `wait` and `resolved` are both the engine's own to resume, so a nudge is
+    # the recovery; a `gate` is owed an answer cron must never give.
+    if { [ "$class" = wait ] || [ "$class" = resolved ]; } && [ ! -e "$marker_dir/resumed-$run_id" ]; then
+      overdue="no resume deadline recorded"
+      [ "$deadline" -gt 0 ] && overdue="$(( $(date +%s) - deadline ))s past its recorded resume deadline"
+      log "parked-runs: $wf $run_id parked ($class), $overdue — resuming"
       ack=$(CLAUDECODE=0 ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING=1 \
         archon workflow resume "$run_id" --detach --json --cwd "$ARCHON_RUNS_CWD" 2>&1 | tail -1)
       log "parked-runs: resume $run_id — $ack"

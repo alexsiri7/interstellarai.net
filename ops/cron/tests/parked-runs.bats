@@ -64,6 +64,21 @@ parked_row() {
     [ "$(wc -l < "$NOTIFIED")" -eq 1 ]
 }
 
+@test "a resolved gate the engine never resumed is nudged, then alerted once" {
+    parked_row 500946af-eeee resolved
+    check_parked_runs
+
+    grep -q 'workflow resume 500946af-eeee --detach' "$ARCHON_ARGV"
+    [ ! -e "$NOTIFIED" ]
+    # Never an approve/reject/respond — the answer already exists, the resume
+    # is what is missing.
+    ! grep -qE 'workflow (approve|reject|respond)' "$ARCHON_ARGV"
+
+    check_parked_runs
+    [ "$(wc -l < "$NOTIFIED")" -eq 1 ]
+    grep -q 'resolved' "$NOTIFIED"
+}
+
 @test "a gate is reported to a human and never answered by cron" {
     parked_row 500946af-dddd gate
     check_parked_runs
