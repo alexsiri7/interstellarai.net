@@ -2,6 +2,9 @@
 # pipeline-health-cron.sh — runs every 30 minutes from cron.
 # Detects and responds to pipeline-bottleneck states:
 #   1. Main CI red → file issue tagged archon:in-progress + fire archon immediately (dedup by SHA)
+#  1b. Main HEAD produced zero push workflow runs → ntfy; if its commit message
+#      carries a CI-skip token, also auto-open an empty-commit re-trigger PR
+#      (dedup per SHA, plus a 2h per-project cooldown on opening a PR)
 #   2. Prod deploy failed or lagging main HEAD → file issue + fire archon (dedup by SHA)
 #   3. Zombie archon DB runs (status=running, age >4h) → abandon
 #   4. Disk >85% on / or /mnt/ext-fast → ntfy
@@ -36,6 +39,8 @@ should_tick "pipeline-health" || exit 0
 # shellcheck source=lib/archon-active-runs.sh
 source "$SCRIPT_DIR/lib/archon-active-runs.sh"
 archon_runs_snapshot
+# shellcheck source=lib/ci-skip.sh
+source "$SCRIPT_DIR/lib/ci-skip.sh"
 BASE_DIR="/mnt/ext-fast"
 STATE_DIR="$HOME/.archon/pipeline-health-state"
 
@@ -94,7 +99,8 @@ add_to_project() {
 mkdir -p "$STATE_DIR"
 mkdir -p "$STATE_DIR/prciretry" "$STATE_DIR/escalated" \
          "$STATE_DIR/main-ci" "$STATE_DIR/escalated-main" \
-         "$STATE_DIR/staging-health" "$STATE_DIR/parked"
+         "$STATE_DIR/staging-health" "$STATE_DIR/parked" \
+         "$STATE_DIR/main-ci-missing"
 
 # Max archon-remediation attempts against a single head SHA before we stop
 # re-firing and ntfy the operator that the factory is stuck.
@@ -363,6 +369,163 @@ EOF
     disown
   )
   log "$project: archon fired for issue #$issue_num (log $logf)"
+}
+
+# ----------------------------------------------------------------------------
+# Check 1b: a main HEAD that produced no push workflow run at all.
+#   check_main_ci reads the latest run's conclusion, so a SHA that triggered
+#   zero runs is invisible to it — the previous green run keeps surfacing.
+#   That is exactly what a CI-skip token in a merge commit message does
+#   (interstellarai.net#76): CI, release and the prod deploy silently never
+#   happen. When the HEAD message explains it, open an empty-commit PR whose
+#   merge produces a clean push; when it does not, the cause is something else
+#   (Actions outage, disabled workflows, a paths: filter) so only ntfy.
+# ----------------------------------------------------------------------------
+check_main_push_ci() {
+  local project="$1"
+  local repo_dir="$BASE_DIR/$project"
+  [ -d "$repo_dir/.git" ] || return
+
+  local head_json head_sha head_ts head_msg head_tree
+  head_json=$(gh api "repos/alexsiri7/$project/commits/main" \
+    --jq '{sha: .sha, ts: .commit.committer.date, msg: .commit.message, tree: .commit.tree.sha}' 2>/dev/null || echo "")
+  [ -n "$head_json" ] || return
+  head_sha=$(echo "$head_json" | jq -r '.sha')
+  head_ts=$(echo "$head_json" | jq -r '.ts')
+  head_msg=$(echo "$head_json" | jq -r '.msg // ""')
+  head_tree=$(echo "$head_json" | jq -r '.tree')
+
+  if [ "$head_sha" = "null" ] || [ -z "$head_sha" ] || \
+     [ "$head_ts" = "null" ] || [ -z "$head_ts" ] || \
+     [ "$head_tree" = "null" ] || [ -z "$head_tree" ]; then
+    log "$project: commits/main API returned null fields — transient failure, skipping"
+    return
+  fi
+
+  # GitHub registers a run within seconds of a push; 10 minutes is slack for
+  # API lag, not a wait for the run to finish.
+  local now_epoch head_epoch age
+  now_epoch=$(date +%s)
+  head_epoch=$(date -d "$head_ts" +%s 2>/dev/null || echo 0)
+  age=$(( now_epoch - head_epoch ))
+  [ "$age" -gt 600 ] || return
+
+  # A repo whose workflows simply do not run on push to main is not stuck.
+  local ever
+  ever=$(gh api "repos/alexsiri7/$project/actions/runs?branch=main&event=push&per_page=1" \
+    --jq '.total_count' 2>/dev/null || echo "")
+  case "$ever" in ''|*[!0-9]*) return ;; esac
+  [ "$ever" -gt 0 ] || return
+
+  local runs
+  runs=$(gh api "repos/alexsiri7/$project/actions/runs?head_sha=$head_sha&event=push&per_page=1" \
+    --jq '.total_count' 2>/dev/null || echo "")
+  # An API failure is not evidence that no run exists.
+  case "$runs" in ''|*[!0-9]*) return ;; esac
+
+  local marker_dir="$STATE_DIR/main-ci-missing"
+  if [ "$runs" -gt 0 ]; then
+    find "$marker_dir" -maxdepth 1 -name "$project-*" -delete 2>/dev/null || true
+    return
+  fi
+
+  local marker="$marker_dir/$project-${head_sha:0:12}"
+  if [ -f "$marker" ]; then
+    log "$project: ${head_sha:0:10} still has no push CI run — already handled, skipping"
+    return
+  fi
+  touch "$marker"
+
+  local age_m=$(( age / 60 ))
+  if ! has_ci_skip_token "$head_msg"; then
+    log "$project: main HEAD ${head_sha:0:10} (${age_m}m old) produced no push workflow run and carries no CI-skip token — ntfying, cause unknown"
+    notify "no CI on $project main" \
+      "${head_sha:0:10} landed ${age_m}m ago with zero push workflow runs and no CI-skip token in its message. Check for an Actions outage, disabled workflows, or a new paths: filter." \
+      high warning
+    return
+  fi
+
+  # Chain breaker: if the re-trigger commit is itself skipped, the new SHA gets
+  # a fresh marker but this stops a second PR, same as check_prod_deploy's.
+  local cooldown_marker="$STATE_DIR/main-ci-missing-cooldown-$project"
+  if [ -f "$cooldown_marker" ]; then
+    local last_filed elapsed
+    last_filed=$(cat "$cooldown_marker" 2>/dev/null || echo 0)
+    case "$last_filed" in ''|*[!0-9]*) last_filed=0 ;; esac
+    elapsed=$(( now_epoch - last_filed ))
+    if [ "$elapsed" -lt 7200 ]; then
+      log "$project: main HEAD ${head_sha:0:10} has no push CI run — cooldown active (${elapsed}s < 2h since the last re-trigger PR), ntfying instead"
+      notify "factory stuck: $project main has no CI" \
+        "${head_sha:0:10} produced no push workflow run and a re-trigger PR was already opened within the last 2h. Re-trigger CI by hand." \
+        high warning
+      return
+    fi
+  fi
+
+  local open_retrigger
+  open_retrigger=$(gh pr list --repo "alexsiri7/$project" --state open \
+    --json number,headRefName \
+    --jq '[.[] | select(.headRefName | startswith("ci/retrigger-"))] | .[0].number // empty' \
+    2>/dev/null || echo "")
+  if [ -n "$open_retrigger" ]; then
+    log "$project: main HEAD ${head_sha:0:10} has no push CI run — re-trigger PR #$open_retrigger already open, skipping"
+    return
+  fi
+
+  local short="${head_sha:0:8}"
+  log "$project: main HEAD $short produced no push workflow run and its message carries a CI-skip token — opening a re-trigger PR"
+
+  # Built entirely through the API: $repo_dir is the live clone archon runs
+  # work in, and creating branches under it has killed a run before
+  # (lachesis PR #132, 2026-09-08).
+  local new_commit
+  new_commit=$(gh api "repos/alexsiri7/$project/git/commits" \
+    -f message="chore: re-trigger CI for $short" \
+    -f tree="$head_tree" -f "parents[]=$head_sha" \
+    --jq '.sha' 2>/dev/null || echo "")
+  if [ -z "$new_commit" ] || [ "$new_commit" = "null" ]; then
+    log "$project: could not create the re-trigger commit for $short — skipping"
+    return
+  fi
+
+  local branch="ci/retrigger-$short"
+  local new_ref
+  new_ref=$(gh api "repos/alexsiri7/$project/git/refs" \
+    -f ref="refs/heads/$branch" -f sha="$new_commit" \
+    --jq '.ref' 2>/dev/null || echo "")
+  if [ -z "$new_ref" ] || [ "$new_ref" = "null" ]; then
+    log "$project: could not create branch $branch — skipping"
+    return
+  fi
+
+  local pr_body
+  pr_body=$(cat <<EOF
+## Re-trigger CI for \`$short\`
+
+\`$head_sha\` landed on \`main\` ${age_m} minutes ago carrying an instruction that
+tells GitHub not to run workflows, so it produced **zero** push workflow runs —
+no CI, no release, no prod deploy.
+
+This PR is an empty commit on top of that SHA. Merging it puts a clean commit
+message on \`main\`, which is enough for the push workflows to run.
+
+Auto-opened by \`pipeline-health-cron.sh\` (\`check_main_push_ci\`); see
+alexsiri7/interstellarai.net#76.
+EOF
+)
+  local pr_url
+  pr_url=$(gh pr create --repo "alexsiri7/$project" --base main --head "$branch" \
+    --title "chore: re-trigger CI for $short" --body "$pr_body" 2>/dev/null | tail -1)
+  if [ -z "$pr_url" ]; then
+    log "$project: could not open the re-trigger PR for $short — skipping"
+    return
+  fi
+
+  echo "$now_epoch" > "$cooldown_marker"
+  log "$project: opened re-trigger PR $pr_url for $short"
+  notify "no CI on $project main — re-trigger PR opened" \
+    "$short landed on main with no push workflow run. Opened $pr_url to produce a clean push." \
+    high warning
 }
 
 # ----------------------------------------------------------------------------
@@ -1320,6 +1483,7 @@ archon workflow get $run_id --json" \
 log "=== pipeline health check ==="
 for project in "${REPOS[@]}"; do
   check_main_ci "$project"
+  check_main_push_ci "$project"
   check_prod_deploy "$project"
   check_pr_ci_retry "$project"
   check_stuck_prs "$project"
