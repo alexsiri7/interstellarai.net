@@ -109,3 +109,20 @@ parked_row() {
     grep -q 'fix #361 — ship the thing' "$NOTIFIED"
     grep -q 'un-reminder' "$NOTIFIED"
 }
+
+@test "the real archon_parked_runs row feeds check_parked_runs unchanged" {
+    # The only test that crosses the seam: both sides assert the six-column
+    # contract independently, so a reordered column would otherwise pass twice.
+    # shellcheck disable=SC1091
+    source "$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/lib/archon-active-runs.sh"
+    ARCHON_RUNS_SNAPSHOT="$STATE_DIR/snapshot"
+    ARCHON_RUNS_SNAPSHOT_OK=1
+    printf 'archon-ship\tpaused\t/mnt/ext-fast/un-reminder\tfix #361\t500946af-bbbb\twait\t%s\t%s\n' \
+      "$(( $(date +%s) - 7200 ))" "$(( $(date +%s) - 7500 ))" > "$ARCHON_RUNS_SNAPSHOT"
+
+    check_parked_runs
+
+    grep -q 'workflow resume 500946af-bbbb --detach' "$ARCHON_ARGV"
+    [ -e "$PARKED_DIR/resumed-500946af-bbbb" ]
+    [ ! -e "$NOTIFIED" ]
+}
