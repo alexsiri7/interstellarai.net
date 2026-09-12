@@ -33,6 +33,9 @@ load_archon_projects REPOS
 # shellcheck source=lib/throttle.sh
 source "$SCRIPT_DIR/lib/throttle.sh"
 should_tick "pipeline-health" || exit 0
+# shellcheck source=lib/archon-active-runs.sh
+source "$SCRIPT_DIR/lib/archon-active-runs.sh"
+archon_runs_snapshot
 BASE_DIR="/mnt/ext-fast"
 STATE_DIR="$HOME/.archon/pipeline-health-state"
 
@@ -91,11 +94,16 @@ add_to_project() {
 mkdir -p "$STATE_DIR"
 mkdir -p "$STATE_DIR/prciretry" "$STATE_DIR/escalated" \
          "$STATE_DIR/main-ci" "$STATE_DIR/escalated-main" \
-         "$STATE_DIR/staging-health"
+         "$STATE_DIR/staging-health" "$STATE_DIR/parked"
 
 # Max archon-remediation attempts against a single head SHA before we stop
 # re-firing and ntfy the operator that the factory is stuck.
 MAX_ATTEMPTS=3
+
+# How far past its own recorded resume deadline a paused run may drift before
+# check_parked_runs nudges it. 6x the longest `wait:` the sdlc pack declares
+# (ci-pause, duration_ms 300000).
+PARKED_WAIT_MAX_SECONDS="${PARKED_WAIT_MAX_SECONDS:-1800}"
 
 log() { echo "$(date -Is) $LOG_PREFIX $*"; }
 
@@ -1252,6 +1260,63 @@ check_db_backup() {
 }
 
 # ----------------------------------------------------------------------------
+# Check 10: Paused archon runs nothing will resume. reconcile_zombies reaps
+# stale `running` rows and deliberately leaves `paused` ones to the server's
+# continuation scheduler; this is the other half — the runs that scheduler has
+# stopped answering for. A paused run still owns its worktree and freezes its
+# PR and issue (pr_owned_by_live_run, unstick_stale), so when it drifts past
+# the resume deadline it recorded for itself, one `workflow resume` is the
+# cheapest way to find out whether the engine is still there. If that does not
+# take, or the run is parked on something only a person can answer, ntfy once
+# and leave it alone: approving a gate, or declaring the run dead so
+# pr-maintenance merges under it, is a guess this cron does not get to make.
+# ----------------------------------------------------------------------------
+check_parked_runs() {
+  local marker_dir="$STATE_DIR/parked"
+  local run_id class wf origin msg deadline seen="" ack marker id overdue
+  # A failed listing has no paused rows and would read as a quiet pipeline —
+  # never let that delete markers or look like a recovery.
+  if ! archon_runs_known; then
+    log "parked-runs: no archon run snapshot this tick — skipping"
+    return 0
+  fi
+  while IFS=$'\t' read -r run_id class wf origin msg deadline; do
+    [ -n "$run_id" ] || continue
+    seen="$seen $run_id"
+    # `wait` and `resolved` are both the engine's own to resume, so a nudge is
+    # the recovery; a `gate` is owed an answer cron must never give.
+    if { [ "$class" = wait ] || [ "$class" = resolved ]; } && [ ! -e "$marker_dir/resumed-$run_id" ]; then
+      overdue="no resume deadline recorded"
+      [ "${deadline:-0}" -gt 0 ] && overdue="$(( $(date +%s) - deadline ))s past its recorded resume deadline"
+      log "parked-runs: $wf $run_id parked ($class), $overdue — resuming"
+      ack=$(CLAUDECODE=0 ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING=1 \
+        archon workflow resume "$run_id" --detach --json --cwd "$ARCHON_RUNS_CWD" 2>&1 | tail -1)
+      log "parked-runs: resume $run_id — $ack"
+      touch "$marker_dir/resumed-$run_id"
+      continue
+    fi
+    [ -e "$marker_dir/alerted-$run_id" ] && continue
+    log "parked-runs: $wf $run_id parked ($class) with no automated recovery left — alerting"
+    notify "Archon run parked: ${origin##*/}" \
+      "$wf ($class) — ${msg:-no user message}
+run $run_id
+archon workflow get $run_id --json" \
+      high hourglass
+    touch "$marker_dir/alerted-$run_id"
+  done < <(archon_parked_runs "$PARKED_WAIT_MAX_SECONDS")
+  # A nudged run that healthily re-parks leaves this tick's parked set with a
+  # fresh deadline; drop its markers so the next stall starts from a resume.
+  for marker in "$marker_dir"/resumed-* "$marker_dir"/alerted-*; do
+    [ -e "$marker" ] || continue
+    id="${marker##*/}"
+    id="${id#resumed-}"
+    id="${id#alerted-}"
+    case " $seen " in *" $id "*) continue ;; esac
+    rm -f "$marker"
+  done
+}
+
+# ----------------------------------------------------------------------------
 log "=== pipeline health check ==="
 for project in "${REPOS[@]}"; do
   check_main_ci "$project"
@@ -1264,6 +1329,7 @@ for project in "${REPOS[@]}"; do
   sweep_stale_labels "$project"
 done
 reconcile_zombies
+check_parked_runs
 check_disk
 check_db_backup
 check_progress
