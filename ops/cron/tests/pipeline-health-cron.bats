@@ -83,6 +83,8 @@ setup_main_ci_env() {
     ISSUE_SENTINEL="$STATE_DIR/issue-created"
     NOTIFY_SENTINEL="$STATE_DIR/notified"
     notify() { touch "$NOTIFY_SENTINEL"; }
+    # Set NOTIFY_FAILS=1 to play a failed ntfy delivery.
+    notify_checked() { touch "$NOTIFY_SENTINEL"; return "${NOTIFY_FAILS:-0}"; }
     add_to_project() { :; }
     file_stuck_issue() { :; }
     archon() { :; }
@@ -393,6 +395,23 @@ stub_gh_issues() {
     [ ! -f "$NOTIFY_SENTINEL" ]
 }
 
+@test "check_main_ci keeps the stalled alert armed when the ntfy fails to send" {
+    setup_main_ci_env
+    RUNS_FIXTURE='[{"databaseId":1,"conclusion":"failure","headSha":"aaa","workflowName":"CI"}]'
+    ISSUE_LIST_FIXTURE='[{"number":10,"labels":[{"name":"bug"},{"name":"archon:failed"}]}]'
+    stub_gh_for_main_ci
+
+    NOTIFY_FAILS=1
+    check_main_ci "test-project"
+    [ ! -f "$STATE_DIR/escalated-main/test-project-stalled-10" ]
+
+    NOTIFY_FAILS=0
+    rm -f "$NOTIFY_SENTINEL"
+    check_main_ci "test-project"
+    [ -f "$NOTIFY_SENTINEL" ]
+    [ -f "$STATE_DIR/escalated-main/test-project-stalled-10" ]
+}
+
 @test "check_main_ci suppresses silently when archon is working the open issue" {
     setup_main_ci_env
     RUNS_FIXTURE='[{"databaseId":1,"conclusion":"failure","headSha":"aaa","workflowName":"CI"}]'
@@ -412,6 +431,7 @@ setup_scheduled_env() {
     NOTIFY_SENTINEL="$STATE_DIR/notified"
     ISSUE_SENTINEL="$STATE_DIR/issue-created"
     notify() { touch "$NOTIFY_SENTINEL"; }
+    notify_checked() { touch "$NOTIFY_SENTINEL"; return "${NOTIFY_FAILS:-0}"; }
     gh() {
         case "$1 $2" in
             "issue create") touch "$ISSUE_SENTINEL" ;;
@@ -464,4 +484,19 @@ setup_scheduled_env() {
 
     [ -f "$STATE_DIR/scheduled-health/test-project-Disk-Monitor" ]
     [ ! -f "$STATE_DIR/scheduled-health/test-project-Uptime-Monitor" ]
+}
+
+@test "check_scheduled_workflows keeps the episode armed when the ntfy fails to send" {
+    setup_scheduled_env
+    RUNS_FIXTURE='[{"conclusion":"failure","status":"completed","workflowName":"Uptime Monitor","url":"https://x/1"}]'
+
+    NOTIFY_FAILS=1
+    check_scheduled_workflows "test-project"
+    [ ! -f "$STATE_DIR/scheduled-health/test-project-Uptime-Monitor" ]
+
+    NOTIFY_FAILS=0
+    rm -f "$NOTIFY_SENTINEL"
+    check_scheduled_workflows "test-project"
+    [ -f "$NOTIFY_SENTINEL" ]
+    [ -f "$STATE_DIR/scheduled-health/test-project-Uptime-Monitor" ]
 }

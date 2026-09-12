@@ -115,12 +115,17 @@ PARKED_WAIT_MAX_SECONDS="${PARKED_WAIT_MAX_SECONDS:-1800}"
 
 log() { echo "$(date -Is) $LOG_PREFIX $*"; }
 
-notify() {
+# Returns curl's exit status, --fail so an ntfy.sh 5xx counts as undelivered.
+# Only for the two checks whose ntfy is the operator's sole record (no issue, no
+# archon run): they must not mark an alert delivered that never went out.
+notify_checked() {
   local title="$1" msg="$2" priority="${3:-default}" tags="${4:-robot}"
-  curl -s -o /dev/null \
+  curl -s --fail -o /dev/null \
     -H "Title: $title" -H "Priority: $priority" -H "Tags: $tags" \
-    -d "$msg" "ntfy.sh/$NTFY_TOPIC" 2>/dev/null || true
+    -d "$msg" "ntfy.sh/$NTFY_TOPIC" 2>/dev/null
 }
+
+notify() { notify_checked "$@" || true; }
 
 # ----------------------------------------------------------------------------
 # file_stuck_issue: file a durable `manual-review`-labeled issue on the
@@ -344,11 +349,16 @@ check_main_ci() {
       # re-arms the alert when main recovers.
       local stall_marker="$STATE_DIR/escalated-main/$project-stalled-$tracked_num"
       if [ ! -f "$stall_marker" ]; then
-        touch "$stall_marker"
-        notify "main CI still red: $project" \
+        # Mark it delivered only once it is: this ntfy is the only record, so a
+        # marker written ahead of a failed push loses the alert for good.
+        if notify_checked "main CI still red: $project" \
           "Open issue #$tracked_num tracks it but no archon run is active.
 https://github.com/alexsiri7/$project/issues/$tracked_num" \
-          high warning
+          high warning; then
+          touch "$stall_marker"
+        else
+          log "$project: ntfy for stalled issue #$tracked_num failed — retrying next tick"
+        fi
       fi
     fi
     log "$project: main CI red, but open CI issue #$tracked_num is already tracked ($tracked_state) — skipping"
@@ -488,12 +498,15 @@ check_scheduled_workflows() {
         log "$project: scheduled workflow '$name' still red — already notified, skipping"
         continue
       fi
-      touch "$marker"
       log "$project: scheduled workflow '$name' red ($url) — notifying operator, no archon"
-      notify "Scheduled workflow red: $project" \
+      if notify_checked "Scheduled workflow red: $project" \
         "$name failed on main — $url
 No archon run fired: fix the workflow or its config." \
-        default warning
+        default warning; then
+        touch "$marker"
+      else
+        log "$project: ntfy for scheduled workflow '$name' failed — retrying next tick"
+      fi
     else
       [ -f "$marker" ] && log "$project: scheduled workflow '$name' recovered"
       rm -f "$marker"
