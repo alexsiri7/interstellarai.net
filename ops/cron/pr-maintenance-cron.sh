@@ -24,6 +24,8 @@ load_archon_projects DEFAULT_PROJECTS
 # shellcheck source=lib/throttle.sh
 source "$SCRIPT_DIR/lib/throttle.sh"
 should_tick "pr-maintenance" || exit 0
+# shellcheck source=lib/ci-skip.sh
+source "$SCRIPT_DIR/lib/ci-skip.sh"
 # shellcheck source=lib/archon-active-runs.sh
 source "$SCRIPT_DIR/lib/archon-active-runs.sh"
 archon_runs_snapshot
@@ -140,10 +142,32 @@ for PROJECT in "${PROJECTS[@]}"; do
       continue
     fi
     log "$PROJECT: PR #$PR is CLEAN — merging directly"
+    # Left to itself GitHub builds the squash message out of the branch's commit
+    # subjects, so a CI-authored "update snapshots" commit carrying a skip-ci
+    # token lands on main and GitHub then creates no workflow run at all for the
+    # push — no CI, no release, no deploy, silently (2026-09-10 reli 553e3f0,
+    # 2026-09-11 un-reminder 7379c28). Compose the message from the PR's own
+    # title and body instead, with every such token removed. Reading them fails
+    # closed: a bare merge would reintroduce exactly this bug, and the PR is
+    # still CLEAN on the next tick 15 minutes later.
+    MERGE_JSON=$(gh pr view "$PR" --json title,body 2>/dev/null || echo "")
+    if [ -z "$MERGE_JSON" ]; then
+      log "$PROJECT: PR #$PR — could not read title/body for the merge message, retrying next tick"
+      continue
+    fi
+    MERGE_TITLE=$(ci_skip_clean_line "$(jq -r '.title // ""' <<<"$MERGE_JSON" || echo "")")
+    if [ -n "$MERGE_TITLE" ]; then
+      MERGE_SUBJECT="$MERGE_TITLE (#$PR)"
+    else
+      MERGE_SUBJECT="Merge pull request #$PR"
+    fi
+    MERGE_BODY=$(strip_ci_skip_tokens "$(jq -r '.body // ""' <<<"$MERGE_JSON" || echo "")")
     # Surface stderr to the cron log so actual failures (permissions, branch
     # protection, etc.) are diagnosable on the next tick instead of vanishing.
-    if ! gh pr merge "$PR" --squash --auto --delete-branch 2>&1; then
-      if ! gh pr merge "$PR" --squash --delete-branch 2>&1; then
+    if ! gh pr merge "$PR" --squash --auto --delete-branch \
+         --subject "$MERGE_SUBJECT" --body "$MERGE_BODY" 2>&1; then
+      if ! gh pr merge "$PR" --squash --delete-branch \
+           --subject "$MERGE_SUBJECT" --body "$MERGE_BODY" 2>&1; then
         log "$PROJECT: PR #$PR — could not merge, skipping"
       fi
     fi
