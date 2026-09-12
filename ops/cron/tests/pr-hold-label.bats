@@ -8,7 +8,7 @@
 # scripts prepend $HOME/.local/bin ahead of /usr/local/bin, where a real
 # archon may be installed, so this is the one place a stub reliably wins. The
 # gh stub answers `pr list` with $GH_PR_LIST (applying the script's own --jq
-# filter) and records every invocation.
+# filter), `pr view` with $GH_PR_VIEW, and records every invocation.
 #
 # Run: npx bats@1.11.0 ops/cron/tests/pr-hold-label.bats
 
@@ -31,6 +31,10 @@ setup() {
     export STUB_ARCHON_ARGV="$T/archon-argv"
     : > "$STUB_GH_ARGV"; : > "$STUB_ARCHON_ARGV"
 
+    # What `gh pr view --json title,body` answers with. Phase 1 refuses to
+    # merge when this comes back empty, so every merge test needs it set.
+    export GH_PR_VIEW='{"title":"stub title","body":"stub body"}'
+
     cat > "$STUB_BIN/gh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$STUB_GH_ARGV"
@@ -39,6 +43,7 @@ if [ "$1 $2" = "pr list" ]; then
   for a in "$@"; do [ "$prev" = "--jq" ] && jqf="$a"; prev="$a"; done
   if [ -n "$jqf" ]; then printf '%s' "$GH_PR_LIST" | jq -r "$jqf"; else printf '%s' "$GH_PR_LIST"; fi
 fi
+[ "$1 $2" = "pr view" ] && printf '%s' "$GH_PR_VIEW"
 exit 0
 STUB
     cat > "$STUB_BIN/archon" <<'STUB'
@@ -61,6 +66,8 @@ pr() { # pr <number> <draft> <mergeState> <labels-json>
 }
 
 gh_called() { grep -qE "$1" "$STUB_GH_ARGV"; }
+
+merge_argv() { grep -E "^pr merge $1 " "$STUB_GH_ARGV"; }
 
 # ── pr-maintenance-cron.sh ───────────────────────────────────────────────────
 
@@ -118,6 +125,43 @@ gh_called() { grep -qE "$1" "$STUB_GH_ARGV"; }
     run "$CRON_DIR/pr-maintenance-cron.sh"
     [ "$status" -eq 0 ]
     gh_called '^label create hold --repo alexsiri7/proj --color 5319E7 --description Do not auto-merge, auto-review or auto-maintain$'
+}
+
+# ── squash merge message sanitising (interstellarai.net#76) ──────────────────
+
+@test "maintenance: a skip-ci token in the PR title is stripped from the merge subject" {
+    export GH_PR_LIST="[$(pr 300 false CLEAN '[]')]"
+    export GH_PR_VIEW='{"title":"chore: bump deps [skip ci]","body":"routine"}'
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    [ "$status" -eq 0 ]
+    merge_argv 300 | grep -qF -- '--subject chore: bump deps (#300)'
+    ! merge_argv 300 | grep -qiF -- 'skip ci'
+}
+
+@test "maintenance: a skip-ci token in the PR body is stripped from the merge body" {
+    export GH_PR_LIST="[$(pr 300 false CLEAN '[]')]"
+    export GH_PR_VIEW='{"title":"feat: thing","body":"closes #12 [ci skip]"}'
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    [ "$status" -eq 0 ]
+    merge_argv 300 | grep -qF -- '--body closes #12'
+    ! merge_argv 300 | grep -qiF -- 'ci skip'
+}
+
+@test "maintenance: a title that is only a skip-ci token falls back to a generic subject" {
+    export GH_PR_LIST="[$(pr 300 false CLEAN '[]')]"
+    export GH_PR_VIEW='{"title":"[skip ci]","body":"nothing to see"}'
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    [ "$status" -eq 0 ]
+    merge_argv 300 | grep -qF -- '--subject Merge pull request #300'
+}
+
+@test "maintenance: an unreadable title/body defers the merge to the next tick" {
+    export GH_PR_LIST="[$(pr 300 false CLEAN '[]')]"
+    export GH_PR_VIEW=""
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"PR #300 — could not read title/body for the merge message, retrying next tick"* ]]
+    ! gh_called '^pr merge 300'
 }
 
 # ── pr-review-cron.sh ────────────────────────────────────────────────────────
