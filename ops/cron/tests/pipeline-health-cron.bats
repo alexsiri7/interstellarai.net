@@ -376,6 +376,26 @@ stub_gh_issues() {
     [ -f "$ISSUE_SENTINEL" ]
 }
 
+@test "check_main_ci cooldown suppression never consumes the attempt budget" {
+    setup_main_ci_env
+    RUNS_FIXTURE='[{"databaseId":1,"conclusion":"failure","headSha":"aaa","workflowName":"CI"}]'
+    stub_gh_for_main_ci
+
+    # More suppressed ticks than MAX_ATTEMPTS: if the cooldown spent an attempt
+    # each time, the budget would be exhausted before it lapses and this SHA
+    # would go permanently silent.
+    date +%s > "$STATE_DIR/main-ci-cooldown-test-project"
+    for _ in 1 2 3 4 5; do
+        check_main_ci "test-project"
+    done
+    [ ! -f "$ISSUE_SENTINEL" ]
+    [ ! -f "$STATE_DIR/main-ci/test-project" ]
+
+    echo $(( $(date +%s) - 7300 )) > "$STATE_DIR/main-ci-cooldown-test-project"
+    check_main_ci "test-project"
+    [ -f "$ISSUE_SENTINEL" ]
+}
+
 # ── check_main_ci dedup against a tracked issue ──────────────────────────────
 
 @test "check_main_ci suppresses and alerts once when the open issue is stalled" {
