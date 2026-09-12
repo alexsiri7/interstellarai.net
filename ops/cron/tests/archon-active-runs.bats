@@ -177,6 +177,23 @@ no_running() { export STUB_PAYLOAD='{"runs": []}'; }
     [ "$(archon_parked_runs 1800 7200 | cut -f1)" = "500946af-cccc" ]
 }
 
+@test "the default hard_max is 4x stale — what the one-argument call site gets" {
+    # pipeline-health-cron.sh passes PARKED_WAIT_MAX_SECONDS alone, so the
+    # backstop nobody can see in a call argument is 1800 * 4 = 2 hours. Both
+    # fixtures keep continuation_retry_at fresh, so only the backstop decides.
+    no_running
+    export STUB_PAYLOAD_PAUSED="$(paused_run 500946af-1111 \
+      "$(ci_wait -7200 7500), \"continuation_retry_at\": \"$(iso -10)\"")"
+    archon_runs_snapshot
+    [ "$(archon_parked_runs 1800 | cut -f1)" = "500946af-1111" ]
+
+    no_running
+    export STUB_PAYLOAD_PAUSED="$(paused_run 500946af-2222 \
+      "$(ci_wait -7200 7000), \"continuation_retry_at\": \"$(iso -10)\"")"
+    archon_runs_snapshot
+    [ -z "$(archon_parked_runs 1800)" ]
+}
+
 @test "an unresolved approval gate classifies as gate and is parked immediately" {
     no_running
     export STUB_PAYLOAD_PAUSED="$(paused_run 500946af-dddd \
@@ -184,6 +201,9 @@ no_running() { export STUB_PAYLOAD='{"runs": []}'; }
     archon_runs_snapshot
     [ "$(snapshot_field 6)" = "gate" ]
     [ "$(archon_parked_runs 1800 | cut -f2)" = "gate" ]
+    # Reported to a human, yet still active: pr-maintenance must not merge or
+    # abandon the PR a run pending an answer still owns.
+    archon_run_active /mnt/ext-fast/un-reminder un-reminder '^archon-ship$'
 }
 
 @test "a resolved gate is reported: the machine owed the resume and did not make it" {
@@ -195,6 +215,7 @@ no_running() { export STUB_PAYLOAD='{"runs": []}'; }
     # No continuation scan ever looks at metadata.approval, so a resolved gate
     # still here on the next tick has nothing left that would resume it.
     [ "$(archon_parked_runs 1800 | cut -f2)" = "resolved" ]
+    archon_run_active /mnt/ext-fast/un-reminder un-reminder '^archon-ship$'
 }
 
 @test "a parent blocked on a live child is progress, not a stall" {
@@ -205,6 +226,7 @@ no_running() { export STUB_PAYLOAD='{"runs": []}'; }
     archon_runs_snapshot
     [ "$(snapshot_field 6)" = "blocked_on_child" ]
     [ -z "$(archon_parked_runs 1800)" ]
+    archon_run_active /mnt/ext-fast/un-reminder un-reminder '^archon-ship$'
 }
 
 @test "a child_workflow pause with no child to follow is unreadable" {
@@ -223,11 +245,13 @@ no_running() { export STUB_PAYLOAD='{"runs": []}'; }
     [ "$(snapshot_field 6)" = "unreadable" ]
     [ "$(archon_parked_runs 1800 | cut -f2)" = "unreadable" ]
 
+    archon_run_active /mnt/ext-fast/un-reminder un-reminder '^archon-ship$'
 
     no_running
     export STUB_PAYLOAD_PAUSED="$(paused_run 500946af-0000 '"approval": {"nodeId": "", "message": "x"}')"
     archon_runs_snapshot
     [ "$(snapshot_field 6)" = "unreadable" ]
+    archon_run_active /mnt/ext-fast/un-reminder un-reminder '^archon-ship$'
 }
 
 @test "a running run carries an empty class and is never parked" {
