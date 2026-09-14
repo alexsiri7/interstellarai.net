@@ -66,6 +66,7 @@ stub_gh_for_main_ci() {
                     *) echo "$SCHEDULE_FIXTURE" ;;
                 esac ;;
             "run view") echo "build" ;;
+            "api repos/alexsiri7/test-project/commits/main") echo "$HEAD_SHA_FIXTURE" ;;
             "issue list") echo "${ISSUE_LIST_FIXTURE:-[]}" ;;
             "issue create") touch "$ISSUE_SENTINEL"; echo "https://github.com/alexsiri7/test-project/issues/42" ;;
             *) echo "" ;;
@@ -79,6 +80,9 @@ setup_main_ci_env() {
     BASE_DIR="$STATE_DIR/repos"
     mkdir -p "$BASE_DIR/test-project/.git"
     MAX_ATTEMPTS=3
+    # What `gh api .../commits/main --jq .sha` answers; every RUNS_FIXTURE
+    # below is at "aaa" unless the case is about HEAD drifting from the listing.
+    HEAD_SHA_FIXTURE="aaa"
     SCHEDULE_FIXTURE='[{"databaseId":9,"conclusion":"failure","headSha":"bbb","workflowName":"Scheduled Run Health Check"}]'
     ISSUE_SENTINEL="$STATE_DIR/issue-created"
     NOTIFY_SENTINEL="$STATE_DIR/notified"
@@ -351,6 +355,49 @@ stub_gh_issues() {
 @test "check_main_ci treats an in-flight run as neither red nor a recovery" {
     setup_main_ci_env
     RUNS_FIXTURE='[{"databaseId":1,"conclusion":"","headSha":"aaa","workflowName":"CI"}]'
+    stub_gh_for_main_ci
+    touch "$STATE_DIR/main-ci/test-project"
+
+    check_main_ci "test-project"
+
+    [ ! -f "$ISSUE_SENTINEL" ]
+    [ -f "$STATE_DIR/main-ci/test-project" ]
+}
+
+@test "check_main_ci judges runs at main HEAD, not the run the listing puts first" {
+    setup_main_ci_env
+    # cosmic-match#246: the runs endpoint led with a months-old failure. HEAD
+    # is green, so this is a recovery, not a red.
+    RUNS_FIXTURE='[{"databaseId":1,"conclusion":"failure","headSha":"old","workflowName":"Integration"},
+                   {"databaseId":2,"conclusion":"success","headSha":"aaa","workflowName":"Integration"},
+                   {"databaseId":3,"conclusion":"success","headSha":"aaa","workflowName":"CI"}]'
+    stub_gh_for_main_ci
+    touch "$STATE_DIR/main-ci/test-project"
+
+    check_main_ci "test-project"
+
+    [ ! -f "$ISSUE_SENTINEL" ]
+    [ ! -f "$STATE_DIR/main-ci/test-project" ]
+}
+
+@test "check_main_ci does nothing when main HEAD has no listed push run" {
+    setup_main_ci_env
+    # A HEAD with no run is Check 1b's case: neither red nor a recovery here.
+    HEAD_SHA_FIXTURE="ccc"
+    RUNS_FIXTURE='[{"databaseId":1,"conclusion":"failure","headSha":"aaa","workflowName":"CI"}]'
+    stub_gh_for_main_ci
+    touch "$STATE_DIR/main-ci/test-project"
+
+    check_main_ci "test-project"
+
+    [ ! -f "$ISSUE_SENTINEL" ]
+    [ -f "$STATE_DIR/main-ci/test-project" ]
+}
+
+@test "check_main_ci skips the tick when commits/main answers nothing" {
+    setup_main_ci_env
+    HEAD_SHA_FIXTURE=""
+    RUNS_FIXTURE='[{"databaseId":1,"conclusion":"failure","headSha":"aaa","workflowName":"CI"}]'
     stub_gh_for_main_ci
     touch "$STATE_DIR/main-ci/test-project"
 

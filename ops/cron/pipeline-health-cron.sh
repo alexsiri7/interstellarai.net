@@ -311,13 +311,21 @@ check_main_ci() {
     --json databaseId,conclusion,headSha,workflowName 2>/dev/null || echo "")
   [ -n "$runs" ] || return
 
+  # Anchor on the branch's real HEAD, not on whichever run the listing puts
+  # first: the runs endpoint once returned a three-month-old failure at the
+  # top, and this filed cosmic-match#246 against a SHA 22 commits behind main.
+  # A HEAD with no listed push run at all is Check 1b's case, not a red.
   local sha
-  sha=$(echo "$runs" | jq -r '.[0].headSha // empty')
-  [ -n "$sha" ] || return
+  sha=$(gh api "repos/alexsiri7/$project/commits/main" --jq '.sha' 2>/dev/null || echo "")
+  if [ -z "$sha" ] || [ "$sha" = "null" ]; then
+    log "$project: commits/main API returned no SHA — transient failure, skipping"
+    return
+  fi
 
   local at_head
   at_head=$(echo "$runs" | jq --arg sha "$sha" \
     '[.[] | select(.headSha == $sha)] | group_by(.workflowName) | map(.[0])')
+  [ "$(echo "$at_head" | jq 'length')" -gt 0 ] || return 0
 
   local marker="$STATE_DIR/main-ci/$project"
   local failed run_id wf_name
@@ -470,8 +478,8 @@ EOF
 
 # ----------------------------------------------------------------------------
 # Check 1b: a main HEAD that produced no push workflow run at all.
-#   check_main_ci reads the latest run's conclusion, so a SHA that triggered
-#   zero runs is invisible to it — the previous green run keeps surfacing.
+#   check_main_ci only judges runs at main HEAD, so a SHA that triggered
+#   zero runs is invisible to it.
 #   That is exactly what a CI-skip token in a merge commit message does
 #   (interstellarai.net#76): CI, release and the prod deploy silently never
 #   happen. When the HEAD message explains it, open an empty-commit PR whose
