@@ -65,6 +65,7 @@ STUB
     SUMMARY_PROMOTED=0
     SUMMARY_ACTION="none"
     SUMMARY_NOTE=""
+    QUEUED_ISSUES=()
     PROMOTED_ISSUES=()
 
     # shellcheck disable=SC1090
@@ -346,6 +347,80 @@ JSON
     promote_unblocked testproj
     echo '[]' > "$T/fixtures/blocked.json"
     promote_unblocked otherproj
+    pick_and_fire testproj
+
+    [ "$SUMMARY_ACTION" = "none" ]
+    [ "$SUMMARY_QUEUED" -eq 0 ]
+}
+
+# --- auto_queue → pick_and_fire on the same tick ---
+
+# An open, ingest-labeled issue old enough to queue, with no archon:* label.
+queueable_open_fixture() {
+    echo '[{"number":30,"labels":[{"name":"bug"}],"createdAt":"2020-01-01T00:00:00Z"}]' > "$T/fixtures/open.json"
+}
+
+@test "pick_and_fire picks an issue auto_queue queued this tick that the search misses" {
+    queueable_open_fixture
+    load_fn auto_queue
+    load_fn pick_and_fire
+
+    auto_queue testproj
+    pick_and_fire testproj
+
+    grep -q -- "issue edit 30 --repo alexsiri7/testproj --add-label archon:queued" "$GH_ARGV"
+    grep -q -- "issue edit 30 --repo alexsiri7/testproj --remove-label archon:queued --add-label archon:in-progress" "$GH_ARGV"
+    [ "$SUMMARY_ACTION" = "pickup #30" ]
+    [ "$SUMMARY_QUEUED" -eq 1 ]
+}
+
+@test "an auto-queued issue the search already reports is not counted twice" {
+    queueable_open_fixture
+    echo '[{"number":30}]' > "$T/fixtures/queued.json"
+    load_fn auto_queue
+    load_fn pick_and_fire
+
+    auto_queue testproj
+    pick_and_fire testproj
+
+    [ "$SUMMARY_QUEUED" -eq 1 ]
+    [ "$SUMMARY_ACTION" = "pickup #30" ]
+}
+
+@test "an issue auto_queue parked as archon:blocked is not picked up" {
+    queueable_open_fixture
+    echo 1 > "$T/fixtures/blockers-30"
+    load_fn auto_queue
+    load_fn pick_and_fire
+
+    auto_queue testproj
+    pick_and_fire testproj
+
+    grep -q -- "issue edit 30 --repo alexsiri7/testproj --add-label archon:blocked" "$GH_ARGV"
+    [ "$SUMMARY_ACTION" = "none" ]
+    [ "$SUMMARY_QUEUED" -eq 0 ]
+}
+
+@test "an auto-queue whose label add failed is not picked up" {
+    queueable_open_fixture
+    load_fn auto_queue
+    load_fn pick_and_fire
+
+    GH_EDIT_RC=1 auto_queue testproj
+    pick_and_fire testproj
+
+    [ "$SUMMARY_ACTION" = "none" ]
+    [ "$SUMMARY_QUEUED" -eq 0 ]
+}
+
+@test "auto-queued numbers do not leak from one project into the next" {
+    queueable_open_fixture
+    load_fn auto_queue
+    load_fn pick_and_fire
+
+    auto_queue testproj
+    echo '[]' > "$T/fixtures/open.json"
+    auto_queue otherproj
     pick_and_fire testproj
 
     [ "$SUMMARY_ACTION" = "none" ]
