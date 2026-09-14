@@ -55,8 +55,10 @@ SUMMARY_BLOCKED=0
 SUMMARY_PROMOTED=0
 SUMMARY_ACTION="none"
 SUMMARY_NOTE=""
-# Issue numbers promote_unblocked flipped to archon:queued this tick, for
-# pick_and_fire to union with its own search — see the comment there.
+# Issue numbers this tick flipped to archon:queued, for pick_and_fire to
+# union with its own search — see the comment there. auto_queue owns
+# QUEUED_ISSUES, promote_unblocked owns PROMOTED_ISSUES.
+QUEUED_ISSUES=()
 PROMOTED_ISSUES=()
 
 ensure_labels() {
@@ -339,7 +341,11 @@ auto_queue() {
     --json number,labels,createdAt 2>/dev/null || echo "[]")
 
   local now_sec; now_sec=$(date +%s)
-  echo "$issues" | jq -c '.[]' 2>/dev/null | while read -r row; do
+  QUEUED_ISSUES=()
+  # Process substitution, not a pipe: a piped `while` runs in a subshell and
+  # its QUEUED_ISSUES appends would vanish before pick_and_fire reads them.
+  local row
+  while read -r row; do
     local num created has_ingest
     num=$(echo "$row" | jq -r '.number')
     created=$(echo "$row" | jq -r '.createdAt')
@@ -379,9 +385,14 @@ auto_queue() {
     else
       log "$project: auto-queuing #$num (age ${age}s)"
     fi
-    gh issue edit "$num" --repo "alexsiri7/$project" --add-label "$initial_label" 2>/dev/null || \
+    if gh issue edit "$num" --repo "alexsiri7/$project" --add-label "$initial_label" 2>/dev/null; then
+      if [ "$initial_label" = "archon:queued" ]; then
+        QUEUED_ISSUES+=("$num")
+      fi
+    else
       log "$project: #$num — could not add $initial_label label"
-  done
+    fi
+  done < <(echo "$issues" | jq -c '.[]' 2>/dev/null)
 }
 
 # --- Phase 1.5: promote archon:blocked issues whose blockers are all closed ---
@@ -435,10 +446,11 @@ pick_and_fire() {
     [ -n "$num" ] && candidates+=("$num")
   done < <(echo "$queued_json" | jq -r '.[].number' 2>/dev/null)
 
-  # GitHub's search index lags label writes, so an issue promote_unblocked just
-  # flipped to archon:queued can still be missing from the list above. Union in
-  # what it promoted this tick or the promotion idles until the next one.
-  for num in "${PROMOTED_ISSUES[@]}"; do
+  # GitHub's search index lags label writes, so an issue auto_queue or
+  # promote_unblocked just flipped to archon:queued can still be missing from
+  # the list above. Union in what this tick queued or the issue idles until the
+  # next one (reli #1506 lost a 30-minute tick that way on 2026-09-14).
+  for num in "${QUEUED_ISSUES[@]}" "${PROMOTED_ISSUES[@]}"; do
     printf '%s\n' "${candidates[@]}" | grep -qx "$num" || candidates+=("$num")
   done
   SUMMARY_QUEUED=${#candidates[@]}
