@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
-# Tests for auto_triage, promote_unblocked and pick_and_fire in
-# ops/cron/issue-pickup-cron.sh.
+# Tests for unstick_stale, auto_queue, auto_triage, promote_unblocked and
+# pick_and_fire in ops/cron/issue-pickup-cron.sh.
 #
 # Run: bunx bats ops/cron/tests/issue-pickup-cron.bats
 
@@ -11,20 +11,26 @@ setup() {
     mkdir -p "$T/bin" "$T/fixtures" "$T/base/testproj/.git"
     SCRIPT_FILE="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/issue-pickup-cron.sh"
 
-    # Stub gh: records argv, answers list/api calls from fixture files.
-    # The api stubs return what `gh api --jq` would print — a count — because
-    # has_open_blockers only ever reads the length.
+    # Stub gh: records argv, answers list/api/view calls from fixture files.
+    # The api stubs return what `gh api --jq` would print: a count for
+    # blocked_by/sub_issues (has_open_blockers only reads the length), a bare
+    # timestamp for /events (when the label was last added; absent = never).
     cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_ARGV"
 issue_of() { sed -E 's#.*/issues/([0-9]+)/.*#\1#' <<<"$1"; }
 case "$*" in
-  *"issue list"*"--label archon:blocked"*) cat "$GH_FIXTURES/blocked.json" ;;
-  *"issue list"*"--label archon:queued"*)  cat "$GH_FIXTURES/queued.json" ;;
-  *"issue list"*)                          cat "$GH_FIXTURES/open.json" ;;
-  *dependencies/blocked_by*)               cat "$GH_FIXTURES/blockers-$(issue_of "$*")" 2>/dev/null || echo 0 ;;
-  *sub_issues*)                            cat "$GH_FIXTURES/children-$(issue_of "$*")" 2>/dev/null || echo 0 ;;
-  *"issue edit"*)                          exit "${GH_EDIT_RC:-0}" ;;
+  *"issue list"*"--label archon:blocked"*)     cat "$GH_FIXTURES/blocked.json" ;;
+  *"issue list"*"--label archon:queued"*)      cat "$GH_FIXTURES/queued.json" ;;
+  *"issue list"*"--label archon:in-progress"*) cat "$GH_FIXTURES/in-progress.json" ;;
+  *"issue list"*)                              cat "$GH_FIXTURES/open.json" ;;
+  *"issue view "*)                             cat "$GH_FIXTURES/labels-$(sed -E 's/^issue view ([0-9]+).*/\1/' <<<"$*")" 2>/dev/null || echo '[]' ;;
+  *"pr list"*)                                 echo 0 ;;
+  *dependencies/blocked_by*)                   cat "$GH_FIXTURES/blockers-$(issue_of "$*")" 2>/dev/null || echo 0 ;;
+  *sub_issues*)                                cat "$GH_FIXTURES/children-$(issue_of "$*")" 2>/dev/null || echo 0 ;;
+  */events*)                                   cat "$GH_FIXTURES/events-$(issue_of "$*")" 2>/dev/null || true ;;
+  *"issue edit"*)                              exit "${GH_EDIT_RC:-0}" ;;
+  *"issue comment"*)                           exit 0 ;;
 esac
 STUB
     chmod +x "$T/bin/gh"
@@ -35,6 +41,7 @@ STUB
     echo '[]' > "$T/fixtures/open.json"
     echo '[]' > "$T/fixtures/blocked.json"
     echo '[]' > "$T/fixtures/queued.json"
+    echo '[]' > "$T/fixtures/in-progress.json"
 
     # Nothing is running: no live process, no run in the archon DB.
     pgrep() { return 1; }
@@ -50,6 +57,9 @@ STUB
     : > "$LOGGED"
 
     BASE_DIR="$T/base"
+    SCRIPT_DIR="$T"
+    SUMMARY_IN_PROGRESS=0
+    SUMMARY_STALE=0
     SUMMARY_QUEUED=0
     SUMMARY_BLOCKED=0
     SUMMARY_PROMOTED=0
@@ -58,7 +68,7 @@ STUB
     PROMOTED_ISSUES=()
 
     # shellcheck disable=SC1090
-    source <(grep -E '^(INGEST|ARCHON|HUMAN)_LABELS=\(' "$SCRIPT_FILE")
+    source <(grep -E '^(INGEST|ARCHON|HUMAN)_LABELS=\(|^STUCK_AGE_SECONDS=' "$SCRIPT_FILE")
     load_fn has_open_blockers
     load_fn has_archon_label
     load_fn has_human_label
@@ -79,10 +89,121 @@ load_fn() {
 }
 
 gh_calls() {
+    [ "$1" = "--" ] && shift
     grep -c -- "$1" "$GH_ARGV" || true
 }
 
+# ── unstick_stale ────────────────────────────────────────────────────────────
+
+# The 2026-09-14 shape: a ship run died on the weekly rate limit before doing
+# anything, and the issue's human-intent label kept the unstick pass from
+# re-queuing it, so it sat archon:in-progress for three days as phantom
+# pending work. It must leave the in-progress state, but not into the queue.
+@test "unstick_stale parks a stale in-progress issue that a human owns" {
+    echo '[{"number":71}]' > "$T/fixtures/in-progress.json"
+    echo '2026-01-01T00:00:00Z' > "$T/fixtures/events-71"
+    echo '["bug","factory-gap","archon:in-progress"]' > "$T/fixtures/labels-71"
+    load_fn unstick_stale
+
+    unstick_stale testproj
+
+    grep -q -- "issue edit 71 --repo alexsiri7/testproj --remove-label archon:in-progress --add-label archon:skipped" "$GH_ARGV"
+    grep -q -- "issue comment 71 " "$GH_ARGV"
+    [ "$(gh_calls -- '--add-label archon:queued')" -eq 0 ]
+    [ "$SUMMARY_STALE" -eq 1 ]
+    [ "$SUMMARY_IN_PROGRESS" -eq 1 ]
+    grep -q "#71 — stale in-progress with human-intent label, parking as archon:skipped" "$LOGGED"
+}
+
+@test "unstick_stale still re-queues a stale in-progress issue nobody owns" {
+    echo '[{"number":72}]' > "$T/fixtures/in-progress.json"
+    echo '2026-01-01T00:00:00Z' > "$T/fixtures/events-72"
+    echo '["bug","archon:in-progress"]' > "$T/fixtures/labels-72"
+    load_fn unstick_stale
+
+    unstick_stale testproj
+
+    grep -q -- "issue edit 72 --repo alexsiri7/testproj --remove-label archon:in-progress --add-label archon:queued" "$GH_ARGV"
+    [ "$(gh_calls 'archon:skipped')" -eq 0 ]
+    [ "$SUMMARY_STALE" -eq 1 ]
+}
+
+@test "unstick_stale leaves an issue alone while its in-progress label is young" {
+    echo '[{"number":73}]' > "$T/fixtures/in-progress.json"
+    date -u +%Y-%m-%dT%H:%M:%SZ > "$T/fixtures/events-73"
+    echo '["bug","factory-gap","archon:in-progress"]' > "$T/fixtures/labels-73"
+    load_fn unstick_stale
+
+    unstick_stale testproj
+
+    [ "$(gh_calls 'issue edit')" -eq 0 ]
+    [ "$SUMMARY_STALE" -eq 0 ]
+}
+
+# ── auto_queue ───────────────────────────────────────────────────────────────
+
+# #72: triage had already added `bug` before a human parked the issue, and
+# auto_queue looked only at the ingest label. Human intent wins over ingest.
+@test "auto_queue skips ingest-labeled issues that carry a human-intent label" {
+    cat > "$T/fixtures/open.json" <<'JSON'
+[{"number":30,"labels":[{"name":"bug"},{"name":"human-needed"}],"createdAt":"2026-01-01T00:00:00Z"},
+ {"number":31,"labels":[{"name":"enhancement"},{"name":"requirements-gap"}],"createdAt":"2026-01-01T00:00:00Z"},
+ {"number":32,"labels":[{"name":"bug"}],"createdAt":"2026-01-01T00:00:00Z"}]
+JSON
+    load_fn auto_queue
+
+    auto_queue testproj
+
+    grep -q -- "issue edit 32 --repo alexsiri7/testproj --add-label archon:queued" "$GH_ARGV"
+    [ "$(gh_calls 'issue edit')" -eq 1 ]
+}
+
+@test "an issue labeled only requirements-gap is neither triaged nor queued" {
+    cat > "$T/fixtures/open.json" <<'JSON'
+[{"number":40,"labels":[{"name":"requirements-gap"}],"createdAt":"2026-01-01T00:00:00Z"}]
+JSON
+    load_fn auto_queue
+    load_fn auto_triage
+
+    auto_queue testproj
+    auto_triage testproj
+
+    [ "$(gh_calls 'issue edit')" -eq 0 ]
+    [ "$SUMMARY_ACTION" = "none" ]
+}
+
 # ── auto_triage ──────────────────────────────────────────────────────────────
+
+# The triage half of the 2026-09-14 shape: the run that owned the label died
+# on its first node, and only that workflow ever removes the label.
+@test "auto_triage retries an issue whose triage run died before classifying it" {
+    cat > "$T/fixtures/open.json" <<'JSON'
+[{"number":50,"labels":[{"name":"archon:triage-in-progress"}],"createdAt":"2026-01-01T00:00:00Z"}]
+JSON
+    echo '2026-01-01T01:00:00Z' > "$T/fixtures/events-50"
+    load_fn auto_triage
+
+    auto_triage testproj
+
+    grep -q -- "issue edit 50 --repo alexsiri7/testproj --remove-label archon:triage-in-progress" "$GH_ARGV"
+    grep -q -- "issue edit 50 --repo alexsiri7/testproj --add-label archon:triage-in-progress" "$GH_ARGV"
+    [ "$SUMMARY_ACTION" = "triage #50" ]
+    grep -q "#50 — triage-in-progress for" "$LOGGED"
+}
+
+@test "auto_triage leaves a triage-in-progress issue alone while its label is young" {
+    cat > "$T/fixtures/open.json" <<'JSON'
+[{"number":51,"labels":[{"name":"archon:triage-in-progress"}],"createdAt":"2026-01-01T00:00:00Z"}]
+JSON
+    date -u +%Y-%m-%dT%H:%M:%SZ > "$T/fixtures/events-51"
+    load_fn auto_triage
+
+    auto_triage testproj
+
+    [ "$(gh_calls 'issue edit')" -eq 0 ]
+    [ "$SUMMARY_ACTION" = "none" ]
+}
+
 
 # The #63 case: members of a blocked_by chain that sort ahead of a runnable
 # candidate. Every blocked one is parked as the scan passes it, and the tick's
@@ -125,7 +246,7 @@ JSON
 
     grep -q -- "issue edit 2 --repo alexsiri7/testproj --add-label archon:blocked" "$GH_ARGV"
     grep -q -- "issue edit 3 --repo alexsiri7/testproj --add-label archon:blocked" "$GH_ARGV"
-    [ "$(gh_calls 'archon:triage-in-progress')" -eq 0 ]
+    [ "$(gh_calls -- '--add-label archon:triage-in-progress')" -eq 0 ]
     [ "$SUMMARY_ACTION" = "none" ]
     [ "$SUMMARY_BLOCKED" -eq 2 ]
 }
