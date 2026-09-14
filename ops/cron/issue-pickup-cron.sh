@@ -36,8 +36,10 @@ INGEST_LABELS=("enhancement" "bug")
 # Labels archon already manages — presence of any of these means "don't re-queue".
 ARCHON_LABELS=("archon:queued" "archon:in-progress" "archon:triage-in-progress" "archon:done" "archon:failed" "archon:skipped" "archon:blocked")
 
-# Labels that signal human-only intent — triage must not reclassify these.
-HUMAN_LABELS=("manual-review" "factory-gap" "human-needed" "wontfix" "duplicate" "question")
+# Labels that signal human-only intent — triage must not reclassify these and
+# auto_queue must not ingest them. requirements-gap issues are filed by the
+# requirements-audit sweep and vetted by a human before ingest (#72).
+HUMAN_LABELS=("manual-review" "factory-gap" "human-needed" "wontfix" "duplicate" "question" "requirements-gap")
 
 PROJECTS=("${DEFAULT_PROJECTS[@]}")
 [ $# -gt 0 ] && PROJECTS=("$@")
@@ -140,6 +142,32 @@ auto_triage() {
 
   local now_sec; now_sec=$(date +%s)
   local triage_issue=""
+
+  # archon-triage-issue is the only thing that removes archon:triage-in-progress,
+  # so a run that died before classifying (2026-09-11: the weekly rate limit
+  # killed extract-issue-number in 20s) leaves a label nothing revisits and
+  # pipeline-health counts as pending work forever. The guards above proved no
+  # triage run is live or parked for this repo; once the label is older than
+  # STUCK_AGE_SECONDS, drop it and let this tick's scan classify the issue.
+  local stale_num
+  while IFS= read -r stale_num; do
+    [ -n "$stale_num" ] || continue
+    local labeled_at labeled_sec label_age
+    labeled_at=$(gh api "repos/alexsiri7/$project/issues/$stale_num/events" \
+      --jq '[.[] | select(.event=="labeled" and .label.name=="archon:triage-in-progress") | .created_at] | last' 2>/dev/null || echo "")
+    [ -z "$labeled_at" ] || [ "$labeled_at" = "null" ] && continue
+    labeled_sec=$(date -d "$labeled_at" +%s 2>/dev/null || echo 0)
+    label_age=$((now_sec - labeled_sec))
+    [ "$label_age" -lt "$STUCK_AGE_SECONDS" ] && continue
+    log "$project: #$stale_num — triage-in-progress for ${label_age}s with no run, retrying triage"
+    if gh issue edit "$stale_num" --repo "alexsiri7/$project" \
+        --remove-label "archon:triage-in-progress" 2>/dev/null; then
+      issues=$(echo "$issues" | jq --argjson n "$stale_num" \
+        'map(if .number == $n then .labels |= map(select(.name != "archon:triage-in-progress")) else . end)')
+    else
+      log "$project: #$stale_num — could not remove archon:triage-in-progress"
+    fi
+  done < <(echo "$issues" | jq -r '.[] | select(.labels | map(.name) | index("archon:triage-in-progress")) | .number' 2>/dev/null)
 
   while IFS= read -r row; do
     local num labels_json created created_sec age
@@ -267,12 +295,24 @@ unstick_stale() {
       continue
     fi
 
-    # Don't re-queue issues that a human has explicitly parked (manual-review etc.)
+    # A human-owned issue (manual-review etc.) must not go back in the queue,
+    # but leaving it archon:in-progress with no run behind it is worse: it
+    # reads as permanent pending work, so pipeline-health fires its
+    # no-progress diagnostic every 2h for nothing (2026-09-14: #71-#74, three
+    # days after their ship runs died on the weekly rate limit). Park it.
     local issue_labels
     issue_labels=$(gh issue view "$num" --repo "alexsiri7/$project" --json labels \
       --jq '.labels | map(.name) | @json' 2>/dev/null || echo "[]")
     if has_human_label "$issue_labels"; then
-      log "$project: #$num — skipping re-queue (has human-intent label)"
+      log "$project: #$num — stale in-progress with human-intent label, parking as archon:skipped"
+      gh issue edit "$num" --repo "alexsiri7/$project" \
+        --remove-label "archon:in-progress" --add-label "archon:skipped" 2>/dev/null || {
+          log "$project: #$num — could not park as archon:skipped"
+          continue
+        }
+      SUMMARY_STALE=$((SUMMARY_STALE + 1))
+      gh issue comment "$num" --repo "alexsiri7/$project" \
+        --body "archon was labeled in-progress ${age}s ago but no live or parked (paused) run and no linked PR were found. This issue carries a human-intent label, so it was parked as archon:skipped instead of re-queued. Remove the label and add archon:queued to run it again." 2>/dev/null || true
       continue
     fi
 
@@ -307,6 +347,14 @@ auto_queue() {
     labels_json=$(echo "$row" | jq -c '[.labels[].name]')
 
     if has_archon_label "$labels_json"; then
+      continue
+    fi
+
+    # Human-owned issues stay out of the queue even with an ingest label:
+    # triage may have added `bug` before a human parked the issue, and
+    # requirements-gap issues are vetted before ingest. Same rule as
+    # auto_triage; auto_queue used to check only the ingest label (#72).
+    if has_human_label "$labels_json"; then
       continue
     fi
 
