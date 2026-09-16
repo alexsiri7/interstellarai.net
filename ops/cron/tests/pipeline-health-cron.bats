@@ -567,3 +567,177 @@ setup_scheduled_env() {
     [ -f "$NOTIFY_SENTINEL" ]
     [ -f "$STATE_DIR/scheduled-health/test-project-Uptime-Monitor" ]
 }
+
+# ── check_prod_deploy: judge the deploy at HEAD ─────────────────────────────
+
+# gh stub for check_prod_deploy. The function filters listings with a local
+# jq, so run and deployment fixtures are raw gh/API JSON and the real filters
+# are under test. commits/main and the deployment status keep an inline --jq,
+# so those fixtures are the post-jq answer.
+stub_gh_for_prod_deploy() {
+    gh() {
+        case "$1 $2" in
+            "run list")
+                case "$*" in
+                    *"--commit"*) echo "$HEAD_RUNS_FIXTURE" ;;
+                    *) echo "$RUNS_FIXTURE" ;;
+                esac ;;
+            "api repos/alexsiri7/test-project/commits/main") echo "$HEAD_FIXTURE" ;;
+            "api repos/alexsiri7/test-project/deployments?sha="*) echo "$HEAD_DEPLOYMENTS_FIXTURE" ;;
+            "api repos/alexsiri7/test-project/deployments?per_page=10") echo "$DEPLOYMENTS_FIXTURE" ;;
+            "api repos/alexsiri7/test-project/deployments/"*) echo "$DEPLOY_STATUS_FIXTURE" ;;
+            "issue list") echo "" ;;
+            "issue create") echo "$*" > "$ISSUE_SENTINEL"; echo "https://github.com/alexsiri7/test-project/issues/42" ;;
+            *) echo "" ;;
+        esac
+    }
+}
+
+setup_prod_deploy_env() {
+    BASE_DIR="$STATE_DIR/repos"
+    mkdir -p "$BASE_DIR/test-project/.git"
+    ISSUE_SENTINEL="$STATE_DIR/issue-created"
+    archon() { :; }
+    nohup() { :; }
+    disown() { :; }
+    # HEAD "aaa" is hours old unless a case is about a fresh push.
+    HEAD_FIXTURE='{"sha":"aaa","ts":"2026-01-01T00:00:00Z"}'
+    # The listing leads with a stale run, which is what filed reli#1512.
+    RUNS_FIXTURE='[{"name":"Staging → Production Pipeline","headSha":"old","updatedAt":"2026-08-26T05:16:16Z","url":"https://example.com/runs/1"}]'
+    HEAD_RUNS_FIXTURE='[]'
+    DEPLOYMENTS_FIXTURE='[]'
+    HEAD_DEPLOYMENTS_FIXTURE='[]'
+    DEPLOY_STATUS_FIXTURE='success'
+    load_fn check_prod_deploy
+}
+
+@test "check_prod_deploy judges the deploy at main HEAD, not the run the listing puts first" {
+    setup_prod_deploy_env
+    HEAD_RUNS_FIXTURE='[{"name":"CI","conclusion":"success","createdAt":"2026-09-16T01:45:16Z","updatedAt":"2026-09-16T01:46:06Z","url":"https://example.com/runs/2"},
+                        {"name":"Staging → Production Pipeline","conclusion":"success","createdAt":"2026-09-16T01:46:08Z","updatedAt":"2026-09-16T01:49:29Z","url":"https://example.com/runs/3"}]'
+    stub_gh_for_prod_deploy
+    touch "$STATE_DIR/prod-deploy-stale-test-project-aaa"
+
+    check_prod_deploy "test-project"
+
+    [ ! -f "$ISSUE_SENTINEL" ]
+    [ ! -f "$STATE_DIR/prod-deploy-stale-test-project-aaa" ]
+}
+
+@test "check_prod_deploy files a queued lag issue when nothing has deployed an old HEAD" {
+    setup_prod_deploy_env
+    stub_gh_for_prod_deploy
+
+    check_prod_deploy "test-project"
+
+    [ -f "$ISSUE_SENTINEL" ]
+    grep -q "Prod deploy lagging main" "$ISSUE_SENTINEL"
+    grep -q "archon:queued" "$ISSUE_SENTINEL"
+    [ -f "$STATE_DIR/prod-deploy-stale-test-project-aaa" ]
+}
+
+@test "check_prod_deploy trusts a production deployment at HEAD when no run lists it" {
+    setup_prod_deploy_env
+    HEAD_DEPLOYMENTS_FIXTURE='[{"id":7,"sha":"aaa","environment":"production","created_at":"2026-09-16T01:49:26Z"}]'
+    stub_gh_for_prod_deploy
+    touch "$STATE_DIR/prod-deploy-stale-test-project-aaa"
+
+    check_prod_deploy "test-project"
+
+    [ ! -f "$ISSUE_SENTINEL" ]
+    [ ! -f "$STATE_DIR/prod-deploy-stale-test-project-aaa" ]
+}
+
+@test "check_prod_deploy files an in-progress failure issue for a red run at HEAD" {
+    setup_prod_deploy_env
+    HEAD_RUNS_FIXTURE='[{"name":"Staging → Production Pipeline","conclusion":"failure","createdAt":"2026-09-16T01:46:08Z","updatedAt":"2026-09-16T01:49:29Z","url":"https://example.com/runs/3"}]'
+    stub_gh_for_prod_deploy
+
+    check_prod_deploy "test-project"
+
+    [ -f "$ISSUE_SENTINEL" ]
+    grep -q "Prod deploy failed on main" "$ISSUE_SENTINEL"
+    grep -q "archon:in-progress" "$ISSUE_SENTINEL"
+    [ -f "$STATE_DIR/prod-deploy-failed-test-project-aaa" ]
+}
+
+@test "check_prod_deploy waits on a fresh HEAD that no deploy has reached yet" {
+    setup_prod_deploy_env
+    HEAD_FIXTURE='{"sha":"aaa","ts":"'"$(date -u -d '-1 minute' '+%Y-%m-%dT%H:%M:%SZ')"'"}'
+    stub_gh_for_prod_deploy
+    touch "$STATE_DIR/prod-deploy-stale-test-project-zzz"
+
+    check_prod_deploy "test-project"
+
+    [ ! -f "$ISSUE_SENTINEL" ]
+    [ -f "$STATE_DIR/prod-deploy-stale-test-project-zzz" ]
+}
+
+@test "check_prod_deploy waits while the run at HEAD is in flight" {
+    setup_prod_deploy_env
+    HEAD_RUNS_FIXTURE='[{"name":"Staging → Production Pipeline","conclusion":null,"createdAt":"2026-09-16T01:46:08Z","updatedAt":"2026-09-16T01:46:08Z","url":"https://example.com/runs/3"}]'
+    stub_gh_for_prod_deploy
+    touch "$STATE_DIR/prod-deploy-stale-test-project-zzz"
+
+    check_prod_deploy "test-project"
+
+    [ ! -f "$ISSUE_SENTINEL" ]
+    [ -f "$STATE_DIR/prod-deploy-stale-test-project-zzz" ]
+}
+
+# ── check_progress: only work that had a window counts as pending ───────────
+
+stub_gh_for_progress() {
+    gh() {
+        case "$1 $2" in
+            "api repos/alexsiri7/test-project/commits?sha=main&since="*) echo 0 ;;
+            "issue list") echo "$ISSUE_LIST_FIXTURE" ;;
+            "pr list") echo "${PR_LIST_FIXTURE:-[]}" ;;
+            *) echo "" ;;
+        esac
+    }
+}
+
+setup_progress_env() {
+    BASE_DIR="$STATE_DIR/repos"
+    mkdir -p "$BASE_DIR/archon" "$BASE_DIR/test-project"
+    REPOS=("test-project")
+    archon() { :; }
+    nohup() { :; }
+    disown() { :; }
+    echo $(( $(date +%s) - 1800 )) > "$STATE_DIR/last-progress-ts"
+    STALL_MARKER="$STATE_DIR/last-stall-diagnostic-ts"
+    load_fn check_progress
+}
+
+@test "check_progress does not count an issue filed after the last tick as pending" {
+    setup_progress_env
+    # reli#1512: check_prod_deploy filed this seconds before check_progress ran.
+    ISSUE_LIST_FIXTURE='[{"createdAt":"'"$(date -u '+%Y-%m-%dT%H:%M:%SZ')"'","labels":[{"name":"archon:queued"}]}]'
+    stub_gh_for_progress
+
+    check_progress
+
+    [ ! -f "$STALL_MARKER" ]
+}
+
+@test "check_progress fires the diagnostic for an issue queued before the last tick" {
+    setup_progress_env
+    ISSUE_LIST_FIXTURE='[{"createdAt":"2026-01-01T00:00:00Z","labels":[{"name":"archon:queued"}]}]'
+    stub_gh_for_progress
+
+    check_progress
+
+    [ -f "$STALL_MARKER" ]
+}
+
+@test "check_progress does not count a PR opened after the last tick as pending" {
+    setup_progress_env
+    ISSUE_LIST_FIXTURE='[]'
+    PR_LIST_FIXTURE='[{"createdAt":"'"$(date -u '+%Y-%m-%dT%H:%M:%SZ')"'","isDraft":false,"mergeStateStatus":"CLEAN"}]'
+    stub_gh_for_progress
+
+    check_progress
+
+    [ ! -f "$STALL_MARKER" ]
+}

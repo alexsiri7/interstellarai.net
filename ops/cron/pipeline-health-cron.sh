@@ -694,8 +694,10 @@ No archon run fired: fix the workflow or its config." \
 #   Signal sources (try in order, use whichever exists):
 #     (a) GH Actions workflow matching "Production" (Reli, WCA use "Staging → Production Pipeline")
 #     (b) GitHub deployments API, environment matches "production" (Railway native integration, FilmDuel)
-#   If deploy FAILED → file issue + fire archon (dedup by deploy SHA).
-#   If last successful deploy SHA != main HEAD AND main HEAD older than 15 min → file lag issue.
+#   The listings only prove a signal exists; state is judged on the run or
+#   deployment at main HEAD, never on whichever entry a listing puts first.
+#   If the deploy at HEAD FAILED → file issue + fire archon (dedup by SHA).
+#   If nothing deployed HEAD AND HEAD older than 15 min → file lag issue.
 #   Projects with no deploy signal are skipped silently.
 # ----------------------------------------------------------------------------
 check_prod_deploy() {
@@ -718,38 +720,58 @@ check_prod_deploy() {
     return
   fi
 
-  # --- Source (a): GH Actions deploy workflow ---
-  local deploy_sha="" deploy_ts="" deploy_state="" deploy_url=""
+  # --- Signal presence: does this project publish a prod deploy at all? ---
+  # The listings only answer that question and supply the latest deploy the
+  # lag issue cites. They do not decide state: the runs endpoint once led
+  # with an August run for reli while the September HEAD was already live,
+  # and comparing HEAD against it filed reli#1512 and tripped the stall
+  # diagnostic. State is judged below on the deploy at HEAD itself.
+  local latest_sha="" latest_ts="" latest_url=""
   local wf_run
   wf_run=$(gh run list --repo "alexsiri7/$project" --branch main --limit 10 \
-    --json name,headSha,updatedAt,conclusion,url \
-    --jq '[.[] | select(.name | test("Production"; "i"))] | .[0] // empty' \
-    2>/dev/null || echo "")
+    --json name,headSha,updatedAt,url 2>/dev/null \
+    | jq -c '[.[] | select(.name | test("Production"; "i"))] | .[0] // empty' 2>/dev/null || echo "")
   if [ -n "$wf_run" ]; then
-    deploy_sha=$(echo "$wf_run" | jq -r '.headSha')
-    deploy_ts=$(echo "$wf_run" | jq -r '.updatedAt')
-    deploy_state=$(echo "$wf_run" | jq -r '.conclusion // "pending"')
-    deploy_url=$(echo "$wf_run" | jq -r '.url')
+    latest_sha=$(echo "$wf_run" | jq -r '.headSha')
+    latest_ts=$(echo "$wf_run" | jq -r '.updatedAt')
+    latest_url=$(echo "$wf_run" | jq -r '.url')
   fi
-
-  # --- Source (b): GitHub deployments API (Railway native) ---
-  if [ -z "$deploy_sha" ]; then
+  if [ -z "$latest_sha" ]; then
     local dep
-    dep=$(gh api "repos/alexsiri7/$project/deployments?per_page=10" \
-      --jq '[.[] | select(.environment | test("production"; "i"))] | .[0] // empty' \
-      2>/dev/null || echo "")
+    dep=$(gh api "repos/alexsiri7/$project/deployments?per_page=10" 2>/dev/null \
+      | jq -c '[.[] | select(.environment | test("production"; "i"))] | .[0] // empty' 2>/dev/null || echo "")
     if [ -n "$dep" ]; then
-      deploy_sha=$(echo "$dep" | jq -r '.sha')
-      deploy_ts=$(echo "$dep" | jq -r '.created_at')
+      latest_sha=$(echo "$dep" | jq -r '.sha')
+      latest_ts=$(echo "$dep" | jq -r '.created_at')
+      latest_url="https://github.com/alexsiri7/$project/deployments"
+    fi
+  fi
+  [ -n "$latest_sha" ] || return  # No deploy signal — skip silently
+
+  # --- Judge at HEAD: newest Production run at head_sha, else newest
+  # production deployment at head_sha. Empty state means nothing deployed HEAD.
+  local deploy_sha="$head_sha" deploy_ts="" deploy_state="" deploy_url=""
+  local head_run
+  head_run=$(gh run list --repo "alexsiri7/$project" --branch main --commit "$head_sha" --limit 10 \
+    --json name,conclusion,createdAt,updatedAt,url 2>/dev/null \
+    | jq -c '[.[] | select(.name | test("Production"; "i"))] | sort_by(.createdAt) | last // empty' 2>/dev/null || echo "")
+  if [ -n "$head_run" ]; then
+    deploy_state=$(echo "$head_run" | jq -r '.conclusion // "pending"')
+    deploy_ts=$(echo "$head_run" | jq -r '.updatedAt')
+    deploy_url=$(echo "$head_run" | jq -r '.url')
+  else
+    local head_dep
+    head_dep=$(gh api "repos/alexsiri7/$project/deployments?sha=$head_sha&per_page=10" 2>/dev/null \
+      | jq -c '[.[] | select(.environment | test("production"; "i"))] | .[0] // empty' 2>/dev/null || echo "")
+    if [ -n "$head_dep" ]; then
       local dep_id
-      dep_id=$(echo "$dep" | jq -r '.id')
+      dep_id=$(echo "$head_dep" | jq -r '.id')
       deploy_state=$(gh api "repos/alexsiri7/$project/deployments/$dep_id/statuses?per_page=1" \
         --jq '.[0].state // "pending"' 2>/dev/null || echo "pending")
+      deploy_ts=$(echo "$head_dep" | jq -r '.created_at')
       deploy_url="https://github.com/alexsiri7/$project/deployments"
     fi
   fi
-
-  [ -n "$deploy_sha" ] || return  # No deploy signal — skip silently
 
   # --- Case 1: deploy FAILED ---
   if [ "$deploy_state" = "failure" ] || [ "$deploy_state" = "error" ]; then
@@ -834,8 +856,8 @@ EOF
     return
   fi
 
-  # --- Case 2: deploy succeeded but lagging main HEAD ---
-  if [ "$deploy_state" = "success" ] && [ "$deploy_sha" != "$head_sha" ]; then
+  # --- Case 2: nothing has deployed main HEAD ---
+  if [ -z "$deploy_state" ]; then
     local head_epoch now_epoch
     head_epoch=$(date -d "$head_ts" +%s 2>/dev/null || echo 0)
     now_epoch=$(date +%s)
@@ -855,13 +877,13 @@ EOF
 
 **Repo**: alexsiri7/$project
 **main HEAD**: \`$head_sha\` (committed $head_ts, age ${age}s)
-**Latest prod deploy**: \`$deploy_sha\` at $deploy_ts
-**Deploy source**: $deploy_url
+**Latest prod deploy**: \`$latest_sha\` at $latest_ts
+**Deploy source**: $latest_url
 
 Auto-filed by \`pipeline-health-cron.sh\`. main has been ahead of prod for >15 minutes, which suggests the deploy mechanism (Railway webhook, GH Actions workflow) did not fire or silently failed.
 
 ### Steps
-1. Check $deploy_url — is there a run for $head_sha?
+1. Check $latest_url — is there a run for $head_sha?
 2. If Railway-native: inspect Railway dashboard for the service, check webhook delivery
 3. If GH Actions: re-dispatch the deploy workflow on main
 EOF
@@ -873,8 +895,17 @@ EOF
 
       touch "$marker"
       # No ntfy — archon will handle the issue automatically.
-      return
     fi
+    # A HEAD younger than 15 minutes is still waiting for its pipeline.
+    return
+  fi
+
+  # Anything but success (in_progress, queued, cancelled, skipped, ...) is a
+  # deploy still settling or one that never ran to a verdict. Leave the
+  # markers alone; the next tick judges it again.
+  if [ "$deploy_state" != "success" ]; then
+    log "$project: prod deploy at HEAD ${head_sha:0:10} is $deploy_state — waiting"
+    return
   fi
 
   # Deploy up to date — clear stale markers
@@ -1095,18 +1126,22 @@ check_progress() {
   # An empty backlog (no archon:queued/in-progress issues, no open PR that
   # pr-maintenance would act on) is idle, not stuck — firing the diagnostic
   # there burns an archon-assist run every 2h for nothing.
+  # An item created after the last tick had no window to progress in, so it
+  # is not evidence of a stall either. The prod-deploy check files
+  # archon:queued issues earlier in this same tick; counting those fired the
+  # diagnostic at a seconds-old issue (reli#1512, 2026-09-16).
   local pending=0
   for project in "${REPOS[@]}"; do
     local n
     n=$(gh issue list --repo "alexsiri7/$project" --state open --limit 100 \
-          --json labels \
-          --jq '[.[] | select(.labels | map(.name) | any(. == "archon:queued" or . == "archon:in-progress" or . == "archon:triage-in-progress"))] | length' \
+          --json labels,createdAt 2>/dev/null \
+        | jq --arg since "$since_iso" '[.[] | select(.createdAt < $since) | select(.labels | map(.name) | any(. == "archon:queued" or . == "archon:in-progress" or . == "archon:triage-in-progress"))] | length' \
           2>/dev/null || echo 0)
-    pending=$((pending + n))
-    n=$(gh pr list --repo "alexsiri7/$project" --state open --json isDraft,mergeStateStatus \
-          --jq '[.[] | select(.isDraft == false and (.mergeStateStatus == "CLEAN" or .mergeStateStatus == "BEHIND" or .mergeStateStatus == "DIRTY" or .mergeStateStatus == "UNSTABLE" or .mergeStateStatus == "UNKNOWN"))] | length' \
+    pending=$((pending + ${n:-0}))
+    n=$(gh pr list --repo "alexsiri7/$project" --state open --json isDraft,mergeStateStatus,createdAt 2>/dev/null \
+        | jq --arg since "$since_iso" '[.[] | select(.createdAt < $since) | select(.isDraft == false and (.mergeStateStatus == "CLEAN" or .mergeStateStatus == "BEHIND" or .mergeStateStatus == "DIRTY" or .mergeStateStatus == "UNSTABLE" or .mergeStateStatus == "UNKNOWN"))] | length' \
           2>/dev/null || echo 0)
-    pending=$((pending + n))
+    pending=$((pending + ${n:-0}))
   done
   if [ "$pending" -eq 0 ]; then
     log "no progress, but no queued issues or actionable PRs — idle, not stalled"
