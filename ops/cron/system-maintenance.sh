@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # system-maintenance.sh — weekly host upkeep, run as asiri from cron:
-#   0 4 * * 0 <repo>/ops/cron/system-maintenance.sh >> /tmp/system-maintenance.log 2>&1
+#   0 4 * * 0 <repo>/ops/cron/system-maintenance.sh >> ~/.local/state/archon-cron/logs/system-maintenance.log 2>&1
 #
 # Every privileged command goes through `sudo -n` against the fixed shapes in
 # /etc/sudoers.d/archon-cron (ops/host/sudoers-archon-cron, installed by
@@ -27,6 +27,8 @@ export DEBIAN_FRONTEND=noninteractive
 
 LOG_TAG="[system-maintenance]"
 STATE_DIR="${SYSTEM_MAINT_STATE_DIR:-$HOME/.archon/pipeline-health-state}"
+# Where the crontab sends this script's output (see ops/cron/crontab); named in ntfy bodies only.
+LOG_DIR="${ARCHON_CRON_LOG_DIR:-$HOME/.local/state/archon-cron/logs}"
 STATUS_FILE="$STATE_DIR/system-maintenance-status"
 REBOOT_MARKER="$STATE_DIR/system-maintenance-reboot-notified"
 REBOOT_REQUIRED="${SYSTEM_MAINT_REBOOT_REQUIRED:-/var/run/reboot-required}"
@@ -127,7 +129,7 @@ for dev in $(lsblk -dno NAME,TYPE 2>/dev/null | awk '$2 == "disk" {print $1}'); 
     printf '%s\n' "$out" | sed 's/^/    /'
     fail "smart:/dev/$dev" "not PASSED — $verdict"
     notify "SMART: /dev/$dev not PASSED on $(hostname)" \
-        "smartctl -H /dev/$dev (exit $rc): $verdict — see /tmp/system-maintenance.log" \
+        "smartctl -H /dev/$dev (exit $rc): $verdict — see $LOG_DIR/system-maintenance.log" \
         urgent rotating_light,floppy_disk
 done
 log "smart: checked $checked disk(s)"
@@ -168,7 +170,7 @@ fi
 if [ ${#FAILED[@]} -gt 0 ]; then
     log "=== system maintenance FAILED: $failed_csv ==="
     notify "System maintenance FAILED: $failed_csv" \
-        "system-maintenance.sh on $(hostname) failed step(s): $failed_csv. See /tmp/system-maintenance.log." \
+        "system-maintenance.sh on $(hostname) failed step(s): $failed_csv. See $LOG_DIR/system-maintenance.log." \
         high warning
     exit 1
 fi

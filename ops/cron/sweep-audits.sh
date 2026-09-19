@@ -26,7 +26,7 @@
 # ops/cron scripts (log/notify helpers, SECRETS_FILE, SCRIPT_DIR, STATE_DIR).
 #
 # Crontab:
-#   0 2 * * * <repo>/ops/cron/sweep-audits.sh >> /tmp/sweep-audits.log 2>&1
+#   0 2 * * * <repo>/ops/cron/sweep-audits.sh >> ~/.local/state/archon-cron/logs/sweep-audits.log 2>&1
 
 set -uo pipefail
 

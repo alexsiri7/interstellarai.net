@@ -204,7 +204,7 @@ fi
 if [ ${#FAILED[@]} -gt 0 ]; then
     log "ERROR: backup FAILED for: $failed_csv (ok: ${OK[*]-none}; skipped: ${SKIPPED[*]-none})"
     notify "DB backup FAILED: $failed_csv" \
-        "backup-dbs.sh could not produce a verified backup for $failed_csv. See /tmp/db-backup.log on $(hostname)." \
+        "backup-dbs.sh could not produce a verified backup for $failed_csv. See ${ARCHON_CRON_LOG_DIR:-$HOME/.local/state/archon-cron/logs}/db-backup.log on $(hostname)." \
         high floppy_disk
     exit 1
 fi

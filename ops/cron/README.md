@@ -7,7 +7,7 @@ Scheduled scripts that run the archon pipeline on this machine:
 - watch pipeline health (CI red, zombie runs, disk pressure)
 - daily release tags
 - Supabase DB backups
-- APK auto-sync to connected Android devices
+- weekly light cache trim and weekly tool-freshness report
 
 ## Secrets
 
@@ -101,7 +101,28 @@ crontab ops/cron/crontab
 
 It installs with absolute paths pointing at `/mnt/ext-fast/interstellarai.net/ops/cron/...`. Adjust paths there if this repo lives elsewhere on your machine.
 
-The crontab also keeps that checkout current: every 10 minutes it runs `git -C /mnt/ext-fast/interstellarai.net pull --ff-only -q origin main >> /tmp/ops-self-update.log`. Cron runs the scripts straight out of this checkout, so before this line a merged fix to any cron script did nothing until someone pulled by hand. `--ff-only` means a dirty or diverged checkout (a session left mid-edit on `main`, say) makes the pull fail harmlessly — nothing is overwritten — and the failure shows in `/tmp/ops-self-update.log`; `-q` keeps a successful fast-forward silent, so that log only ever holds problems. Add `/tmp/ops-self-update.log` to the logrotate config at `~/.config/logrotate/archon-pipeline.conf` (outside this repo) alongside the other `/tmp/*.log` cron logs.
+The crontab also keeps that checkout current: every 10 minutes it runs `git -C /mnt/ext-fast/interstellarai.net pull --ff-only -q origin main >> ~/.local/state/archon-cron/logs/ops-self-update.log`. Cron runs the scripts straight out of this checkout, so before this line a merged fix to any cron script did nothing until someone pulled by hand. `--ff-only` means a dirty or diverged checkout (a session left mid-edit on `main`, say) makes the pull fail harmlessly — nothing is overwritten — and the failure shows in that log; `-q` keeps a successful fast-forward silent, so it only ever holds problems.
+
+## Logs and logrotate
+
+Every crontab line appends to `~/.local/state/archon-cron/logs/<name>.log` (written out as `/home/asiri/...` because cron expands no `~`). They used to live in `/tmp`, which Ubuntu's tmpfiles rule (`D /tmp 1777 root root 30d`) empties on every boot. The `@reboot mkdir -p` line recreates the directory after a boot; when installing the crontab for the first time create it by hand, since the shell opens the `>>` redirect before the script starts and a missing directory means the script never runs:
+
+```
+mkdir -p ~/.local/state/archon-cron/logs
+crontab ops/cron/crontab
+```
+
+The two per-tick scratch files stay in `/tmp` on purpose: `/tmp/.archon-active-runs.<script>` is rewritten from scratch by `archon_runs_snapshot` at the start of every tick (`lib/archon-active-runs.sh`), and `/tmp/.pr-review-fire.<pid>` lives for one `pr-review-cron.sh` invocation. Neither is read across ticks, so losing them at boot costs nothing. `pr-maintenance-cron.sh` appends `gh pr ready` stderr to `pr-maintenance-errors.log` and `pipeline-health-cron.sh` parks its archon-assist diagnostic output as `pipeline-health-diagnostic-<ts>.log`, both in the same directory. `ARCHON_CRON_LOG_DIR` overrides the directory the scripts name in their messages (the crontab redirects are literal).
+
+Rotation is the committed `logrotate.conf` in this directory (size 10M, keep 3, compressed, `copytruncate` because cron holds the files open): the crontab runs `/usr/sbin/logrotate --state ~/.logrotate.state <checkout>/ops/cron/logrotate.conf` hourly. Add a line there when you add a crontab entry. The state file is outside the repo and keeps entries for the old `/tmp/*.log` paths; they are harmless (`missingok`) and can be left alone or trimmed with `sed -i '\#"/tmp/#d' ~/.logrotate.state`. The previous, unversioned config at `~/.config/logrotate/archon-pipeline.conf` is no longer referenced and can be deleted.
+
+## Weekly light trim
+
+`pipeline-health-cron.sh --trim` (Sundays 05:00) runs only the always-safe subset of the disk autoclean, regardless of disk usage: `uv cache prune`, `pip cache purge`, idle `~/.gradle/caches/<version>` dirs, `~/apks` builds older than 30 days that no `*-latest.*` symlink points at, stale archon worktrees, and the `/tmp` rules described in the script index. It never runs `go clean -cache`, `bun pm cache rm`, `npm cache clean` or the journal vacuum — those wipe caches that are hot on a healthy box and stay behind the >=85% gate in `check_disk`. It skips the throttle gate and every health check and logs one `trim done — freed <N>MB on /` line measured at the filesystem. Run it by hand with `ops/cron/pipeline-health-cron.sh --trim`.
+
+## Tool freshness
+
+`tool-freshness.sh` (Mondays 09:00) compares installed vs latest for bun, gh, uv, node, the Archon checkout and the pinned `pg_dump`, and sends **one ntfy only when something is behind**, one `tool installed → latest` line per tool; a run where everything is current is silent. Lookups use `gh api` for GitHub releases and `curl` for nodejs.org's `index.json` (newest LTS line) and the nodejs/Release `schedule.json` (the installed major's end-of-life date — past EOL is behind even when nothing newer is LTS yet). Archon is the checkout at `/mnt/ext-fast/archon`: its `upstream` remote (the project, not the operator's fork on `origin`) is fetched — remote-tracking refs only, nothing in that repo is modified — and the checkout is behind when the project's latest release tag is not in HEAD's history; the commit gap to the remote's default branch (`dev`, always ahead) is reported as context, not as a trigger (`TOOL_FRESHNESS_ARCHON_TRACK=branch` flips that). `pg_dump` is compared on its own major line against theseus-rs/postgresql-binaries, so an 18.x release never nags a 17.x install; the upgrade block is in the pg_dump section above. A lookup that fails is logged as unknown and never ntfy'd by itself. The full result lands in `~/.archon/pipeline-health-state/tool-freshness` every run (`status=behind|current`, one `behind:`/`current:`/`unknown:` line per tool). Nothing is upgraded automatically.
 
 ## Script index
 
@@ -115,10 +136,11 @@ The crontab also keeps that checkout current: every 10 minutes it runs `git -C /
 | `system-maintenance.sh` | 04:00 Sundays | host upkeep as `asiri` through `sudo -n` and the fixed sudoers shapes in `ops/host/sudoers-archon-cron`: apt update/upgrade/autoremove (upgradable count logged before and after), disabled snap revisions removed, `journalctl --vacuum-size=500M`, `smartctl -H` on every disk (ntfy on anything not PASSED), one ntfy per running kernel while `/var/run/reboot-required` exists. Writes `system-maintenance-status`; `pipeline-health-cron.sh` (`check_system_maintenance`) ntfys once when it reads `failed` or no successful run in 8 days. One-time host setup (sudoers, journald cap, unattended-upgrades, smartd, Node 22): see [`../host/README.md`](../host/README.md) |
 | `backup-dbs.sh` | every 3h (at :17) | Supabase → local + rclone to Google Drive. Verified dumps only: pinned pg17 client, schema check, min size, sanity-table row count; fails loud (exit 1 + ntfy) and deletes empty artifacts |
 | `daily-release-cron.sh` | 08:00 daily | tag + release per repo if main moved since last release |
-| `auto-apk-sync.sh` | every 5 min | pull latest signed APK from CI, install to any connected device |
-| `apk-autosync-daemon.sh` | systemd user service | event-driven counterpart to `auto-apk-sync.sh` |
-| `fetch-apks.sh` / `install-apks.sh` | manual | helper CLIs for APK ops |
+| `pipeline-health-cron.sh --trim` | 05:00 Sunday | the light autoclean only (see "Weekly light trim"): uv/pip prune, idle Gradle caches, old APKs, stale worktrees, stale `/tmp` entries; never the hot-cache steps |
+| `tool-freshness.sh` | 09:00 Monday | installed vs latest for bun, gh, uv, node (newest LTS + EOL), Archon checkout, pg_dump; one ntfy only when something is behind; result in `~/.archon/pipeline-health-state/tool-freshness` |
+| `fetch-apks.sh` / `install-apks.sh` | manual only | download signed APKs from CI into `~/apks` / sideload them over adb. Not scheduled: Android distribution goes through Google Play now, and the `auto-apk-sync.sh` cron + `apk-autosync-daemon.sh` that used to drive them were removed. `pipeline-health-cron.sh` still prunes `~/apks` builds older than 30d |
 | `generate-android-keystore.sh` | manual, one-off per project | generate release keystore + upload to GH Actions secrets |
+| `logrotate.conf` | hourly via `/usr/sbin/logrotate` | rotation for every cron log under `~/.local/state/archon-cron/logs` |
 | `lib/archon-projects.sh` | sourced by others | loads project list from `archon-projects.txt` |
 | `lib/ci-skip.sh` | sourced by `pr-maintenance-cron.sh`, `pipeline-health-cron.sh` | the CI-skip tokens GitHub honours: detect one, strip them from a subject or a body |
 | `lib/pg-backup.sh` | sourced by `backup-dbs.sh` | URL → `PG*` env, pg client/server version selection, archive validation |

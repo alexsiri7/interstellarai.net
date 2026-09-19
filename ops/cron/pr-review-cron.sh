@@ -6,7 +6,7 @@
 # API key required.
 #
 # Crontab:
-#   */5 * * * * <repo>/ops/cron/pr-review-cron.sh >> /tmp/pr-review.log 2>&1
+#   */5 * * * * <repo>/ops/cron/pr-review-cron.sh >> ~/.local/state/archon-cron/logs/pr-review.log 2>&1
 #
 # State (per PR):
 #   ~/.archon/state/pr-review/${project}-${pr}.pid          — PID:SHA, in-flight
