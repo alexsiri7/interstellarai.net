@@ -16,7 +16,7 @@
 */30 * * * * /mnt/ext-fast/interstellarai.net/ops/cron/pipeline-health-cron.sh >> /home/asiri/.local/state/archon-cron/logs/pipeline-health.log 2>&1
 0 5 * * 0 /mnt/ext-fast/interstellarai.net/ops/cron/pipeline-health-cron.sh --trim >> /home/asiri/.local/state/archon-cron/logs/pipeline-health.log 2>&1
 0 8 * * * /mnt/ext-fast/interstellarai.net/ops/cron/daily-release-cron.sh >> /home/asiri/.local/state/archon-cron/logs/daily-release.log 2>&1
-0 9 * * 1 /mnt/ext-fast/interstellarai.net/ops/cron/tool-freshness.sh >> /home/asiri/.local/state/archon-cron/logs/tool-freshness.log 2>&1
+0 9 * * 1 /mnt/ext-fast/interstellarai.net/ops/cron/tool-freshness.sh --apply >> /home/asiri/.local/state/archon-cron/logs/tool-freshness.log 2>&1
 7 * * * * /usr/sbin/logrotate --state /home/asiri/.logrotate.state /mnt/ext-fast/interstellarai.net/ops/cron/logrotate.conf >/dev/null 2>&1
 */5 * * * * /mnt/ext-fast/interstellarai.net/ops/cron/pr-review-cron.sh >> /home/asiri/.local/state/archon-cron/logs/pr-review.log 2>&1
 0 2 * * * /mnt/ext-fast/interstellarai.net/ops/cron/sweep-audits.sh >> /home/asiri/.local/state/archon-cron/logs/sweep-audits.log 2>&1
