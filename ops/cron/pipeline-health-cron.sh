@@ -1889,6 +1889,56 @@ check_system_maintenance() {
 }
 
 # ----------------------------------------------------------------------------
+# Check 9c: DB restore test. restore-test.sh (cron, Sunday 04:30) restores the
+#   newest archive of every project into a throwaway cluster and writes
+#   $STATE_DIR/restore-test-status (last_ok=<epoch of the last run in which
+#   every configured project restored with the recorded row count>,
+#   last_run_status=ok|failed). The script ntfys its own failures; this check
+#   alerts once when the last run failed (a failed status stays failed for a
+#   week, so the marker keeps it to one alert) or when no successful test
+#   landed within RESTORE_TEST_MAX_AGE_D days (default 8: one missed week).
+# ----------------------------------------------------------------------------
+check_restore_test() {
+  local status_file="$STATE_DIR/restore-test-status"
+  local marker="$STATE_DIR/restore-test-alerted"
+  local max_age_d="${RESTORE_TEST_MAX_AGE_D:-8}"
+  local max_age=$(( max_age_d * 86400 ))
+  local now last_ok=0 last_status="" last_failed="" problem=""
+  now=$(date +%s)
+
+  if [ -f "$status_file" ]; then
+    last_ok=$(grep -s '^last_ok=' "$status_file" | cut -d= -f2)
+    last_status=$(grep -s '^last_run_status=' "$status_file" | cut -d= -f2)
+    last_failed=$(grep -s '^last_run_failed=' "$status_file" | cut -d= -f2)
+    [[ "$last_ok" =~ ^[0-9]+$ ]] || last_ok=0
+  fi
+
+  if [ "$last_ok" -eq 0 ]; then
+    problem="no successful DB restore test recorded ($status_file missing or never ok)"
+    [ "$last_status" = "failed" ] && problem="$problem; last run failed${last_failed:+ ($last_failed)}"
+  elif [ "$last_status" = "failed" ]; then
+    problem="last DB restore test failed${last_failed:+ ($last_failed)}; last success $(( (now - last_ok) / 86400 ))d ago"
+  elif [ $(( now - last_ok )) -gt "$max_age" ]; then
+    problem="last successful DB restore test $(( (now - last_ok) / 86400 ))d ago (limit ${max_age_d}d)"
+  fi
+
+  if [ -z "$problem" ]; then
+    if [ -f "$marker" ]; then
+      rm -f "$marker"
+      log "restore-test: recovered — newest backups restore cleanly"
+    fi
+    return 0
+  fi
+
+  log "restore-test: $problem"
+  [ -f "$marker" ] && return 0   # alert once per episode
+  notify "DB restore test stale or failed" \
+    "$problem. Check $LOG_DIR/restore-test.log and run ops/cron/restore-test.sh by hand." \
+    high floppy_disk
+  touch "$marker"
+}
+
+# ----------------------------------------------------------------------------
 # Check 10: Paused archon runs nothing will resume. reconcile_zombies reaps
 # stale `running` rows and deliberately leaves `paused` ones to the server's
 # continuation scheduler; this is the other half — the runs that scheduler has
@@ -1969,5 +2019,6 @@ check_parked_runs
 check_disk
 check_db_backup
 check_system_maintenance
+check_restore_test
 check_progress
 log "=== done ==="

@@ -9,7 +9,8 @@
 # count of that table must succeed. Anything else is a FAILED backup: the
 # artifact is deleted, the project is reported in the exit status / log /
 # ntfy, and the status file read by pipeline-health-cron.sh records the
-# failure.
+# failure. A verified archive gets a `<archive>.meta` sidecar (rows=, table=)
+# that restore-test.sh (weekly) checks a restore of the archive against.
 #
 # pg_dump comes from the user-level PostgreSQL 17 client in
 # ~/.local/opt/postgresql-17 (symlinked into ~/.local/bin, put first on PATH
@@ -48,17 +49,9 @@ LOG_TAG="[db-backup]"
 DB_BACKUP_STATE_DIR="${DB_BACKUP_STATE_DIR:-$HOME/.archon/pipeline-health-state}"
 STATUS_FILE="$DB_BACKUP_STATE_DIR/db-backup-status"
 
-# project | URL variable | schema | sanity table (quoted as SQL needs it)
-# All five live on Supabase with their tables in `public`; the schema is
-# still verified at runtime so a migration to a per-project schema fails
-# loudly here instead of silently producing an empty dump.
-PROJECTS=(
-    'annie|ANNIE_DB_URL|public|"Project"'
-    'reli|RELI_DB_URL|public|things'
-    'filmduel|FILMDUEL_DB_URL|public|users'
-    'kindred|KINDRED_DB_URL|public|entries'
-    'lachesis|LACHESIS_DB_URL|public|lachesis_backlog'
-)
+# project | URL variable | schema | sanity table — PG_BACKUP_PROJECTS in
+# lib/pg-backup.sh, shared with restore-test.sh.
+PROJECTS=("${PG_BACKUP_PROJECTS[@]}")
 
 log() { echo "$LOG_TAG $(date '+%Y-%m-%d %H:%M:%S') $*"; }
 
@@ -75,7 +68,7 @@ notify() {
 
 rotate_backups() {
     local dir="$1" pattern="$2" name="$3"
-    find "$dir" -name "$pattern" -mtime +"$KEEP_DAYS" -delete 2>/dev/null || true
+    find "$dir" \( -name "$pattern" -o -name "$pattern.meta" \) -mtime +"$KEEP_DAYS" -delete 2>/dev/null || true
     log "Rotated $name backups older than ${KEEP_DAYS} days"
 }
 
@@ -106,7 +99,7 @@ backup_project() {
 
     fail() {
         log "ERROR: $name backup FAILED — $1"
-        rm -f "$out" "$errfile"
+        rm -f "$out" "$out.meta" "$errfile"
         pg_clear_env
         return 1
     }
@@ -145,6 +138,12 @@ backup_project() {
     rows=$(psql -X -Atq -c "SELECT count(*) FROM ${schema}.${table}" 2>"$errfile") || rows=""
     if ! [[ "$rows" =~ ^[0-9]+$ ]]; then
         fail "row-count query on ${schema}.${table} failed ($(scrub < "$errfile" | head -1))"; return 1
+    fi
+
+    # Sidecar read by restore-test.sh: the row count this archive was
+    # verified against, so the restore can be checked for the same number.
+    if ! printf 'rows=%s\ntable=%s.%s\n' "$rows" "$schema" "$table" > "$out.meta"; then
+        fail "cannot write $out.meta"; return 1
     fi
 
     log "OK: $name backed up: $out ($(du -h "$out" | cut -f1), $rows rows in ${schema}.${table}, pg_dump v$client_major from $(command -v pg_dump), server v$server_major)"
