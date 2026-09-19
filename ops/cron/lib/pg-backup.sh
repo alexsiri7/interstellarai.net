@@ -3,13 +3,15 @@
 #
 # The helpers never print a connection URL or password. Credentials travel
 # to pg_dump/psql through the libpq PG* environment (PGHOST, PGUSER,
-# PGPASSWORD, ...) so they show up neither in `ps` nor in docker's argv.
+# PGPASSWORD, ...) so they never show up in `ps`.
+#
+# pg_dump/psql are whatever is first on PATH. backup-dbs.sh puts
+# ~/.local/bin first, where a user-level PostgreSQL 17 client lives
+# (~/.local/opt/postgresql-17, see ops/cron/README.md). No docker.
 #
 # Tunables (override from the environment before sourcing):
-#   PG_BACKUP_IMAGE      docker image providing pg_dump/psql (pinned)
 #   PG_BACKUP_MIN_BYTES  smallest compressed archive accepted as a backup
 
-: "${PG_BACKUP_IMAGE:=postgres:17-alpine}"
 : "${PG_BACKUP_MIN_BYTES:=1024}"
 
 # pg_url_percent_decode STRING → prints STRING with %XX sequences decoded.
@@ -80,67 +82,35 @@ pg_major_of() {
     return 1
 }
 
-# pg_docker_usable — docker present, daemon reachable, image pinned locally.
-pg_docker_usable() {
-    command -v docker >/dev/null 2>&1 || return 1
-    docker image inspect "$PG_BACKUP_IMAGE" >/dev/null 2>&1
-}
-
-# pg_run TOOL ARGS... — run pg_dump/psql with the current PG* env, either
-# inside the pinned container or locally, according to $PG_CLIENT_MODE
-# (docker|local). The env is passed by name, so no secret hits the argv.
-pg_run() {
-    local tool="$1"; shift
-    case "${PG_CLIENT_MODE:-}" in
-        docker)
-            docker run --rm -i --network host \
-                -e PGHOST -e PGPORT -e PGUSER -e PGPASSWORD -e PGDATABASE \
-                -e PGSSLMODE -e PGOPTIONS -e PGAPPNAME \
-                "$PG_BACKUP_IMAGE" "$tool" "$@" ;;
-        local)
-            "$tool" "$@" ;;
-        *)  echo "pg_run: PG_CLIENT_MODE must be docker or local" >&2; return 2 ;;
-    esac
-}
-
-# pg_client_major MODE — major version of pg_dump in that mode.
+# pg_client_major — major version of the pg_dump found on PATH.
 pg_client_major() {
     local out
-    out=$(PG_CLIENT_MODE="$1" pg_run pg_dump --version 2>/dev/null) || return 1
+    out=$(pg_dump --version 2>/dev/null) || return 1
     pg_major_of "$out"
 }
 
 # pg_server_major — major version of the server the PG* env points at.
-# Uses whichever client is available (any client can ask the version).
+# Any psql can ask the version, so the system one is fine here.
 pg_server_major() {
-    local mode out
-    for mode in docker local; do
-        if [ "$mode" = docker ] && ! pg_docker_usable; then continue; fi
-        if [ "$mode" = local ] && ! command -v psql >/dev/null 2>&1; then continue; fi
-        out=$(PG_CLIENT_MODE="$mode" pg_run psql -X -Atq -c "SHOW server_version" 2>/dev/null) && {
-            pg_major_of "$out"; return
-        }
-    done
-    return 1
+    local out
+    command -v psql >/dev/null 2>&1 || return 1
+    out=$(psql -X -Atq -c "SHOW server_version" 2>/dev/null) || return 1
+    pg_major_of "$out"
 }
 
-# pg_select_client_mode SERVER_MAJOR → prints docker|local, or fails with a
-# reason on stderr. Prefers the pinned container; falls back to a local
-# pg_dump only when its major version is >= the server's.
-pg_select_client_mode() {
+# pg_check_client SERVER_MAJOR → prints the pg_dump major version when the
+# pg_dump on PATH is at least as new as the server; otherwise fails with a
+# reason on stderr. pg_dump aborts on any server newer than itself, and that
+# abort used to become a 20-byte empty archive (#64) — so refuse up front.
+pg_check_client() {
     local server_major="$1" m
-    if pg_docker_usable; then
-        m=$(pg_client_major docker) || m=""
-        if [ -n "$m" ] && [ "$m" -ge "$server_major" ]; then echo docker; return 0; fi
-        echo "pg_select_client_mode: $PG_BACKUP_IMAGE pg_dump is v${m:-?}, server is v$server_major — bump PG_BACKUP_IMAGE" >&2
+    if ! command -v pg_dump >/dev/null 2>&1; then
+        echo "pg_check_client: no pg_dump on PATH — install the PostgreSQL client into ~/.local/opt/postgresql-17 (see ops/cron/README.md)" >&2
+        return 1
     fi
-    if command -v pg_dump >/dev/null 2>&1; then
-        m=$(pg_client_major local) || m=""
-        if [ -n "$m" ] && [ "$m" -ge "$server_major" ]; then echo local; return 0; fi
-        echo "pg_select_client_mode: local pg_dump is v${m:-?}, server is v$server_major (pg_dump refuses older clients)" >&2
-    else
-        echo "pg_select_client_mode: no local pg_dump and $PG_BACKUP_IMAGE unavailable" >&2
-    fi
+    m=$(pg_client_major) || m=""
+    if [ -n "$m" ] && [ "$m" -ge "$server_major" ]; then printf '%s' "$m"; return 0; fi
+    echo "pg_check_client: local pg_dump is v${m:-?}, server is v$server_major (pg_dump refuses older clients) — upgrade ~/.local/opt/postgresql-17 (see ops/cron/README.md)" >&2
     return 1
 }
 

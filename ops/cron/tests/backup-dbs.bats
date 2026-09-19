@@ -1,7 +1,9 @@
 #!/usr/bin/env bats
-# End-to-end tests for ops/cron/backup-dbs.sh with stubbed pg_dump/psql/docker.
+# End-to-end tests for ops/cron/backup-dbs.sh with stubbed pg_dump/psql.
 # Covers the #64 regressions: empty dump rejected and deleted, wrong/missing
-# schema rejected before dumping, client older than server rejected.
+# schema rejected before dumping, client older than server rejected; and the
+# PATH ordering that makes cron pick the ~/.local/bin pg_dump 17 over the
+# distro's v16.
 #
 # Run: bunx bats ops/cron/tests/backup-dbs.bats
 
@@ -11,6 +13,9 @@ setup() {
     CRON_DIR="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
     SCRIPT="$CRON_DIR/backup-dbs.sh"
     export PATH="$T/bin:$PATH"
+    # The script prepends $HOME/.local/bin to PATH (that is where the real
+    # pg_dump 17 lives). Point HOME at the sandbox so the stubs win.
+    export HOME="$T"
     export BACKUP_ROOT="$T/backups"
     export DB_BACKUP_STATE_DIR="$T/state"
     export STUB_ARGV="$T/argv"
@@ -20,8 +25,6 @@ setup() {
     echo 'RELI_DB_URL=postgresql://alice:p%40ss@db.example.com:5432/postgres' > "$T/secrets.env"
     export NTFY_TOPIC=""
 
-    # docker: never usable → forces the local client path (stubbed below).
-    printf '#!/usr/bin/env bash\nexit 1\n' > "$T/bin/docker"
     # rclone: no gdrive remote → SKIP branch.
     printf '#!/usr/bin/env bash\nexit 0\n' > "$T/bin/rclone"
     # curl: record ntfy calls.
@@ -69,7 +72,7 @@ archives() { find "$T/backups/reli" -name '*.sql.gz' 2>/dev/null; }
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK: reli backed up"* ]]
     [[ "$output" == *"224 rows in public.things"* ]]
-    [[ "$output" == *"pg_dump via local"* ]]
+    [[ "$output" == *"pg_dump v17 from $T/bin/pg_dump, server v17"* ]]
     [[ "$output" == *"SKIP: annie"* ]]
     [ "$(archives | wc -l)" -eq 1 ]
     grep -q -- '--schema=public' "$STUB_ARGV"
@@ -115,7 +118,7 @@ archives() { find "$T/backups/reli" -name '*.sql.gz' 2>/dev/null; }
     export STUB_DUMP_RC=1
     run "$SCRIPT"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"pg_dump (local, v17 server) exited non-zero"* ]]
+    [[ "$output" == *"pg_dump (v17 client, v17 server) exited non-zero"* ]]
     [ "$(archives | wc -l)" -eq 0 ]
 }
 
@@ -137,14 +140,33 @@ archives() { find "$T/backups/reli" -name '*.sql.gz' 2>/dev/null; }
     [ "$(archives | wc -l)" -eq 0 ]
 }
 
-@test "local pg_dump older than the server is rejected instead of writing an empty file" {
+@test "local pg_dump older than the server fails loud and names the upgrade path" {
     export STUB_PG_DUMP_VERSION=16.15
     run "$SCRIPT"
     [ "$status" -eq 1 ]
+    [[ "$output" == *"ERROR: reli backup FAILED"* ]]
     [[ "$output" == *"no usable pg_dump for a v17 server"* ]]
     [[ "$output" == *"local pg_dump is v16, server is v17"* ]]
+    [[ "$output" == *"upgrade ~/.local/opt/postgresql-17"* ]]
     [ ! -f "$STUB_ARGV" ]
     [ "$(archives | wc -l)" -eq 0 ]
+    grep -q '^last_run_status=failed$' "$T/state/db-backup-status"
+    grep -q '^last_run_failed=reli$' "$T/state/db-backup-status"
+}
+
+@test "~/.local/bin pg_dump wins over an older one earlier on the inherited PATH (cron has no ~/.local/bin)" {
+    # $T/bin (first on the inherited PATH) carries a v16 stub; $HOME/.local/bin
+    # carries the v17 one. The script must prepend $HOME/.local/bin.
+    export STUB_PG_DUMP_VERSION=16.15
+    mkdir -p "$T/.local/bin"
+    sed 's/STUB_PG_DUMP_VERSION:-17.6/STUB_LOCAL_PG_DUMP_VERSION:-17.11/; s#>> "\$STUB_ARGV"#>> "$STUB_ARGV"; touch "$T/local-bin-used"#' \
+        "$T/bin/pg_dump" > "$T/.local/bin/pg_dump"
+    chmod +x "$T/.local/bin/pg_dump"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"pg_dump v17 from $T/.local/bin/pg_dump"* ]]
+    [ -f "$T/local-bin-used" ]
+    [ "$(archives | wc -l)" -eq 1 ]
 }
 
 @test "failing row-count sanity query is a FAILED backup" {
