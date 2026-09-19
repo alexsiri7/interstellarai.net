@@ -1,17 +1,25 @@
 # Archon pipeline crontab. Install with: crontab ops/cron/crontab
 # Paths below assume this repo is checked out at /mnt/ext-fast/interstellarai.net.
 # Secrets loaded from ~/.config/archon-cron/secrets.env (not in this repo).
+#
+# Logs go under ~/.local/state/archon-cron/logs (cron expands no `~`, hence the
+# absolute paths). Not /tmp: Ubuntu's tmpfiles rule (`D /tmp 1777 root root 30d`)
+# empties it on every boot. The @reboot line recreates the directory; create it
+# once by hand when installing (`mkdir -p /home/asiri/.local/state/archon-cron/logs`),
+# since a redirect into a missing directory fails before the script even starts.
 
-*/15 * * * * /mnt/ext-fast/interstellarai.net/ops/cron/issue-pickup-cron.sh >> /tmp/issue-pickup.log 2>&1
-*/15 * * * * /mnt/ext-fast/interstellarai.net/ops/cron/pr-maintenance-cron.sh >> /tmp/pr-maintenance.log 2>&1
-17 */3 * * * /mnt/ext-fast/interstellarai.net/ops/cron/backup-dbs.sh >> /tmp/db-backup.log 2>&1
-*/30 * * * * /mnt/ext-fast/interstellarai.net/ops/cron/pipeline-health-cron.sh >> /tmp/pipeline-health.log 2>&1
-0 8 * * * /mnt/ext-fast/interstellarai.net/ops/cron/daily-release-cron.sh >> /tmp/daily-release.log 2>&1
-*/5 * * * * /mnt/ext-fast/interstellarai.net/ops/cron/auto-apk-sync.sh >> /tmp/apk-sync.log 2>&1
-7 * * * * /usr/sbin/logrotate --state /home/asiri/.logrotate.state /home/asiri/.config/logrotate/archon-pipeline.conf >/dev/null 2>&1
-*/5 * * * * /mnt/ext-fast/interstellarai.net/ops/cron/pr-review-cron.sh >> /tmp/pr-review.log 2>&1
-0 2 * * * /mnt/ext-fast/interstellarai.net/ops/cron/sweep-audits.sh >> /tmp/sweep-audits.log 2>&1
-0 4 * * 0 /mnt/ext-fast/interstellarai.net/ops/cron/system-maintenance.sh >> /tmp/system-maintenance.log 2>&1
+@reboot mkdir -p /home/asiri/.local/state/archon-cron/logs
+*/15 * * * * /mnt/ext-fast/interstellarai.net/ops/cron/issue-pickup-cron.sh >> /home/asiri/.local/state/archon-cron/logs/issue-pickup.log 2>&1
+*/15 * * * * /mnt/ext-fast/interstellarai.net/ops/cron/pr-maintenance-cron.sh >> /home/asiri/.local/state/archon-cron/logs/pr-maintenance.log 2>&1
+17 */3 * * * /mnt/ext-fast/interstellarai.net/ops/cron/backup-dbs.sh >> /home/asiri/.local/state/archon-cron/logs/db-backup.log 2>&1
+*/30 * * * * /mnt/ext-fast/interstellarai.net/ops/cron/pipeline-health-cron.sh >> /home/asiri/.local/state/archon-cron/logs/pipeline-health.log 2>&1
+0 5 * * 0 /mnt/ext-fast/interstellarai.net/ops/cron/pipeline-health-cron.sh --trim >> /home/asiri/.local/state/archon-cron/logs/pipeline-health.log 2>&1
+0 8 * * * /mnt/ext-fast/interstellarai.net/ops/cron/daily-release-cron.sh >> /home/asiri/.local/state/archon-cron/logs/daily-release.log 2>&1
+0 9 * * 1 /mnt/ext-fast/interstellarai.net/ops/cron/tool-freshness.sh >> /home/asiri/.local/state/archon-cron/logs/tool-freshness.log 2>&1
+7 * * * * /usr/sbin/logrotate --state /home/asiri/.logrotate.state /mnt/ext-fast/interstellarai.net/ops/cron/logrotate.conf >/dev/null 2>&1
+*/5 * * * * /mnt/ext-fast/interstellarai.net/ops/cron/pr-review-cron.sh >> /home/asiri/.local/state/archon-cron/logs/pr-review.log 2>&1
+0 2 * * * /mnt/ext-fast/interstellarai.net/ops/cron/sweep-audits.sh >> /home/asiri/.local/state/archon-cron/logs/sweep-audits.log 2>&1
+0 4 * * 0 /mnt/ext-fast/interstellarai.net/ops/cron/system-maintenance.sh >> /home/asiri/.local/state/archon-cron/logs/system-maintenance.log 2>&1
 # Self-update: this checkout is what cron runs, and nothing else pulls it. ff-only, so a dirty
 # or diverged checkout fails harmlessly and shows in the log instead of being overwritten.
-*/10 * * * * git -C /mnt/ext-fast/interstellarai.net pull --ff-only -q origin main >> /tmp/ops-self-update.log 2>&1
+*/10 * * * * git -C /mnt/ext-fast/interstellarai.net pull --ff-only -q origin main >> /home/asiri/.local/state/archon-cron/logs/ops-self-update.log 2>&1

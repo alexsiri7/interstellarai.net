@@ -7,7 +7,7 @@
 #   ./scripts/pr-maintenance-cron.sh cosmic-match reli  # specific projects
 #
 # Crontab entry:
-#   */15 * * * * <repo>/ops/cron/pr-maintenance-cron.sh >> /tmp/pr-maintenance.log 2>&1
+#   */15 * * * * <repo>/ops/cron/pr-maintenance-cron.sh >> ~/.local/state/archon-cron/logs/pr-maintenance.log 2>&1
 
 set -euo pipefail
 
@@ -31,6 +31,10 @@ source "$SCRIPT_DIR/lib/archon-active-runs.sh"
 archon_runs_snapshot
 BASE_DIR="${BASE_DIR:-/mnt/ext-fast}"
 LOG_PREFIX="[pr-maintenance]"
+# Same directory the crontab sends this script's own log to; survives a reboot
+# (/tmp does not). `gh pr ready` stderr is appended here across ticks.
+LOG_DIR="${ARCHON_CRON_LOG_DIR:-$HOME/.local/state/archon-cron/logs}"
+mkdir -p "$LOG_DIR"
 # A PR carrying this label is left alone by every phase below (and by
 # pr-review-cron.sh). It is how a human parks a PR that must stay open and
 # unmerged — e.g. an asset-upload PR whose head another workflow fetches from.
@@ -125,8 +129,8 @@ for PROJECT in "${PROJECTS[@]}"; do
       continue
     fi
     log "$PROJECT: promoting draft PR #$PR to ready (CI CLEAN)"
-    if ! gh pr ready "$PR" 2>>"/tmp/pr-maintenance-errors.log"; then
-      log "$PROJECT: PR #$PR — could not mark ready (see /tmp/pr-maintenance-errors.log)"
+    if ! gh pr ready "$PR" 2>>"$LOG_DIR/pr-maintenance-errors.log"; then
+      log "$PROJECT: PR #$PR — could not mark ready (see $LOG_DIR/pr-maintenance-errors.log)"
     fi
   done <<< "$GREEN_DRAFTS"
 

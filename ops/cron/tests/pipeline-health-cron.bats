@@ -701,6 +701,8 @@ stub_gh_for_progress() {
 setup_progress_env() {
     BASE_DIR="$STATE_DIR/repos"
     mkdir -p "$BASE_DIR/archon" "$BASE_DIR/test-project"
+    LOG_DIR="$STATE_DIR/logs"                    # the diagnostic's nohup output lands here
+    mkdir -p "$LOG_DIR"
     REPOS=("test-project")
     archon() { :; }
     nohup() { :; }

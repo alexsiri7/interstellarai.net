@@ -4,7 +4,7 @@
 # per tick and fires archon-fix-github-issue on the oldest queued one.
 #
 # Crontab:
-#   */15 * * * * <repo>/ops/cron/issue-pickup-cron.sh >> /tmp/issue-pickup.log 2>&1
+#   */15 * * * * <repo>/ops/cron/issue-pickup-cron.sh >> ~/.local/state/archon-cron/logs/issue-pickup.log 2>&1
 
 set -uo pipefail
 

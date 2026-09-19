@@ -5,7 +5,7 @@
 # release with auto-generated notes.
 #
 # Crontab:
-#   0 8 * * * <repo>/ops/cron/daily-release-cron.sh >> /tmp/daily-release.log 2>&1
+#   0 8 * * * <repo>/ops/cron/daily-release-cron.sh >> ~/.local/state/archon-cron/logs/daily-release.log 2>&1
 
 set -uo pipefail
 

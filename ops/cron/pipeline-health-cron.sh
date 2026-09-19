@@ -30,10 +30,25 @@
 #      in the last 24h, when the deploy URL is currently healthy
 #      (dedup per-PR)
 #
-# Crontab:
-#   */30 * * * * <repo>/ops/cron/pipeline-health-cron.sh >> /tmp/pipeline-health.log 2>&1
+# Crontab (logs live under ~/.local/state/archon-cron/logs, which survives a
+# reboot; /tmp does not):
+#   */30 * * * * <repo>/ops/cron/pipeline-health-cron.sh >> ~/.local/state/archon-cron/logs/pipeline-health.log 2>&1
+#   0 5 * * 0    <repo>/ops/cron/pipeline-health-cron.sh --trim >> ~/.local/state/archon-cron/logs/pipeline-health.log 2>&1
+#
+# `--trim` runs only the always-safe subset of the disk autoclean (uv/pip
+# cache prune, idle Gradle version caches, old APK builds, stale archon
+# worktrees, stale /tmp entries), logs the MB freed and exits. It never runs
+# the >=85%-only steps that wipe hot caches (go clean -cache, bun pm cache rm,
+# npm cache clean), skips the throttle gate and does none of the health checks.
 
 set -uo pipefail
+
+MODE=tick
+case "${1:-}" in
+  --trim) MODE=trim; shift ;;
+  "") ;;
+  *) echo "usage: $0 [--trim]" >&2; exit 2 ;;
+esac
 
 # /snap/bin: uv (and go) are snaps, and cron does not put it on PATH.
 export PATH="$HOME/.bun/bin:$HOME/.local/bin:/usr/local/bin:/snap/bin:$PATH"
@@ -44,14 +59,21 @@ source "$SCRIPT_DIR/lib/archon-projects.sh"
 load_archon_projects REPOS
 # shellcheck source=lib/throttle.sh
 source "$SCRIPT_DIR/lib/throttle.sh"
-should_tick "pipeline-health" || exit 0
+if [ "$MODE" = tick ]; then
+  should_tick "pipeline-health" || exit 0
+fi
 # shellcheck source=lib/archon-active-runs.sh
 source "$SCRIPT_DIR/lib/archon-active-runs.sh"
-archon_runs_snapshot
+# --trim touches no run, so it needs no snapshot (and no archon CLI call).
+[ "$MODE" = tick ] && archon_runs_snapshot
 # shellcheck source=lib/ci-skip.sh
 source "$SCRIPT_DIR/lib/ci-skip.sh"
-BASE_DIR="/mnt/ext-fast"
+BASE_DIR="${BASE_DIR:-/mnt/ext-fast}"
 STATE_DIR="$HOME/.archon/pipeline-health-state"
+# Where the crontab sends every script's stdout/stderr (see ops/cron/crontab).
+# Only used here to name log files in messages and to park the archon-assist
+# diagnostic output next to them.
+LOG_DIR="${ARCHON_CRON_LOG_DIR:-$HOME/.local/state/archon-cron/logs}"
 
 # NTFY_TOPIC loaded from secrets.env. Fail loud if unset.
 SECRETS_FILE="${ARCHON_CRON_SECRETS:-$HOME/.config/archon-cron/secrets.env}"
@@ -105,7 +127,7 @@ add_to_project() {
   }" >/dev/null 2>&1 || true
 }
 
-mkdir -p "$STATE_DIR"
+mkdir -p "$STATE_DIR" "$LOG_DIR"
 mkdir -p "$STATE_DIR/prciretry" "$STATE_DIR/escalated" \
          "$STATE_DIR/main-ci" "$STATE_DIR/escalated-main" \
          "$STATE_DIR/staging-health" "$STATE_DIR/scheduled-health" \
@@ -1006,6 +1028,10 @@ bun_pm_cache() {
   return "$rc"
 }
 
+# The full autoclean, only ever run under disk pressure (check_disk, / >=85%).
+# The first three steps wipe caches that are hot on a healthy box (a go/bun/npm
+# build after them re-downloads everything), which is why they never run on the
+# weekly --trim; everything else is the always-safe subset in autoclean_light.
 autoclean_root() {
   if command -v go >/dev/null 2>&1; then
     autoclean_step "go clean -cache" "$(go env GOCACHE 2>/dev/null)" go clean -cache
@@ -1017,6 +1043,18 @@ autoclean_root() {
   if command -v npm >/dev/null 2>&1; then
     autoclean_step "npm cache clean --force" "$(npm config get cache 2>/dev/null)" npm cache clean --force
   fi
+  if command -v journalctl >/dev/null 2>&1; then
+    autoclean_step "journalctl --user --vacuum-time=7d" "" journalctl --user --vacuum-time=7d
+  fi
+  autoclean_idle_dir "$HOME/.cache/puccinialin" 30
+  autoclean_light
+}
+
+# The cheap, always-safe steps: they only drop what is already unreferenced or
+# idle (uv/pip prune their own unused entries; the rest are 30d-idle Gradle
+# version caches, >30d APK builds nothing points at, worktrees with no open PR,
+# stale /tmp entries). Weekly via `--trim`, and the tail of autoclean_root.
+autoclean_light() {
   if command -v uv >/dev/null 2>&1; then
     autoclean_step "uv cache prune" "$(uv cache dir 2>/dev/null)" uv cache prune
   fi
@@ -1028,14 +1066,29 @@ autoclean_root() {
       autoclean_step "pip cache purge" "$pip_cache" pip cache purge
     fi
   fi
-  if command -v journalctl >/dev/null 2>&1; then
-    autoclean_step "journalctl --user --vacuum-time=7d" "" journalctl --user --vacuum-time=7d
-  fi
-  autoclean_idle_dir "$HOME/.cache/puccinialin" 30
   autoclean_gradle_caches
   autoclean_apks
   autoclean_stale_worktrees
   autoclean_tmp
+}
+
+# disk_used_kb <mount> — used KB on the filesystem, for before/after deltas.
+disk_used_kb() {
+  df -Pk "$1" 2>/dev/null | awk 'NR==2 { print $3 }'
+}
+
+# run_trim — the weekly `--trim` entry point: autoclean_light plus a one-line
+# summary of what it freed on /, measured at the filesystem so the steps that
+# report no dir of their own (worktrees, /tmp) are counted too.
+run_trim() {
+  local before after freed
+  before=$(disk_used_kb /); before="${before:-0}"
+  log "=== weekly trim (light autoclean) === disk / at $(disk_used_pct /)%"
+  autoclean_light
+  after=$(disk_used_kb /); after="${after:-$before}"
+  freed=$(( (before - after) / 1024 ))
+  [ "$freed" -lt 0 ] && freed=0
+  log "=== trim done — freed ${freed}MB on / (now $(disk_used_pct /)%) ==="
 }
 
 # autoclean_idle_dir <dir> <days> — remove a whole directory when nothing in
@@ -1075,10 +1128,11 @@ autoclean_gradle_caches() {
   return 0
 }
 
-# auto-apk-sync.sh writes <project>-<sha>.apk plus a <project>-latest.apk
-# symlink and never prunes: 150 builds / 7.1 GB by 2026-09. Drop builds older
-# than 30 days unless a *-latest.* symlink in the same dir resolves to them.
-# Symlinks themselves are never candidates (-type f).
+# ~/apks holds <project>-<sha>.apk builds plus a <project>-latest.apk symlink
+# (fetch-apks.sh, and the retired auto-apk-sync.sh before it, which never
+# pruned: 150 builds / 7.1 GB by 2026-09). Drop builds older than 30 days
+# unless a *-latest.* symlink in the same dir resolves to them. Symlinks
+# themselves are never candidates (-type f).
 autoclean_apks() {
   local apk_dir="${PIPELINE_HEALTH_APK_DIR:-$HOME/apks}"
   local dir total=0 removed=0
@@ -1166,8 +1220,9 @@ autoclean_stale_worktrees() {
 #      pulse-*, dbus-*, systemd-*, snap-*) and dotfiles. Agent sessions leave
 #      venvs, JDK extracts, node tarballs and review checkouts behind under
 #      arbitrary names — 300 of them held 6.6 GB by 2026-09.
-# Rule 2 never removes a regular file: the cron logs (/tmp/*.log) and state
-# files (/tmp/.archon-active-runs.*, /tmp/.pr-review-fire.*) live here.
+# Rule 2 never removes a regular file: the per-tick state files
+# (/tmp/.archon-active-runs.*, /tmp/.pr-review-fire.*) live here, and so did
+# the cron logs until they moved to ~/.local/state/archon-cron/logs.
 autoclean_tmp() {
   local tmp_root="${PIPELINE_HEALTH_TMP_ROOT:-/tmp}"
   [ -n "$tmp_root" ] && [ -d "$tmp_root" ] || return 0
@@ -1234,7 +1289,7 @@ check_disk() {
         if [ "$after" -ge 85 ]; then
           log "disk / still at ${after}% after cleanup — ntfying"
           notify "Disk warning: / ${after}% (was ${before}%)" \
-            "Autoclean ran (go/bun/npm/uv/pip caches, journal vacuum, idle Gradle caches, old APKs, stale worktrees and /tmp dirs) but disk still >=85%. See /tmp/pipeline-health.log for per-step results." \
+            "Autoclean ran (go/bun/npm/uv/pip caches, journal vacuum, idle Gradle caches, old APKs, stale worktrees and /tmp dirs) but disk still >=85%. See $LOG_DIR/pipeline-health.log for per-step results." \
             high warning
         else
           log "disk / recovered (${before}% → ${after}%) — no ntfy"
@@ -1343,11 +1398,11 @@ check_progress() {
   log "no progress, no token hints — firing archon-assist diagnostic"
   echo "$now" > "$stall_marker"
 
-  local logf="/tmp/pipeline-health-diagnostic-$(date +%Y%m%d-%H%M%S).log"
+  local logf="$LOG_DIR/pipeline-health-diagnostic-$(date +%Y%m%d-%H%M%S).log"
   (
     cd "$BASE_DIR/archon"
     CLAUDECODE=0 nohup archon workflow run archon-assist \
-      "Pipeline-health-cron detected no progress across repos ${REPOS[*]} in the last 30 minutes. No commits landed on origin/main, no archon workflows completed, and no token-limit markers were found in recent .archon-logs. Investigate: check 'gh run list' per repo, 'archon workflow status', recent logs in /tmp/pr-maintenance.log and /tmp/issue-pickup.log, and take action to unblock whatever is stuck." \
+      "Pipeline-health-cron detected no progress across repos ${REPOS[*]} in the last 30 minutes. No commits landed on origin/main, no archon workflows completed, and no token-limit markers were found in recent .archon-logs. Investigate: check 'gh run list' per repo, 'archon workflow status', recent logs in $LOG_DIR/pr-maintenance.log and $LOG_DIR/issue-pickup.log, and take action to unblock whatever is stuck." \
       > "$logf" 2>&1 &
     disown
   )
@@ -1778,7 +1833,7 @@ check_db_backup() {
   log "db-backup: $problem"
   [ -f "$marker" ] && return 0   # alert once per stale episode
   notify "DB backups stale" \
-    "$problem. Check /tmp/db-backup.log and run ops/cron/backup-dbs.sh by hand." \
+    "$problem. Check $LOG_DIR/db-backup.log and run ops/cron/backup-dbs.sh by hand." \
     high floppy_disk
   touch "$marker"
 }
@@ -1828,7 +1883,7 @@ check_system_maintenance() {
   log "system-maintenance: $problem"
   [ -f "$marker" ] && return 0   # alert once per episode
   notify "System maintenance stale" \
-    "$problem. Check /tmp/system-maintenance.log; run ops/cron/system-maintenance.sh by hand, or sudo ops/host/install.sh if sudo -n is refused." \
+    "$problem. Check $LOG_DIR/system-maintenance.log; run ops/cron/system-maintenance.sh by hand, or sudo ops/host/install.sh if sudo -n is refused." \
     high wrench
   touch "$marker"
 }
@@ -1891,6 +1946,11 @@ archon workflow get $run_id --json" \
 }
 
 # ----------------------------------------------------------------------------
+if [ "$MODE" = trim ]; then
+  run_trim
+  exit 0
+fi
+
 log "=== pipeline health check ==="
 for project in "${REPOS[@]}"; do
   check_main_ci "$project"
