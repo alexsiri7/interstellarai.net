@@ -168,7 +168,7 @@ status_field() { grep "^$1=" "$T/state/system-maintenance-status" | cut -d= -f2-
     run "$SCRIPT"
     [ "$status" -eq 0 ]
     [ "$(grep -c '^Reboot pending' "$NTFY_LOG")" -eq 1 ]
-    grep -q 'reboot pending; auto-reboot at 04:30' "$NTFY_LOG"
+    grep -q 'reboot pending; auto-reboot at 05:45' "$NTFY_LOG"
     grep -q 'linux-image-7.0.0-32-generic' "$NTFY_LOG"
     [ "$(cat "$T/state/system-maintenance-reboot-notified")" = "$(uname -r)" ]
 

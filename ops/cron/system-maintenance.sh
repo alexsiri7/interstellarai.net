@@ -143,7 +143,7 @@ if [ -f "$REBOOT_REQUIRED" ]; then
         pkgs=$( [ -r "$REBOOT_REQUIRED.pkgs" ] && sort -u "$REBOOT_REQUIRED.pkgs" | tr '\n' ' ' )
         log "reboot: pending (running kernel $kernel${pkgs:+; packages: $pkgs}) — notifying"
         notify "Reboot pending on $(hostname)" \
-            "reboot pending; auto-reboot at 04:30 (unattended-upgrades Automatic-Reboot). Running kernel $kernel.${pkgs:+ Triggered by: $pkgs}" \
+            "reboot pending; auto-reboot at 05:45 (unattended-upgrades Automatic-Reboot). Running kernel $kernel.${pkgs:+ Triggered by: $pkgs}" \
             default arrows_counterclockwise
         printf '%s\n' "$kernel" > "$REBOOT_MARKER"
     fi

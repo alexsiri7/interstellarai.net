@@ -7,10 +7,10 @@
 # What it does (see ops/host/README.md):
 #   1. /etc/sudoers.d/archon-cron          NOPASSWD for the weekly system-maintenance.sh
 #   2. journald                            SystemMaxUse=500M
-#   3. unattended-upgrades                 also take -updates, autoremove, auto-reboot 04:30
+#   3. unattended-upgrades                 also take -updates, autoremove, auto-reboot 05:45
 #   4. snap                                refresh.retain=2, drop disabled revisions
 #   5. smartmontools                       smartd with ntfy hook, short/long self-tests
-#   6. NodeSource                          node_20.x (EOL) -> node_22.x
+#   6. NodeSource                          node_20.x (EOL) -> node_24.x (current LTS)
 #   7. report whether a reboot is pending
 #
 # Every step is guarded so it can be run again after a partial failure.
@@ -35,7 +35,7 @@ APT_DROPIN=/etc/apt/apt.conf.d/52-archon-updates
 SMARTD_CONF=/etc/smartd.conf
 SMARTD_NTFY_DST=/usr/local/bin/smartd-ntfy
 NODESOURCE=/etc/apt/sources.list.d/nodesource.sources
-NODE_MAJOR=22
+NODE_MAJOR=24   # current LTS line (Krypton); node 20 is EOL since 2026-04-30, 22 is maintenance-only
 JOURNAL_MAX=500M
 SNAP_RETAIN=2
 
@@ -132,7 +132,7 @@ fi
 [ "$DRY" -eq 1 ] || done_ "journal now: $(journalctl --disk-usage 2>/dev/null || echo '?')"
 
 # ------------------------------------------ 3. unattended-upgrades ----------
-say "3. unattended-upgrades: -updates origin, autoremove, auto-reboot 04:30"
+say "3. unattended-upgrades: -updates origin, autoremove, auto-reboot 05:45"
 if ! pkg_installed unattended-upgrades; then
     run apt-get install -y unattended-upgrades && did "installed unattended-upgrades"
 else
@@ -146,7 +146,10 @@ Unattended-Upgrade::Allowed-Origins {
 };
 Unattended-Upgrade::Remove-Unused-Dependencies "true";
 Unattended-Upgrade::Automatic-Reboot "true";
-Unattended-Upgrade::Automatic-Reboot-Time "04:30";
+// 05:45, not earlier: the Sunday crontab runs system-maintenance at 04:00 (apt can
+// run long), the backup restore test at 04:30 and pipeline-health --trim at 05:00;
+// every one of them has finished before this.
+Unattended-Upgrade::Automatic-Reboot-Time "05:45";
 '
 write_file "$APT_DROPIN" 0644 "$APT_CONTENT" || true
 if [ "$DRY" -eq 0 ]; then
@@ -248,7 +251,7 @@ esac
 # ------------------------------------------------------- 7. reboot ----------
 say "7. reboot status"
 if [ -f /var/run/reboot-required ]; then
-    done_ "/var/run/reboot-required EXISTS — a reboot is pending$( [ -r /var/run/reboot-required.pkgs ] && printf ' (%s)' "$(sort -u /var/run/reboot-required.pkgs | tr '\n' ' ')" ). unattended-upgrades will reboot at 04:30 once it next runs; or: sudo reboot"
+    done_ "/var/run/reboot-required EXISTS — a reboot is pending$( [ -r /var/run/reboot-required.pkgs ] && printf ' (%s)' "$(sort -u /var/run/reboot-required.pkgs | tr '\n' ' ')" ). unattended-upgrades will reboot at 05:45 once it next runs; or: sudo reboot"
 else
     done_ "/var/run/reboot-required absent — no reboot pending"
 fi
