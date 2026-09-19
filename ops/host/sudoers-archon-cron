@@ -1,0 +1,26 @@
+# /etc/sudoers.d/archon-cron — installed by ops/host/install.sh (mode 0440).
+#
+# Exactly the privileged commands ops/cron/system-maintenance.sh runs, each
+# via `sudo -n`, so a command that drifts away from these shapes fails loud
+# ("sudo: a password is required") instead of hanging on a prompt. No ALL.
+# Revoke: sudo rm /etc/sudoers.d/archon-cron
+#
+# sudoers wildcards: `*` matches any string, spaces included, so the patterns
+# below are the narrowest shapes the job needs, not exact-argument matches.
+# `:` is a sudoers separator, so the Dpkg option is written with `\:` escapes;
+# it still matches the literal `Dpkg::Options::=--force-confold` argument.
+
+Cmnd_Alias ARCHON_MAINT = \
+    /usr/bin/apt-get update, \
+    /usr/bin/apt-get -y -o Dpkg\:\:Options\:\:=--force-confold upgrade, \
+    /usr/bin/apt-get -y autoremove, \
+    /usr/bin/journalctl --vacuum-size=*, \
+    /usr/bin/snap remove --revision=* *, \
+    /usr/bin/snap set system refresh.retain=2, \
+    /usr/sbin/smartctl -H /dev/*, \
+    /usr/sbin/smartctl -A /dev/*
+
+# apt-get runs unattended: keep debconf from ever trying to ask.
+Defaults!ARCHON_MAINT env_keep += "DEBIAN_FRONTEND"
+
+asiri ALL=(root) NOPASSWD: ARCHON_MAINT

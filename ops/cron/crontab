@@ -11,6 +11,7 @@
 7 * * * * /usr/sbin/logrotate --state /home/asiri/.logrotate.state /home/asiri/.config/logrotate/archon-pipeline.conf >/dev/null 2>&1
 */5 * * * * /mnt/ext-fast/interstellarai.net/ops/cron/pr-review-cron.sh >> /tmp/pr-review.log 2>&1
 0 2 * * * /mnt/ext-fast/interstellarai.net/ops/cron/sweep-audits.sh >> /tmp/sweep-audits.log 2>&1
+0 4 * * 0 /mnt/ext-fast/interstellarai.net/ops/cron/system-maintenance.sh >> /tmp/system-maintenance.log 2>&1
 # Self-update: this checkout is what cron runs, and nothing else pulls it. ff-only, so a dirty
 # or diverged checkout fails harmlessly and shows in the log instead of being overwritten.
 */10 * * * * git -C /mnt/ext-fast/interstellarai.net pull --ff-only -q origin main >> /tmp/ops-self-update.log 2>&1
