@@ -26,7 +26,7 @@ and, since NodeSource moved to Node 24, restart the archon user services once as
 
 | Step | Files | Effect |
 |---|---|---|
-| 1. sudoers | `/etc/sudoers.d/archon-cron` (0440) from [`sudoers-archon-cron`](sudoers-archon-cron) | `asiri` may run, NOPASSWD, exactly the eight command shapes the weekly job uses (below). Validated with `visudo -c -f` before it is copied and with `visudo -c` on the whole sudoers set after; rolled back if the latter fails. No `ALL`. |
+| 1. sudoers | `/etc/sudoers.d/archon-cron` (0440) from [`sudoers-archon-cron`](sudoers-archon-cron) | `asiri` may run, NOPASSWD, exactly the eight command shapes the weekly job uses (below). Validated with `visudo -c -f` before it is copied, with `visudo -c` on the whole existing sudoers set before it is installed (a pre-existing problem fails the step without installing, see Troubleshooting), and with `visudo -c` again after; rolled back if that last one fails. No `ALL`. |
 | 2. journald | `/etc/systemd/journald.conf.d/50-cap.conf` | `SystemMaxUse=500M` (was uncapped, 2.5G), then `systemctl restart systemd-journald`. |
 | 3. unattended-upgrades | `/etc/apt/apt.conf.d/52-archon-updates` | Adds `${distro_id}:${distro_codename}-updates` to `Allowed-Origins` (the stock `50unattended-upgrades` only takes `-security`, which is why 95 packages were sitting upgradable), `Remove-Unused-Dependencies "true"`, `Automatic-Reboot "true"` at `05:45` — after every Sunday cron job (`system-maintenance.sh` 04:00, the backup restore test 04:30, `pipeline-health-cron.sh --trim` 05:00) has finished, so a reboot never cuts one off. apt.conf lists merge across files, so `50unattended-upgrades` is left alone. Also asserts `APT::Periodic::Unattended-Upgrade` is `1`. |
 | 4. snap | — | `snap set system refresh.retain=2` and `snap remove --revision=N name` for every revision `snap list --all` marks `disabled` (20 on 2026-09-19). |
@@ -87,6 +87,31 @@ its daily run (`apt-daily-upgrade.timer`, 06:00 ± 1h) — when it finds
 `/var/run/reboot-required` it schedules the reboot for the next 05:45. Archon
 survives that: it runs as lingering user systemd services plus cron, no docker.
 
+## Troubleshooting
+
+**Step 1 fails with `pre-existing sudoers problem`** — `visudo -c` rejects the
+sudoers set as it already is, before `archon-cron` is added, so installing on
+top would only make the post-install check fail for the wrong reason. The step
+prints visudo's own output and then every file in `/etc/sudoers.d` that is not
+mode 0440 owned by root; visudo refuses the *whole* set for any one such file
+(the 2026-09-19 install hit an unrelated `/etc/sudoers.d/gc-resize` at 0644,
+and the old message blamed `archon-cron`). Fix the named file and re-run:
+
+```
+sudo chmod 0440 /etc/sudoers.d/<file>     # or: sudo rm /etc/sudoers.d/<file>
+sudo visudo -c                            # must print only "parsed OK" lines
+sudo ops/host/install.sh
+```
+
+`--dry-run` as a normal user cannot read `/etc/sudoers`, so it skips this
+baseline and says so; `sudo ops/host/install.sh --dry-run` runs it.
+
+**Step 1 fails with `combined sudoers failed visudo -c after install`** — the
+baseline passed, so the fault is in `archon-cron` itself (or in how it combines
+with the rest); the file has already been removed and visudo's output is
+printed above the error. `sudo` keeps working. Check
+`visudo -c -f ops/host/sudoers-archon-cron` and the printed output.
+
 ## Revoke
 
 ```
@@ -103,9 +128,12 @@ The NodeSource change is a one-way version bump; the pre-change file is kept as
 ## Tests
 
 ```
-bunx bats ops/cron/tests/system-maintenance.bats ops/cron/tests/pipeline-health-system-maintenance.bats
+bunx bats ops/cron/tests/host-install.bats ops/cron/tests/system-maintenance.bats ops/cron/tests/pipeline-health-system-maintenance.bats
 shellcheck ops/host/install.sh ops/host/smartd-ntfy ops/cron/system-maintenance.sh
 visudo -c -f ops/host/sudoers-archon-cron
 ```
 
-`install.sh` itself can only be exercised with `--dry-run` without root.
+`host-install.bats` runs step 1 of `install.sh` as a normal user through the
+`HOST_INSTALL_SUDOERS_D=<dir>` test hook (sandboxed `sudoers.d`, root check
+skipped, stops after step 1) with `visudo` and `install` stubbed on `PATH`.
+The other steps can only be exercised with `--dry-run` without root.
