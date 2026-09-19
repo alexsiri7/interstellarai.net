@@ -14,6 +14,10 @@
 #   7. report whether a reboot is pending
 #
 # Every step is guarded so it can be run again after a partial failure.
+#
+# Test hook (ops/cron/tests/host-install.bats): HOST_INSTALL_SUDOERS_D=<dir>
+# points step 1 at <dir> instead of /etc/sudoers.d, skips the root check and
+# stops after step 1, so the sudoers logic runs against a stubbed visudo.
 
 set -uo pipefail
 
@@ -29,7 +33,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_SUDOERS="$SCRIPT_DIR/sudoers-archon-cron"
 REPO_SMARTD_NTFY="$SCRIPT_DIR/smartd-ntfy"
 
-SUDOERS_DST=/etc/sudoers.d/archon-cron
+SUDOERS_D="${HOST_INSTALL_SUDOERS_D:-/etc/sudoers.d}"
+SUDOERS_DST="$SUDOERS_D/archon-cron"
+SUDOERS_OWNER=root
 JOURNALD_DROPIN=/etc/systemd/journald.conf.d/50-cap.conf
 APT_DROPIN=/etc/apt/apt.conf.d/52-archon-updates
 SMARTD_CONF=/etc/smartd.conf
@@ -41,10 +47,11 @@ SNAP_RETAIN=2
 
 export DEBIAN_FRONTEND=noninteractive
 
-if [ "$DRY" -eq 0 ] && [ "$(id -u)" -ne 0 ]; then
+if [ "$DRY" -eq 0 ] && [ -z "${HOST_INSTALL_SUDOERS_D:-}" ] && [ "$(id -u)" -ne 0 ]; then
     echo "run as root: sudo $0   (or $0 --dry-run to preview)" >&2
     exit 1
 fi
+[ -n "${HOST_INSTALL_SUDOERS_D:-}" ] && SUDOERS_OWNER=$(id -un)   # test sandbox is not root-owned
 
 # ---------------------------------------------------------------- helpers ---
 say()  { printf '==> %s\n' "$*"; }
@@ -98,6 +105,23 @@ write_file() {
 
 pkg_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'; }
 
+# sudoers_d_offenders: every file in $SUDOERS_D visudo will reject on sight —
+# mode not 0440 or owner not $SUDOERS_OWNER — as "<mode> <owner>:<group> <path>".
+sudoers_d_offenders() {
+    find "$SUDOERS_D" -maxdepth 1 -type f \( ! -perm 0440 -o ! -user "$SUDOERS_OWNER" \) -exec stat -c '%a %U:%G %n' {} + 2>/dev/null | sort
+}
+
+# finish: print the summary and exit — the tail of the script, callable early.
+finish() {
+    echo
+    if [ "${#FAILED[@]}" -gt 0 ]; then
+        echo "FAILED steps: ${FAILED[*]} — fix and re-run (safe to repeat)." >&2
+        exit 1
+    fi
+    [ "$DRY" -eq 1 ] && echo "dry-run complete — nothing was changed. Apply with: sudo $0"
+    exit 0
+}
+
 # ------------------------------------------------------- 1. sudoers ---------
 say "1. sudoers drop-in for the weekly maintenance job"
 if [ ! -r "$REPO_SUDOERS" ]; then
@@ -109,15 +133,39 @@ elif [ -r "$SUDOERS_DST" ] && cmp -s "$REPO_SUDOERS" "$SUDOERS_DST"; then
 else
     done_ "visudo -c: $REPO_SUDOERS parses"
     [ -e "$SUDOERS_DST" ] && [ ! -r "$SUDOERS_DST" ] && done_ "(cannot read $SUDOERS_DST without root — assuming it differs)"
-    run install -m 0440 -o root -g root "$REPO_SUDOERS" "$SUDOERS_DST" \
-        && did "installed $SUDOERS_DST (0440)"
-    # The whole sudoers set must still parse with the new file in place;
-    # otherwise sudo locks everyone out. Roll back on failure.
-    if [ "$DRY" -eq 0 ] && ! visudo -c -q; then
-        rm -f "$SUDOERS_DST"
-        fail sudoers "combined sudoers failed visudo -c after install — $SUDOERS_DST removed"
+    # Baseline: the sudoers set as it stands must already pass visudo -c.
+    # Otherwise the post-install check below fails for a reason that has nothing
+    # to do with our file and the rollback blames the wrong one (2026-09-19: an
+    # unrelated /etc/sudoers.d/gc-resize at 0644 did exactly that). visudo needs
+    # root to read /etc/sudoers, so a --dry-run as a normal user cannot check.
+    baseline_ok=1
+    if [ "$(id -u)" -ne 0 ] && [ -z "${HOST_INSTALL_SUDOERS_D:-}" ]; then
+        done_ "(cannot run visudo -c without root — existing sudoers set not checked)"
+    elif ! visudo_out=$(visudo -c 2>&1); then
+        baseline_ok=0
+        printf '%s\n' "$visudo_out" | sed 's/^/        | /'
+        offenders=$(sudoers_d_offenders)
+        if [ -n "$offenders" ]; then
+            done_ "files in $SUDOERS_D that are not mode 0440 owned by $SUDOERS_OWNER (visudo rejects the whole set for any one of them):"
+            printf '%s\n' "$offenders" | sed 's/^/        /'
+        fi
+        fail sudoers "pre-existing sudoers problem (visudo -c fails before $SUDOERS_DST is installed) — not installed; fix it (e.g. chmod 0440 $SUDOERS_D/<file>, or remove the file) and re-run"
+    else
+        done_ "visudo -c: existing sudoers set parses"
+    fi
+    if [ "$baseline_ok" -eq 1 ]; then
+        run install -m 0440 -o root -g root "$REPO_SUDOERS" "$SUDOERS_DST" \
+            && did "installed $SUDOERS_DST (0440)"
+        # The whole sudoers set must still parse with the new file in place;
+        # otherwise sudo locks everyone out. Roll back on failure.
+        if [ "$DRY" -eq 0 ] && ! visudo_out=$(visudo -c 2>&1); then
+            rm -f "$SUDOERS_DST"
+            printf '%s\n' "$visudo_out" | sed 's/^/        | /'
+            fail sudoers "combined sudoers failed visudo -c after install — $SUDOERS_DST removed"
+        fi
     fi
 fi
+[ -n "${HOST_INSTALL_SUDOERS_D:-}" ] && finish   # test hook: step 1 only
 
 # ------------------------------------------------------- 2. journald --------
 say "2. journald size cap ($JOURNAL_MAX)"
@@ -256,10 +304,4 @@ else
     done_ "/var/run/reboot-required absent — no reboot pending"
 fi
 
-echo
-if [ "${#FAILED[@]}" -gt 0 ]; then
-    echo "FAILED steps: ${FAILED[*]} — fix and re-run (safe to repeat)." >&2
-    exit 1
-fi
-[ "$DRY" -eq 1 ] && echo "dry-run complete — nothing was changed. Apply with: sudo $0"
-exit 0
+finish
