@@ -24,16 +24,34 @@ Required keys (see individual scripts for which ones each uses):
 
 Set perms: `chmod 600 ~/.config/archon-cron/secrets.env`.
 
-### pg_dump version (server is pg17)
+### pg_dump version (server is pg17, no docker)
 
-`backup-dbs.sh` reads the server's major version first and then picks a client that is at least that new: the pinned `postgres:17-alpine` docker image (`PG_BACKUP_IMAGE`) when docker is available, otherwise a local `pg_dump` whose major version is >= the server's. Anything older is refused — `pg_dump` aborts on a version mismatch and, before #64, that abort was silently written out as a 20-byte empty archive. Pull the image once (`docker pull postgres:17-alpine`) or, without docker, install `postgresql-client-17`:
+`backup-dbs.sh` reads the server's major version first and refuses to dump with a `pg_dump` whose major version is older — `pg_dump` aborts on a version mismatch and, before #64, that abort was silently written out as a 20-byte empty archive. The Supabase servers are PostgreSQL 17; the distro's `postgresql-client` is v16, and docker (which used to supply a `postgres:17-alpine` client) is no longer installed on the host. The v17 client is a user-level install, no sudo needed:
+
+```
+~/.local/opt/postgresql-17/          # portable build from theseus-rs/postgresql-binaries
+~/.local/bin/pg_dump    -> ../opt/postgresql-17/bin/pg_dump
+~/.local/bin/pg_restore -> ../opt/postgresql-17/bin/pg_restore
+```
+
+Only `pg_dump` and `pg_restore` are linked; `psql` stays the system one (any psql can `SHOW server_version` and `count(*)`). cron's PATH is `/usr/bin:/bin`, so the script prepends `~/.local/bin` itself; a v16 `pg_dump` earlier on the inherited PATH loses (tested). The `OK:` log line names the binary actually used (`pg_dump v17 from /home/<user>/.local/bin/pg_dump, server v17`).
+
+To install or upgrade (pick the newest 17.x tag from <https://github.com/theseus-rs/postgresql-binaries/releases>; the same steps apply to an 18.x tag if the servers move to 18 — then use `postgresql-18` as the directory name and re-point the symlinks):
 
 ```bash
-sudo apt-get install -y curl ca-certificates
-curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg
-echo "deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
-sudo apt-get update && sudo apt-get install -y postgresql-client-17
+V=17.11.0
+A="postgresql-$V-x86_64-unknown-linux-gnu.tar.gz"
+U="https://github.com/theseus-rs/postgresql-binaries/releases/download/$V/$A"
+cd "$(mktemp -d)" && curl -fsSLO "$U" && curl -fsSLO "$U.sha256"
+sha256sum -c <(awk '{print $1"  '"$A"'"}' "$A.sha256")     # must say OK
+rm -rf ~/.local/opt/postgresql-17 && mkdir -p ~/.local/opt/postgresql-17
+tar xzf "$A" -C ~/.local/opt/postgresql-17 --strip-components=1
+ln -sfn ../opt/postgresql-17/bin/pg_dump    ~/.local/bin/pg_dump
+ln -sfn ../opt/postgresql-17/bin/pg_restore ~/.local/bin/pg_restore
+env -i HOME=$HOME PATH=$HOME/.local/bin:/usr/bin:/bin pg_dump --version   # 17.x, as cron sees it
 ```
+
+The tarball bundles its own `libpq` (RUNPATH `$ORIGIN/../lib`); everything else it links (`libssl`, `libcrypto`, `libz`, `libzstd`, `liblz4`, krb5) comes from the system. `ldd ~/.local/opt/postgresql-17/bin/pg_dump` must show nothing "not found". When the guard trips it logs `no usable pg_dump for a v<N> server: ... local pg_dump is v<M>, server is v<N> ... upgrade ~/.local/opt/postgresql-17` for every project, exits 1 and ntfys — the fix is the block above.
 
 ### What counts as a backup
 

@@ -3,19 +3,29 @@
 # - Local: /mnt/steam-slow/backups/<project>/ (7-day rotation)
 # - Remote: Google Drive via rclone (if configured)
 #
-# Every backup is verified before it counts: the dump client must be at least
-# the server's major version, the schema must exist, the archive must be a
-# non-trivial gzip containing the project's sanity table, and a row count of
-# that table must succeed. Anything else is a FAILED backup: the artifact is
-# deleted, the project is reported in the exit status / log / ntfy, and the
-# status file read by pipeline-health-cron.sh records the failure.
+# Every backup is verified before it counts: the pg_dump on PATH must be at
+# least the server's major version, the schema must exist, the archive must
+# be a non-trivial gzip containing the project's sanity table, and a row
+# count of that table must succeed. Anything else is a FAILED backup: the
+# artifact is deleted, the project is reported in the exit status / log /
+# ntfy, and the status file read by pipeline-health-cron.sh records the
+# failure.
+#
+# pg_dump comes from the user-level PostgreSQL 17 client in
+# ~/.local/opt/postgresql-17 (symlinked into ~/.local/bin, put first on PATH
+# below); the distro's postgresql-client is v16 and too old for the servers.
+# No docker involved — see ops/cron/README.md for install/upgrade.
 #
 # History: until 2026-09-10 (#64) this script dumped --schema=<project> while
 # every project keeps its tables in `public`, and ran a v16 pg_dump against
 # v17 servers. Both errors produced 20-byte empty gzips that were rotated and
-# rclone'd as if they were backups.
+# rclone'd as if they were backups. Until 2026-09-19 the v17 client was the
+# postgres:17-alpine docker image; docker is gone from the host.
 
 set -euo pipefail
+
+# cron's PATH is /usr/bin:/bin — ~/.local/bin (pg_dump 17) must come first.
+export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
 
 # Secrets: ANNIE_DB_URL, RELI_DB_URL, FILMDUEL_DB_URL, KINDRED_DB_URL, LACHESIS_DB_URL
 # (+ optional NTFY_TOPIC) loaded from an env file outside the repo. chmod 600.
@@ -83,7 +93,7 @@ backup_project() {
     local name="$1" url_var="$2" schema="$3" table="$4"
     local dir="$BACKUP_ROOT/$name" out errfile rc reason
     local url="${!url_var:-}"
-    local server_major mode found rows
+    local server_major client_major found rows
 
     if [ -z "$url" ]; then
         log "SKIP: $name — $url_var not set (populate $SECRETS_FILE)"
@@ -108,19 +118,18 @@ backup_project() {
     if ! server_major=$(pg_server_major) || [ -z "$server_major" ]; then
         fail "cannot reach the server or read its version"; return 1
     fi
-    if ! mode=$(pg_select_client_mode "$server_major" 2>"$errfile"); then
+    if ! client_major=$(pg_check_client "$server_major" 2>"$errfile"); then
         fail "no usable pg_dump for a v$server_major server: $(scrub < "$errfile" | tr '\n' ' ')"; return 1
     fi
-    export PG_CLIENT_MODE="$mode"
 
-    found=$(pg_run psql -X -Atq -c \
+    found=$(psql -X -Atq -c \
         "SELECT 1 FROM information_schema.schemata WHERE schema_name = '$schema'" 2>"$errfile") || found=""
     if [ "$found" != "1" ]; then
         fail "schema '$schema' not found on the server ($(scrub < "$errfile" | head -1))"; return 1
     fi
 
-    if ! pg_run pg_dump --no-owner --no-acl --schema="$schema" 2>"$errfile" | gzip > "$out"; then
-        fail "pg_dump ($mode, v$server_major server) exited non-zero: $(scrub < "$errfile" | head -2 | tr '\n' ' ')"; return 1
+    if ! pg_dump --no-owner --no-acl --schema="$schema" 2>"$errfile" | gzip > "$out"; then
+        fail "pg_dump (v$client_major client, v$server_major server) exited non-zero: $(scrub < "$errfile" | head -2 | tr '\n' ' ')"; return 1
     fi
     if [ -s "$errfile" ]; then
         log "WARNING: $name pg_dump stderr: $(scrub < "$errfile" | head -3 | tr '\n' ' ')"
@@ -133,12 +142,12 @@ backup_project() {
         fail "archive does not contain ${schema}.${table} — wrong schema or truncated dump"; return 1
     fi
 
-    rows=$(pg_run psql -X -Atq -c "SELECT count(*) FROM ${schema}.${table}" 2>"$errfile") || rows=""
+    rows=$(psql -X -Atq -c "SELECT count(*) FROM ${schema}.${table}" 2>"$errfile") || rows=""
     if ! [[ "$rows" =~ ^[0-9]+$ ]]; then
         fail "row-count query on ${schema}.${table} failed ($(scrub < "$errfile" | head -1))"; return 1
     fi
 
-    log "OK: $name backed up: $out ($(du -h "$out" | cut -f1), $rows rows in ${schema}.${table}, pg_dump via $mode, server v$server_major)"
+    log "OK: $name backed up: $out ($(du -h "$out" | cut -f1), $rows rows in ${schema}.${table}, pg_dump v$client_major from $(command -v pg_dump), server v$server_major)"
     if [ "$rows" = "0" ]; then
         log "WARNING: $name backup has 0 rows in ${schema}.${table} — possible data loss!"
     fi

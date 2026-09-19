@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # Unit tests for ops/cron/lib/pg-backup.sh (URL → libpq env, client/server
-# version selection, archive validation).
+# version guard, archive validation).
 #
 # Run: bunx bats ops/cron/tests/pg-backup.bats
 
@@ -17,25 +17,6 @@ setup() {
 
 teardown() {
     rm -rf "$T"
-}
-
-# docker stub: `image inspect` honours $STUB_DOCKER_IMAGE_RC, `run ... pg_dump
-# --version` prints $STUB_DOCKER_PG_VERSION, everything is recorded in argv.
-stub_docker() {
-    cat > "$T/bin/docker" <<'STUB'
-#!/usr/bin/env bash
-printf '%s ' "$@" >> "$STUB_ARGV"; echo >> "$STUB_ARGV"
-case "$1 $2" in
-    "image inspect") exit "${STUB_DOCKER_IMAGE_RC:-0}" ;;
-    "run "*)
-        for a in "$@"; do
-            [ "$a" = "--version" ] && { echo "pg_dump (PostgreSQL) ${STUB_DOCKER_PG_VERSION:-17.6}"; exit 0; }
-        done
-        echo "env PGPASSWORD=${PGPASSWORD:-unset}"; exit 0 ;;
-esac
-exit 1
-STUB
-    chmod +x "$T/bin/docker"
 }
 
 stub_local_pg_dump() {
@@ -91,7 +72,7 @@ STUB
     [[ "$output" == *"ignoring unsupported URL parameter 'bogus'"* ]]
 }
 
-# ── version parsing / client selection ───────────────────────────────────────
+# ── version parsing / client guard ───────────────────────────────────────────
 
 @test "pg_major_of parses pg_dump --version and SHOW server_version output" {
     [ "$(pg_major_of 'pg_dump (PostgreSQL) 17.6')" = "17" ]
@@ -101,47 +82,37 @@ STUB
     [ "$status" -eq 1 ]
 }
 
-@test "pg_select_client_mode prefers the pinned docker image when it is new enough" {
-    stub_docker; stub_local_pg_dump 16.15
-    export STUB_DOCKER_PG_VERSION=17.6
-    [ "$(pg_select_client_mode 17)" = "docker" ]
+@test "pg_client_major reads the pg_dump first on PATH" {
+    stub_local_pg_dump 17.11
+    [ "$(pg_client_major)" = "17" ]
 }
 
-@test "pg_select_client_mode falls back to local pg_dump only when its major >= server" {
-    stub_docker; export STUB_DOCKER_IMAGE_RC=1
+@test "pg_check_client accepts a pg_dump whose major is >= the server's and prints it" {
     stub_local_pg_dump 17.2
-    [ "$(pg_select_client_mode 16)" = "local" ]
-    [ "$(pg_select_client_mode 17)" = "local" ]
+    [ "$(pg_check_client 16)" = "17" ]
+    [ "$(pg_check_client 17)" = "17" ]
 }
 
-@test "pg_select_client_mode fails loudly when every client is older than the server" {
-    stub_docker; export STUB_DOCKER_IMAGE_RC=1
+@test "pg_check_client fails loudly when pg_dump is older than the server" {
     stub_local_pg_dump 16.15
-    run pg_select_client_mode 17
+    run pg_check_client 17
     [ "$status" -eq 1 ]
     [[ "$output" == *"local pg_dump is v16, server is v17"* ]]
+    [[ "$output" == *"upgrade ~/.local/opt/postgresql-17"* ]]
 }
 
-@test "pg_select_client_mode fails when the docker image is too old and no local pg_dump fits" {
-    stub_docker; export STUB_DOCKER_PG_VERSION=17.6
-    stub_local_pg_dump 16.15
-    run pg_select_client_mode 18
+@test "pg_check_client fails loudly when there is no pg_dump on PATH at all" {
+    PATH="$T/bin" run pg_check_client 17
     [ "$status" -eq 1 ]
-    [[ "$output" == *"pg_dump is v17, server is v18"* ]]
-    [[ "$output" == *"bump PG_BACKUP_IMAGE"* ]]
+    [[ "$output" == *"no pg_dump on PATH"* ]]
+    [[ "$output" == *"postgresql-17"* ]]
 }
 
-@test "pg_run docker passes credentials by environment name, never on the command line" {
-    stub_docker
-    pg_url_to_env "postgresql://alice:hunter2@db.example.com:5432/postgres"
-    export PG_CLIENT_MODE=docker
-    run pg_run pg_dump --schema=public
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"env PGPASSWORD=hunter2"* ]]      # reached the container env
-    grep -q -- '-e PGPASSWORD ' "$STUB_ARGV"
-    ! grep -q 'hunter2' "$STUB_ARGV"
-    ! grep -q 'alice' "$STUB_ARGV"
-    grep -q -- "postgres:17-alpine pg_dump --schema=public" "$STUB_ARGV"
+@test "pg_check_client fails when pg_dump --version is unparseable" {
+    printf '#!/usr/bin/env bash\necho garbage\n' > "$T/bin/pg_dump"; chmod +x "$T/bin/pg_dump"
+    run pg_check_client 17
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"local pg_dump is v?, server is v17"* ]]
 }
 
 # ── pg_validate_archive ──────────────────────────────────────────────────────
