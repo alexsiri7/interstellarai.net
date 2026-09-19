@@ -55,7 +55,7 @@ logged as failed, the run ntfys and exits 1. The exact grants:
 
 ```
 /usr/bin/apt-get update
-/usr/bin/apt-get -y -o Dpkg::Options::=--force-confold upgrade
+/usr/bin/apt-get -y -o Dpkg::Options::=--force-confold full-upgrade
 /usr/bin/apt-get -y autoremove
 /usr/bin/journalctl --vacuum-size=*
 /usr/bin/snap remove --revision=* *
@@ -68,8 +68,38 @@ logged as failed, the run ntfys and exits 1. The exact grants:
 exact-argument matches. `-A` is granted for by-hand attribute dumps under the
 same rules; the job itself only runs `-H`.)
 
-Per run: apt update/upgrade/autoremove with the `apt list --upgradable` count
-logged before and after; every disabled snap revision removed; journal vacuumed
+**Why `full-upgrade`, not `upgrade`:** `apt-get upgrade` never installs a new
+package or removes an old one, so any update whose dependencies changed is
+"kept back" and stays that way every week. The first real run (2026-09-19)
+took the host from 95 upgradable to 28, of which 23 were stuck exactly like
+that: nvidia-driver-595 595.84 -> 595.91 pulls in `nvidia-firmware-595-*`,
+`linux-firmware` split into `linux-firmware-*` sub-packages, fwupd 1.9 -> 2.0
+needs `libfwupd3`, and one old `linux-modules-nvidia-595-open-<kernel>` has to
+go. `full-upgrade` resolves all of those; the remaining 5 were phased updates,
+which both commands leave alone (no `Always-Include-Phased-Updates` override is
+set, and none should be).
+
+**The sudoers grant changed with it (2026-09-19):** a host set up before then
+has the old `... upgrade` shape in `/etc/sudoers.d/archon-cron`, so the weekly
+job's `full-upgrade` call is refused (`sudo -n refused`, step `apt` failed,
+ntfy). Re-run once:
+
+```
+sudo ops/host/install.sh
+```
+
+Step 1 compares the installed file with `sudoers-archon-cron` and replaces it
+when they differ (same `visudo -c` checks and rollback as a first install);
+every other step reports `already done`.
+
+Per run: apt update/full-upgrade/autoremove with the `apt list --upgradable`
+count logged before and after; when anything is still upgradable afterwards,
+`apt-get -s full-upgrade` (read-only, not through sudo) is parsed and the run
+logs which packages are *kept back* (a hold or unsatisfiable deps: stuck until
+someone looks) and which are merely *deferred by phasing* (Ubuntu's staged
+rollout, left alone by apt's default and by design). The kept-back set also
+lands in the status file as `last_run_kept_back=a,b` (empty when none) — it
+does not fail the run. Every disabled snap revision removed; journal vacuumed
 to 500M; `smartctl -H` on each `disk` from `lsblk` (loop devices excluded;
 `SYSTEM_MAINT_SMART_SKIP="sda ..."` leaves a disk out) with an urgent ntfy for
 anything not `PASSED`; and while `/var/run/reboot-required` exists, one ntfy

@@ -12,7 +12,7 @@
 
 Cmnd_Alias ARCHON_MAINT = \
     /usr/bin/apt-get update, \
-    /usr/bin/apt-get -y -o Dpkg\:\:Options\:\:=--force-confold upgrade, \
+    /usr/bin/apt-get -y -o Dpkg\:\:Options\:\:=--force-confold full-upgrade, \
     /usr/bin/apt-get -y autoremove, \
     /usr/bin/journalctl --vacuum-size=*, \
     /usr/bin/snap remove --revision=* *, \

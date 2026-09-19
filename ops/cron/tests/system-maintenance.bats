@@ -19,6 +19,8 @@ setup() {
     export NTFY_LOG="$T/ntfy"         # one line per ntfy: "<title> | <body>"
     export STUB_SMART_FAIL=""         # device names whose smartctl -H is not PASSED
     export STUB_SUDO_REFUSE=0         # 1: sudo -n behaves as if no sudoers entry matched
+    export STUB_APT_KEPT_BACK=""      # packages still upgradable after full-upgrade, "kept back"
+    export STUB_APT_PHASED=""         # packages still upgradable after full-upgrade, deferred by phasing
 
     # sudo: the script calls full paths (/usr/bin/apt-get ...). Re-dispatch on
     # the basename so the stubs on PATH answer, and log the exact argv.
@@ -33,7 +35,14 @@ STUB
     cat > "$T/bin/apt-get" <<'STUB'
 #!/usr/bin/env bash
 case "$*" in
-    *upgrade*) touch "$T/upgraded" ;;
+    "-s "*)   # simulation (never through sudo): the shape real apt-get prints
+        echo "NOTE: This is only a simulation!"
+        echo "Reading package lists..."
+        [ -n "$STUB_APT_KEPT_BACK" ] && printf 'The following packages have been kept back:\n  %s\n' "$STUB_APT_KEPT_BACK"
+        [ -n "$STUB_APT_PHASED" ] && printf 'The following upgrades have been deferred due to phasing:\n  %s\n' "$STUB_APT_PHASED"
+        echo "0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded."
+        exit 0 ;;
+    *full-upgrade*) touch "$T/upgraded" ;;
 esac
 exit "${STUB_APT_RC:-0}"
 STUB
@@ -45,6 +54,9 @@ if [ ! -f "$T/upgraded" ]; then
     echo "nodejs/nodistro 22.20.0-1nodesource1 amd64 [upgradable from: 20.20.2-1nodesource1]"
     echo "vim/noble-updates 2:9.1.0016-1ubuntu7.9 amd64 [upgradable from: 2:9.1.0016-1ubuntu7.8]"
 fi
+for p in $STUB_APT_KEPT_BACK $STUB_APT_PHASED; do
+    echo "$p/noble-updates 2.0-1 amd64 [upgradable from: 1.0-1]"
+done
 STUB
     cat > "$T/bin/snap" <<'STUB'
 #!/usr/bin/env bash
@@ -107,8 +119,11 @@ status_field() { grep "^$1=" "$T/state/system-maintenance-status" | cut -d= -f2-
     [[ "$output" == *"apt: 3 package(s) upgradable before"* ]]
     [[ "$output" == *"apt: 0 package(s) upgradable after (was 3)"* ]]
     grep -qx '/usr/bin/apt-get update' "$STUB_ARGV"
-    grep -qx '/usr/bin/apt-get -y -o Dpkg::Options::=--force-confold upgrade' "$STUB_ARGV"
+    grep -qx '/usr/bin/apt-get -y -o Dpkg::Options::=--force-confold full-upgrade' "$STUB_ARGV"
+    ! grep -q 'apt-get.* upgrade' "$STUB_ARGV"     # plain `upgrade` leaves dep-changing updates kept back
     grep -qx '/usr/bin/apt-get -y autoremove' "$STUB_ARGV"
+    [ "$(status_field last_run_kept_back)" = "" ]
+    [[ "$output" != *"KEPT BACK"* ]]
     grep -qx '/usr/bin/snap remove --revision=1662 astral-uv' "$STUB_ARGV"
     grep -qx '/usr/bin/snap remove --revision=2411 core22' "$STUB_ARGV"
     [ "$(grep -c '/usr/bin/snap remove' "$STUB_ARGV")" -eq 2 ]
@@ -119,6 +134,33 @@ status_field() { grep "^$1=" "$T/state/system-maintenance-status" | cut -d= -f2-
     ! grep -q 'loop0' "$STUB_ARGV"
     [[ "$output" == *"smart: checked 3 disk(s)"* ]]
     ! grep -qv '^/usr/' "$STUB_ARGV"        # nothing privileged ran without a full path
+}
+
+@test "packages kept back after full-upgrade: named in the log and status file, run still ok" {
+    export STUB_APT_KEPT_BACK="fwupd nvidia-driver-595-open"
+    export STUB_APT_PHASED="dnsmasq-base"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ ! -f "$NTFY_LOG" ]
+    [ "$(status_field last_run_status)" = "ok" ]
+    [ "$(status_field last_run_failed)" = "" ]
+    [ "$(status_field last_run_kept_back)" = "fwupd,nvidia-driver-595-open" ]
+    [[ "$output" == *"apt: 3 package(s) upgradable after (was 6)"* ]]
+    [[ "$output" == *"apt: KEPT BACK after full-upgrade"*"fwupd nvidia-driver-595-open"* ]]
+    [[ "$output" == *"apt: deferred by phasing (left alone): dnsmasq-base"* ]]
+    [[ "$output" == *"done (apt 6 -> 3 upgradable, KEPT BACK: fwupd nvidia-driver-595-open,"* ]]
+    # the simulation is read-only and is not a sudoers shape: never through sudo
+    ! grep -q -- 'apt-get -s' "$STUB_ARGV"
+}
+
+@test "only phased updates left after full-upgrade: nothing kept back, status field empty" {
+    export STUB_APT_PHASED="dnsmasq-base libnetplan1"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ "$(status_field last_run_kept_back)" = "" ]
+    [[ "$output" == *"apt: 2 package(s) upgradable after (was 5)"* ]]
+    [[ "$output" == *"apt: deferred by phasing (left alone): dnsmasq-base libnetplan1"* ]]
+    [[ "$output" != *"KEPT BACK"* ]]
 }
 
 @test "SMART FAILED on one disk: urgent ntfy naming the device, run marked failed" {

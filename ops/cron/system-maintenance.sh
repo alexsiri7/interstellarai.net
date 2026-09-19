@@ -7,7 +7,14 @@
 # ops/host/install.sh). `-n` means a missing or drifted sudoers entry fails
 # loud ("sudo: a password is required") instead of hanging on a prompt.
 #
-#   1. apt-get update / upgrade / autoremove (upgradable count logged before and after)
+#   1. apt-get update / full-upgrade / autoremove (upgradable count logged before
+#      and after; anything still upgradable afterwards is explained: kept back
+#      or deferred by phasing). full-upgrade, not upgrade: `upgrade` never
+#      installs a new package or removes an old one, so an update whose deps
+#      changed (nvidia-driver pulling in nvidia-firmware-*, linux-firmware
+#      splitting into sub-packages, fwupd 1.9 -> 2.0 needing libfwupd3) stays
+#      "kept back" forever. Ubuntu phased updates are left alone by apt's default
+#      (APT::Get::Always-Include-Phased-Updates is unset), as they should be.
 #   2. remove every disabled snap revision
 #   3. journalctl --vacuum-size=500M
 #   4. smartctl -H on every disk lsblk reports; ntfy anything not PASSED
@@ -88,6 +95,14 @@ root() {
 
 upgradable_count() { apt list --upgradable 2>/dev/null | grep -c '\[upgradable from:' || true; }
 
+# apt_sim_section <heading regex>: the package names listed under that heading
+# in a `apt-get -s full-upgrade` simulation (needs no root; `-s` is not one of
+# the sudoers shapes and never runs through sudo), space-separated, or empty.
+APT_SIM=""
+apt_sim_section() {
+    printf '%s\n' "$APT_SIM" | awk -v h="$1" '$0 ~ h {on=1; next} on && !/^ / {exit} on {print}' | xargs
+}
+
 mkdir -p "$STATE_DIR"
 log "=== system maintenance start ==="
 
@@ -95,11 +110,27 @@ log "=== system maintenance start ==="
 before=$(upgradable_count)
 log "apt: $before package(s) upgradable before"
 if root apt "$APT_GET" update; then
-    root apt "$APT_GET" -y -o Dpkg::Options::=--force-confold upgrade
+    root apt "$APT_GET" -y -o Dpkg::Options::=--force-confold full-upgrade
     root apt "$APT_GET" -y autoremove
 fi
 after=$(upgradable_count)
 log "apt: $after package(s) upgradable after (was $before)"
+# Anything still upgradable is either kept back (unsatisfiable deps, a hold —
+# stuck until a human looks) or deferred by phasing (fine). Name them so the
+# log says which, and record the kept-back set in the status file.
+kept_back=""; phased=""
+if [ "$after" -gt 0 ]; then
+    APT_SIM=$(apt-get -s -o Dpkg::Options::=--force-confold full-upgrade 2>&1)
+    kept_back=$(apt_sim_section '^The following packages have been kept back:')
+    phased=$(apt_sim_section '^The following upgrades have been deferred due to phasing:')
+    [ -n "$phased" ] && log "apt: deferred by phasing (left alone): $phased"
+    if [ -n "$kept_back" ]; then
+        log "apt: KEPT BACK after full-upgrade (needs a look — hold, or unsatisfiable deps): $kept_back"
+    elif [ -z "$phased" ]; then
+        log "apt: $after still upgradable but the simulation lists nothing kept back or phased:"
+        printf '%s\n' "$APT_SIM" | grep -vE '^(NOTE:|      |Inst |Conf |Remv )' | sed 's/^/    /'
+    fi
+fi
 
 # --- 2. snap ----------------------------------------------------------------
 removed=0
@@ -164,6 +195,7 @@ fi
     echo "last_run=$now"
     echo "last_run_status=$run_status"
     echo "last_run_failed=$failed_csv"
+    echo "last_run_kept_back=$(printf '%s' "$kept_back" | tr ' ' ',')"
     echo "last_ok=${last_ok:-0}"
 } > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
 
@@ -174,4 +206,4 @@ if [ ${#FAILED[@]} -gt 0 ]; then
         high warning
     exit 1
 fi
-log "=== system maintenance done (apt $before -> $after upgradable, $removed snap rev(s) removed, $checked disk(s) PASSED) ==="
+log "=== system maintenance done (apt $before -> $after upgradable${kept_back:+, KEPT BACK: $kept_back}, $removed snap rev(s) removed, $checked disk(s) PASSED) ==="
