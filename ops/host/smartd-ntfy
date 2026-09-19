@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# smartd-ntfy — installed to /usr/local/bin by ops/host/install.sh.
+# Called by smartd (as root) through `-M exec` in /etc/smartd.conf whenever a
+# monitored disk trips a health, attribute, error-log or self-test check.
+# smartd passes the event in SMARTD_* environment variables; this posts them
+# to the private ntfy topic the archon cron scripts use.
+#
+# The secrets file is user-owned and 0600, so it is grepped, never sourced:
+# root must not execute a file asiri can edit.
+set -u
+
+SECRETS="${SMARTD_NTFY_SECRETS:-/home/asiri/.config/archon-cron/secrets.env}"
+NTFY_TOPIC=""
+if [ -r "$SECRETS" ]; then
+    NTFY_TOPIC=$(grep -E '^NTFY_TOPIC=' "$SECRETS" | head -n1 | cut -d= -f2- | tr -d '"'"'")
+fi
+if [ -z "$NTFY_TOPIC" ]; then
+    logger -t smartd-ntfy "NTFY_TOPIC not found in $SECRETS — SMART alert NOT delivered: ${SMARTD_SUBJECT:-?}"
+    exit 1
+fi
+
+title="SMART ${SMARTD_FAILTYPE:-alert}: ${SMARTD_DEVICESTRING:-${SMARTD_DEVICE:-unknown device}} on $(hostname)"
+body="${SMARTD_FULLMESSAGE:-${SMARTD_MESSAGE:-${SMARTD_SUBJECT:-smartd raised an alert with no message}}}"
+
+if curl -s --fail -o /dev/null --max-time 20 \
+    -H "Title: $title" -H "Priority: urgent" -H "Tags: rotating_light,floppy_disk" \
+    -d "$body" "https://ntfy.sh/$NTFY_TOPIC"; then
+    logger -t smartd-ntfy "ntfy sent: $title"
+else
+    logger -t smartd-ntfy "ntfy FAILED (curl exit $?): $title — $body"
+    exit 1
+fi

@@ -1784,6 +1784,56 @@ check_db_backup() {
 }
 
 # ----------------------------------------------------------------------------
+# Check 9b: weekly system maintenance. system-maintenance.sh (cron, Sundays
+#   04:00) writes $STATE_DIR/system-maintenance-status in the db-backup-status
+#   shape. It ntfys its own failures; this catches the run that never happened
+#   (crontab not installed, script crashing before it logs) and the failure
+#   whose ntfy did not get through: alert once when the last run reports
+#   `failed`, or when no successful run landed within
+#   SYSTEM_MAINTENANCE_MAX_AGE_D days (default 8: one missed weekly run).
+# ----------------------------------------------------------------------------
+check_system_maintenance() {
+  local status_file="$STATE_DIR/system-maintenance-status"
+  local marker="$STATE_DIR/system-maintenance-alerted"
+  local max_age_d="${SYSTEM_MAINTENANCE_MAX_AGE_D:-8}"
+  local max_age=$(( max_age_d * 86400 ))
+  local now last_ok=0 last_run=0 last_status="" last_failed="" problem=""
+  now=$(date +%s)
+
+  if [ -f "$status_file" ]; then
+    last_ok=$(grep -s '^last_ok=' "$status_file" | cut -d= -f2)
+    last_run=$(grep -s '^last_run=' "$status_file" | cut -d= -f2)
+    last_status=$(grep -s '^last_run_status=' "$status_file" | cut -d= -f2)
+    last_failed=$(grep -s '^last_run_failed=' "$status_file" | cut -d= -f2)
+    [[ "$last_ok" =~ ^[0-9]+$ ]] || last_ok=0
+    [[ "$last_run" =~ ^[0-9]+$ ]] || last_run=0
+  fi
+
+  if [ "$last_status" = "failed" ]; then
+    problem="last system-maintenance run failed${last_failed:+ ($last_failed)}, $(( (now - last_run) / 3600 ))h ago"
+  elif [ "$last_ok" -eq 0 ]; then
+    problem="no successful system-maintenance run recorded ($status_file missing or never ok)"
+  elif [ $(( now - last_ok )) -gt "$max_age" ]; then
+    problem="last successful system-maintenance run $(( (now - last_ok) / 86400 ))d ago (limit ${max_age_d}d)"
+  fi
+
+  if [ -z "$problem" ]; then
+    if [ -f "$marker" ]; then
+      rm -f "$marker"
+      log "system-maintenance: recovered — successful run landed"
+    fi
+    return 0
+  fi
+
+  log "system-maintenance: $problem"
+  [ -f "$marker" ] && return 0   # alert once per episode
+  notify "System maintenance stale" \
+    "$problem. Check /tmp/system-maintenance.log; run ops/cron/system-maintenance.sh by hand, or sudo ops/host/install.sh if sudo -n is refused." \
+    high wrench
+  touch "$marker"
+}
+
+# ----------------------------------------------------------------------------
 # Check 10: Paused archon runs nothing will resume. reconcile_zombies reaps
 # stale `running` rows and deliberately leaves `paused` ones to the server's
 # continuation scheduler; this is the other half — the runs that scheduler has
@@ -1858,5 +1908,6 @@ reconcile_zombies
 check_parked_runs
 check_disk
 check_db_backup
+check_system_maintenance
 check_progress
 log "=== done ==="
