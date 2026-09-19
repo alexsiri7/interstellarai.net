@@ -12,7 +12,10 @@
 #      (dedup per project+workflow in scheduled-health/ subdir)
 #   2. Prod deploy failed or lagging main HEAD → file issue + fire archon (dedup by SHA)
 #   3. Zombie archon DB runs (status=running, age >4h) → abandon
-#   4. Disk >85% on / or /mnt/ext-fast → ntfy
+#   4. Disk >85% on / or /mnt/ext-fast → ntfy. For `/`, run a conservative
+#      autoclean first (go/bun/npm/uv/pip caches, user journal, idle Gradle
+#      version caches, APK builds >30d, stale archon worktrees, stale /tmp
+#      dirs) and only ntfy if still >=85%; every failing step is logged
 #   5. No pipeline progress in last tick (no commits, no archon completions)
 #      while work is pending (queued/in-progress issues or actionable PRs):
 #        - If token-limit markers in recent logs → wait, retry next tick
@@ -32,7 +35,8 @@
 
 set -uo pipefail
 
-export PATH="$HOME/.bun/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
+# /snap/bin: uv (and go) are snaps, and cron does not put it on PATH.
+export PATH="$HOME/.bun/bin:$HOME/.local/bin:/usr/local/bin:/snap/bin:$PATH"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/archon-projects.sh
@@ -952,33 +956,157 @@ reconcile_zombies() {
 
 # ----------------------------------------------------------------------------
 # Check 3: Disk warning — ntfy if / or /mnt/ext-fast above 85%. For `/`,
-# attempt conservative, non-destructive cache cleanup first; only ntfy if
-# still over threshold after cleanup. Never touches /tmp or user data.
+# attempt conservative cache cleanup first; only ntfy if still over threshold
+# after cleanup. Every step is non-fatal and every failure is logged with its
+# exit code: a step that fails silently is one that never frees anything.
 # ----------------------------------------------------------------------------
 disk_used_pct() {
   df -P "$1" 2>/dev/null | awk 'NR==2 { gsub("%",""); print $5 }'
 }
 
+dir_size_mb() {
+  if [ -z "$1" ] || [ ! -d "$1" ]; then echo 0; return; fi
+  du -sm "$1" 2>/dev/null | cut -f1 || echo 0
+}
+
+# autoclean_step <label> <dir-or-empty> <cmd...>
+# Runs one cleanup command, logging the outcome instead of swallowing it.
+# When a target dir is given, reports how many MB it lost. Always returns 0
+# so a failing step never aborts the ones after it.
+autoclean_step() {
+  local label="$1" dir="$2"; shift 2
+  local before=0 out rc=0
+  [ -n "$dir" ] && before=$(dir_size_mb "$dir")
+  out=$("$@" 2>&1) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    local reason; reason=$(printf '%s\n' "$out" | grep -v '^$' | tail -n1)
+    log "autoclean: $label failed (exit $rc)${reason:+: $reason}"
+    return 0
+  fi
+  if [ -n "$dir" ]; then
+    log "autoclean: $label ok — freed $((before - $(dir_size_mb "$dir")))MB"
+  else
+    log "autoclean: $label ok"
+  fi
+  return 0
+}
+
+# bun_pm_cache [args...] — `bun pm cache` and `bun pm cache rm` (bun 1.3.x)
+# exit 1 with "No package.json was found" unless the cwd holds a manifest.
+# Cron's cwd is $HOME, so the step failed on every tick and `|| true` hid it
+# while the cache grew to 14 GB. Run bun from a throwaway dir with an empty
+# manifest instead.
+# shellcheck disable=SC2120  # called both bare (print dir) and with `rm`
+bun_pm_cache() {
+  local dir rc=0
+  dir=$(mktemp -d) || return 1
+  echo '{}' > "$dir/package.json"
+  (cd "$dir" && bun pm cache "$@") || rc=$?
+  rm -rf "$dir"
+  return "$rc"
+}
+
 autoclean_root() {
-  # Each step is wrapped so a single failure doesn't abort the rest.
   if command -v go >/dev/null 2>&1; then
-    log "autoclean: go clean -cache"
-    go clean -cache >/dev/null 2>&1 || true
+    autoclean_step "go clean -cache" "$(go env GOCACHE 2>/dev/null)" go clean -cache
   fi
   if command -v bun >/dev/null 2>&1; then
-    log "autoclean: bun pm cache rm"
-    bun pm cache rm >/dev/null 2>&1 || true
+    # shellcheck disable=SC2119
+    autoclean_step "bun pm cache rm" "$(bun_pm_cache 2>/dev/null)" bun_pm_cache rm
   fi
   if command -v npm >/dev/null 2>&1; then
-    log "autoclean: npm cache clean --force"
-    npm cache clean --force >/dev/null 2>&1 || true
+    autoclean_step "npm cache clean --force" "$(npm config get cache 2>/dev/null)" npm cache clean --force
+  fi
+  if command -v uv >/dev/null 2>&1; then
+    autoclean_step "uv cache prune" "$(uv cache dir 2>/dev/null)" uv cache prune
+  fi
+  if command -v pip >/dev/null 2>&1; then
+    # `pip cache purge` exits 1 when there is nothing to purge — only run it
+    # against a populated cache so an empty one is not logged as a failure.
+    local pip_cache; pip_cache=$(pip cache dir 2>/dev/null)
+    if [ -n "$pip_cache" ] && find "$pip_cache" -type f -print -quit 2>/dev/null | grep -q .; then
+      autoclean_step "pip cache purge" "$pip_cache" pip cache purge
+    fi
   fi
   if command -v journalctl >/dev/null 2>&1; then
-    log "autoclean: journalctl --user --vacuum-time=7d"
-    journalctl --user --vacuum-time=7d >/dev/null 2>&1 || true
+    autoclean_step "journalctl --user --vacuum-time=7d" "" journalctl --user --vacuum-time=7d
   fi
+  autoclean_idle_dir "$HOME/.cache/puccinialin" 30
+  autoclean_gradle_caches
+  autoclean_apks
   autoclean_stale_worktrees
   autoclean_tmp
+}
+
+# autoclean_idle_dir <dir> <days> — remove a whole directory when nothing in
+# it has been written for <days> days. Used for caches that are rebuilt on
+# demand and have no prune command of their own.
+autoclean_idle_dir() {
+  local dir="$1" days="$2"
+  [ -d "$dir" ] || return 0
+  if find "$dir" -type f -mtime "-$days" -print -quit 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  local size rc=0; size=$(dir_size_mb "$dir")
+  rm -rf "$dir" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    log "autoclean: rm -rf $dir failed (exit $rc)"
+  else
+    log "autoclean: removed $dir (idle >${days}d) — freed ${size}MB"
+  fi
+  return 0
+}
+
+# Gradle keeps one cache tree per Gradle version under ~/.gradle/caches
+# (8.14, 8.14.1, 9.0.0, ...). A version no wrapper has used for 30 days is
+# dead weight — 9.0.0 + 9.4.1 sat at 2.7 GB with nothing written since
+# August. Only version-named dirs are candidates: modules-2, jars-*, journal-1
+# and the transforms inside a live version are never touched.
+autoclean_gradle_caches() {
+  local caches="${PIPELINE_HEALTH_GRADLE_CACHES:-$HOME/.gradle/caches}"
+  [ -d "$caches" ] || return 0
+  local dir name
+  for dir in "$caches"/*/; do
+    [ -d "$dir" ] || continue
+    dir="${dir%/}"; name=$(basename "$dir")
+    [[ "$name" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || continue
+    autoclean_idle_dir "$dir" 30
+  done
+  return 0
+}
+
+# auto-apk-sync.sh writes <project>-<sha>.apk plus a <project>-latest.apk
+# symlink and never prunes: 150 builds / 7.1 GB by 2026-09. Drop builds older
+# than 30 days unless a *-latest.* symlink in the same dir resolves to them.
+# Symlinks themselves are never candidates (-type f).
+autoclean_apks() {
+  local apk_dir="${PIPELINE_HEALTH_APK_DIR:-$HOME/apks}"
+  local dir total=0 removed=0
+  for dir in "$apk_dir" "$apk_dir/aab"; do
+    [ -d "$dir" ] || continue
+    local keep="" link target
+    for link in "$dir"/*-latest.*; do
+      [ -L "$link" ] || continue
+      target=$(readlink -f "$link" 2>/dev/null) || continue
+      keep+="$target"$'\n'
+    done
+    local f resolved sz rc
+    while IFS= read -r f; do
+      resolved=$(readlink -f "$f" 2>/dev/null) || resolved="$f"
+      if printf '%s' "$keep" | grep -qxF "$resolved"; then
+        continue
+      fi
+      sz=$(du -sb "$f" 2>/dev/null | cut -f1); sz="${sz:-0}"
+      rc=0; rm -f "$f" || rc=$?
+      if [ "$rc" -ne 0 ]; then
+        log "autoclean: rm $f failed (exit $rc)"
+      else
+        total=$((total + sz)); removed=$((removed + 1))
+      fi
+    done < <(find "$dir" -mindepth 1 -maxdepth 1 -type f \( -name '*.apk' -o -name '*.aab' \) -mtime +30 2>/dev/null)
+  done
+  [ "$removed" -gt 0 ] && log "autoclean: removed $removed APK/AAB builds older than 30d under $apk_dir — freed $((total / 1048576))MB"
+  return 0
 }
 
 # Remove stale Archon worktrees from ~/.archon/workspaces whose branch has no
@@ -1012,21 +1140,37 @@ autoclean_stale_worktrees() {
         if find "$wt_path" -maxdepth 0 -mmin -240 2>/dev/null | grep -q .; then
           continue
         fi
-        rm -rf "$wt_path" 2>/dev/null || true
+        local rc=0
+        rm -rf "$wt_path" 2>/dev/null || rc=$?
+        if [ "$rc" -ne 0 ]; then
+          log "autoclean: rm -rf $wt_path failed (exit $rc)"
+          continue
+        fi
         removed=$((removed + 1))
       done < <(find "$wt_base" -maxdepth 1 -type d -name 'task-archon-*' 2>/dev/null)
     done
 
     if [ "$removed" -gt 0 ]; then
-      git -C "$repo_dir" worktree prune --expire now 2>/dev/null || true
+      git -C "$repo_dir" worktree prune --expire now 2>/dev/null \
+        || log "autoclean: git worktree prune failed for $project (exit $?)"
       log "autoclean: pruned $removed stale worktrees for $project"
     fi
   done
 }
 
-# Remove known build/test artifacts from /tmp that are older than 1 day.
-# Patterns are scoped to avoid touching unrelated files.
+# Remove stale build/test artifacts from the tmp root ($PIPELINE_HEALTH_TMP_ROOT,
+# default /tmp). Two rules:
+#   1. Known artifact names (patterns below) older than 1 day, files or dirs.
+#   2. Any top-level *directory* owned by this user that nothing has written to
+#      for 3 days, except session/runtime dirs (claude-*, tmux-*, ssh-*,
+#      pulse-*, dbus-*, systemd-*, snap-*) and dotfiles. Agent sessions leave
+#      venvs, JDK extracts, node tarballs and review checkouts behind under
+#      arbitrary names — 300 of them held 6.6 GB by 2026-09.
+# Rule 2 never removes a regular file: the cron logs (/tmp/*.log) and state
+# files (/tmp/.archon-active-runs.*, /tmp/.pr-review-fire.*) live here.
 autoclean_tmp() {
+  local tmp_root="${PIPELINE_HEALTH_TMP_ROOT:-/tmp}"
+  [ -n "$tmp_root" ] && [ -d "$tmp_root" ] || return 0
   local patterns=(
     "flutter-sdk"
     "flutter_tools.*"
@@ -1042,14 +1186,35 @@ autoclean_tmp() {
     "llama-cpp.tar.gz"
     "llama-cpp"
   )
-  local total=0
+  local total=0 removed=0 f sz rc
   for pat in "${patterns[@]}"; do
     while IFS= read -r f; do
-      local sz; sz=$(du -sb "$f" 2>/dev/null | cut -f1 || echo 0)
-      rm -rf "$f" 2>/dev/null && total=$((total + sz)) || true
-    done < <(find /tmp -maxdepth 1 -name "$pat" -mtime +1 2>/dev/null)
+      sz=$(du -sb "$f" 2>/dev/null | cut -f1); sz="${sz:-0}"
+      rc=0; rm -rf "$f" 2>/dev/null || rc=$?
+      if [ "$rc" -ne 0 ]; then
+        log "autoclean: rm -rf $f failed (exit $rc)"
+        continue
+      fi
+      total=$((total + sz)); removed=$((removed + 1))
+    done < <(find "$tmp_root" -mindepth 1 -maxdepth 1 -name "$pat" -mtime +1 2>/dev/null)
   done
-  [ "$total" -gt 0 ] && log "autoclean: freed $((total / 1048576))MB from /tmp stale artifacts"
+
+  local me; me=$(id -un)
+  while IFS= read -r f; do
+    case "$(basename "$f")" in
+      .*|claude-*|tmux-*|ssh-*|pulse-*|dbus-*|systemd-*|snap-*) continue ;;
+    esac
+    sz=$(du -sb "$f" 2>/dev/null | cut -f1); sz="${sz:-0}"
+    rc=0; rm -rf "$f" 2>/dev/null || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      log "autoclean: rm -rf $f failed (exit $rc)"
+      continue
+    fi
+    total=$((total + sz)); removed=$((removed + 1))
+  done < <(find "$tmp_root" -mindepth 1 -maxdepth 1 -type d -user "$me" -mmin +4320 2>/dev/null)
+
+  [ "$removed" -gt 0 ] && log "autoclean: removed $removed stale entries from $tmp_root — freed $((total / 1048576))MB"
+  return 0
 }
 
 check_disk() {
@@ -1069,7 +1234,7 @@ check_disk() {
         if [ "$after" -ge 85 ]; then
           log "disk / still at ${after}% after cleanup — ntfying"
           notify "Disk warning: / ${after}% (was ${before}%)" \
-            "Autoclean ran (go/bun/npm caches, journal vacuum) but disk still >=85%. Investigate manually." \
+            "Autoclean ran (go/bun/npm/uv/pip caches, journal vacuum, idle Gradle caches, old APKs, stale worktrees and /tmp dirs) but disk still >=85%. See /tmp/pipeline-health.log for per-step results." \
             high warning
         else
           log "disk / recovered (${before}% → ${after}%) — no ntfy"
