@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Helpers for ops/cron/backup-dbs.sh. Sourced, never executed.
+# Helpers for ops/cron/backup-dbs.sh and ops/cron/restore-test.sh. Sourced,
+# never executed.
 #
 # The helpers never print a connection URL or password. Credentials travel
 # to pg_dump/psql through the libpq PG* environment (PGHOST, PGUSER,
@@ -13,6 +14,22 @@
 #   PG_BACKUP_MIN_BYTES  smallest compressed archive accepted as a backup
 
 : "${PG_BACKUP_MIN_BYTES:=1024}"
+
+# The backed-up projects, shared by backup-dbs.sh (dump + verify) and
+# restore-test.sh (restore the archive somewhere else and re-verify):
+#   project | URL variable | schema | sanity table (quoted as SQL needs it)
+# All five live on Supabase with their tables in `public`; backup-dbs.sh
+# still verifies the schema on the server at runtime so a migration to a
+# per-project schema fails loudly there instead of silently producing an
+# empty dump.
+# shellcheck disable=SC2034  # consumed by the sourcing scripts
+PG_BACKUP_PROJECTS=(
+    'annie|ANNIE_DB_URL|public|"Project"'
+    'reli|RELI_DB_URL|public|things'
+    'filmduel|FILMDUEL_DB_URL|public|users'
+    'kindred|KINDRED_DB_URL|public|entries'
+    'lachesis|LACHESIS_DB_URL|public|lachesis_backlog'
+)
 
 # pg_url_percent_decode STRING → prints STRING with %XX sequences decoded.
 pg_url_percent_decode() {

@@ -192,3 +192,31 @@ archives() { find "$T/backups/reli" -name '*.sql.gz' 2>/dev/null; }
     [ "$status" -eq 1 ]
     [ -f "$T/ntfy-called" ]
 }
+
+@test "verified backup writes a .meta sidecar with the row count restore-test.sh checks against" {
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    meta=$(archives | head -1).meta
+    [ -f "$meta" ]
+    grep -q '^rows=224$' "$meta"
+    grep -q '^table=public.things$' "$meta"
+}
+
+@test "a FAILED backup leaves no .meta sidecar behind" {
+    export STUB_ROWS=ERR
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(find "$T/backups/reli" -name '*.meta' 2>/dev/null | wc -l)" -eq 0 ]
+}
+
+@test "rotation removes the .meta sidecar together with its archive" {
+    mkdir -p "$T/backups/reli"
+    printf 'old' > "$T/backups/reli/reli-20260901-001701.sql.gz"
+    printf 'rows=1\ntable=public.things\n' > "$T/backups/reli/reli-20260901-001701.sql.gz.meta"
+    touch -d '10 days ago' "$T/backups/reli/reli-20260901-001701.sql.gz" "$T/backups/reli/reli-20260901-001701.sql.gz.meta"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ ! -f "$T/backups/reli/reli-20260901-001701.sql.gz" ]
+    [ ! -f "$T/backups/reli/reli-20260901-001701.sql.gz.meta" ]
+    [ "$(archives | wc -l)" -eq 1 ]
+}
