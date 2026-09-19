@@ -1889,6 +1889,58 @@ check_system_maintenance() {
 }
 
 # ----------------------------------------------------------------------------
+# Check 9d: weekly Archon engine update. archon-update.sh (cron, Sundays
+#   03:00) writes $STATE_DIR/archon-update-status in the system-maintenance
+#   shape plus outcome=noop|deferred|updated|failed. It ntfys its own failures
+#   and successful updates; this catches the run that never happened and the
+#   update that keeps being deferred behind live runs (a deferred run leaves
+#   last_ok alone): alert once when the last run reports `failed`, or when no
+#   ok run (a no-op counts) landed within ARCHON_UPDATE_MAX_AGE_D days
+#   (default 8: one missed weekly run).
+# ----------------------------------------------------------------------------
+check_archon_update() {
+  local status_file="$STATE_DIR/archon-update-status"
+  local marker="$STATE_DIR/archon-update-alerted"
+  local max_age_d="${ARCHON_UPDATE_MAX_AGE_D:-8}"
+  local max_age=$(( max_age_d * 86400 ))
+  local now last_ok=0 last_run=0 last_status="" last_failed="" latest="" problem=""
+  now=$(date +%s)
+
+  if [ -f "$status_file" ]; then
+    last_ok=$(grep -s '^last_ok=' "$status_file" | cut -d= -f2)
+    last_run=$(grep -s '^last_run=' "$status_file" | cut -d= -f2)
+    last_status=$(grep -s '^last_run_status=' "$status_file" | cut -d= -f2)
+    last_failed=$(grep -s '^last_run_failed=' "$status_file" | cut -d= -f2)
+    latest=$(grep -s '^latest=' "$status_file" | cut -d= -f2)
+    [[ "$last_ok" =~ ^[0-9]+$ ]] || last_ok=0
+    [[ "$last_run" =~ ^[0-9]+$ ]] || last_run=0
+  fi
+
+  if [ "$last_status" = "failed" ]; then
+    problem="last archon-update run failed${last_failed:+ ($last_failed)}${latest:+ bringing in $latest}, $(( (now - last_run) / 3600 ))h ago"
+  elif [ "$last_ok" -eq 0 ]; then
+    problem="no successful archon-update run recorded ($status_file missing or never ok)"
+  elif [ $(( now - last_ok )) -gt "$max_age" ]; then
+    problem="last successful archon-update run $(( (now - last_ok) / 86400 ))d ago (limit ${max_age_d}d)"
+  fi
+
+  if [ -z "$problem" ]; then
+    if [ -f "$marker" ]; then
+      rm -f "$marker"
+      log "archon-update: recovered — successful run landed"
+    fi
+    return 0
+  fi
+
+  log "archon-update: $problem"
+  [ -f "$marker" ] && return 0   # alert once per episode
+  notify "Archon update stale or failed" \
+    "$problem. Check $LOG_DIR/archon-update.log; run ops/cron/archon-update.sh by hand (runbook: ops/cron/README.md, 'Archon auto-update')." \
+    high wrench
+  touch "$marker"
+}
+
+# ----------------------------------------------------------------------------
 # Check 9c: DB restore test. restore-test.sh (cron, Sunday 04:30) restores the
 #   newest archive of every project into a throwaway cluster and writes
 #   $STATE_DIR/restore-test-status (last_ok=<epoch of the last run in which
@@ -2019,6 +2071,7 @@ check_parked_runs
 check_disk
 check_db_backup
 check_system_maintenance
+check_archon_update
 check_restore_test
 check_progress
 log "=== done ==="
