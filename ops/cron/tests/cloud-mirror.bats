@@ -101,10 +101,22 @@ status_val() { grep "^$1=" "$T/state/cloud-mirror-status" | cut -d= -f2; }
     [ "$(sed -n 3p "$STUB_ARGV")" = "$NAS_ROOT/gdrive" ]
     grep -qx -- '--backup-dir' "$STUB_ARGV"
     grep -qx -- "$NAS_ROOT/.versions/gdrive/$(date +%Y%m%d)" "$STUB_ARGV"
-    grep -qx -- '--exclude' "$STUB_ARGV"
-    grep -qxF -- 'backups/**' "$STUB_ARGV"
+    # exclude file (committed next to the script) instead of inline --exclude
+    grep -qx -- '--exclude-from' "$STUB_ARGV"
+    grep -qx -- "$CRON_DIR/cloud-mirror.excludes" "$STUB_ARGV"
+    ! grep -qx -- '--exclude' "$STUB_ARGV"
+    grep -qxF -- 'backups/**' "$CRON_DIR/cloud-mirror.excludes"
+    grep -qxF -- '/Choir/Choir/**' "$CRON_DIR/cloud-mirror.excludes"
+    grep -qxF -- '/Travel/Greece Apr 2022/Greece Apr 2022/**' "$CRON_DIR/cloud-mirror.excludes"
+    # every pattern line is either backups/** or an anchored /dir/** the loop detector can read back
+    ! grep -v '^#' "$CRON_DIR/cloud-mirror.excludes" | grep -v '^$' | grep -qvE '^(backups/\*\*|/.+/\*\*)$'
     grep -qx -- '--drive-acknowledge-abuse' "$STUB_ARGV"
-    grep -qx -- '--fast-list' "$STUB_ARGV"
+    grep -qx -- '--drive-skip-dangling-shortcuts' "$STUB_ARGV"
+    # a self-referencing Drive shortcut made --fast-list hang for 17 minutes
+    ! grep -qx -- '--fast-list' "$STUB_ARGV"
+    [ "$(grep -A1 -x -- '--max-depth' "$STUB_ARGV" | tail -1)" = 40 ]
+    [ "$(grep -A1 -x -- '--log-level' "$STUB_ARGV" | tail -1)" = INFO ]
+    [ "$(grep -A1 -x -- '--stats-log-level' "$STUB_ARGV" | tail -1)" = NOTICE ]
     grep -qx -- '--create-empty-src-dirs' "$STUB_ARGV"
     ! grep -qx -- '--dry-run' "$STUB_ARGV"
     [ "$(photo 'Photos from 2026/a.jpg')" = photo-a ]
@@ -320,4 +332,50 @@ status_val() { grep "^$1=" "$T/state/cloud-mirror-status" | cut -d= -f2; }
     [ ! -e "$NAS_ROOT/photos/Takeout" ]
     [ -z "$(find "$NAS_ROOT/photos" -maxdepth 1 -name '.staging.*')" ]
     [ "$(manifest_lines)" -eq 2 ]
+}
+
+@test "CLOUD_MIRROR_EXCLUDES overrides the exclude file passed to rclone; anchored /dir/** lines silence the loop detector for that tree" {
+    printf '# test\nbackups/**\n/Loop/Loop/**\n' > "$T/my.excludes"
+    export CLOUD_MIRROR_EXCLUDES="$T/my.excludes"
+    mkdir -p "$T/deliver/Loop/Loop/Loop/Loop/Loop/Loop/Loop"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ "$(grep -A1 -x -- '--exclude-from' "$STUB_ARGV" | tail -1)" = "$T/my.excludes" ]
+    [[ "$output" != *"WARNING: self-referencing"* ]]
+    [ ! -f "$T/ntfy-called" ]
+}
+
+@test "a missing exclude file fails the run before rclone is called" {
+    export CLOUD_MIRROR_EXCLUDES="$T/nope.excludes"
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"exclude file $T/nope.excludes is missing"* ]]
+    [ ! -f "$STUB_ARGV" ]
+    [ "$(status_val last_run_failed)" = excludes-missing ]
+    grep -q 'Title: Cloud mirror FAILED' "$T/ntfy-called"
+}
+
+@test "nesting detector: a directory nested 5+ times under its own name is named in a WARNING ntfy, the run still succeeds" {
+    mkdir -p "$T/deliver/Choir/Photos/a/a/a/a/a/a/deeper" "$T/deliver/Choir/Photos/a/a/a/a/a/a/other"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARNING: self-referencing folder nesting in the mirror"*"Choir/Photos/a/a/a/a/a"* ]]
+    # only the shortest path of the loop, once — not every deeper directory
+    [ "$(grep -o 'Choir/Photos/a/a/a/a/a[^ ]*' <<< "$output" | grep -c .)" -eq 1 ]
+    grep -q 'Title: Cloud mirror WARNING: folder loop in the mirror' "$T/ntfy-called"
+    ! grep -q 'Title: Cloud mirror FAILED' "$T/ntfy-called"
+    [ "$(status_val last_run_status)" = ok ]
+}
+
+@test "nesting detector stays silent for repeats below 5, non-consecutive repeats and --takeout-only" {
+    mkdir -p "$T/deliver/b/b/b/b/x" "$T/deliver/c/d/c/d/c/d/c/d/c/d"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"WARNING: self-referencing"* ]]
+    [ ! -f "$T/ntfy-called" ]
+    mkdir -p "$NAS_ROOT/gdrive/e/e/e/e/e/e"
+    run "$SCRIPT" --takeout-only
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"WARNING: self-referencing"* ]]
+    [ ! -f "$T/ntfy-called" ]
 }

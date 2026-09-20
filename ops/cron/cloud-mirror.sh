@@ -30,10 +30,13 @@
 # directory found in source - ignoring"), so no fixed folder path is assumed.
 #
 # Steps: marker → free-space guard (CLOUD_MIRROR_MIN_FREE_GIB, 20) → flock →
-# rclone sync (exit 0 or 9 ok; a nonzero exit whose only ERROR lines are
-# duplicate-directory notices is ok; anything else fails) → prune .versions →
-# ingest (gzip -t / unzip -t, extract, manifest; a corrupt archive fails that
-# archive and the run continues) → status file → ntfy on any failure → exit 1.
+# rclone sync (--exclude-from cloud-mirror.excludes next to this script,
+# --max-depth 40 as a loop guard, no --fast-list; exit 0 or 9 ok; a nonzero
+# exit whose only ERROR lines are duplicate-directory notices is ok; anything
+# else fails) → shortcut-loop detector (a path nesting the same name 5+ times
+# → ntfy WARNING, not a failure) → prune .versions → ingest (gzip -t /
+# unzip -t, extract, manifest; a corrupt archive fails that archive and the
+# run continues) → status file → ntfy on any failure → exit 1.
 #
 # Status: $HOME/.archon/pipeline-health-state/cloud-mirror-status (last_run,
 # last_run_status, last_run_failed, last_ok, newest_takeout_epoch = mtime of the
@@ -70,8 +73,17 @@ SECRETS_FILE="${ARCHON_CRON_SECRETS:-$HOME/.config/archon-cron/secrets.env}"
 # shellcheck source=/dev/null
 [ -r "$SECRETS_FILE" ] && . "$SECRETS_FILE"
 
+CRON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NAS_ROOT="${NAS_ROOT:-/mnt/ext-fast/nas}"
 RCLONE_REMOTE="${CLOUD_MIRROR_REMOTE:-gdrive-full:}"
+# rclone --exclude-from: Drive's backups/ (this machine's own uploads) and the
+# known self-referencing shortcut loops. One pattern per line, see the file.
+EXCLUDES_FILE="${CLOUD_MIRROR_EXCLUDES:-$CRON_DIR/cloud-mirror.excludes}"
+# Loop guard: a Drive shortcut pointing at its own parent makes the walk
+# infinite; rclone stops descending here, and the nesting detector below
+# names the loop so it can be removed in Drive.
+MAX_DEPTH=40
+NESTING_MIN_REPEATS=5
 MIRROR_DIR="$NAS_ROOT/gdrive"
 VERSIONS_DIR="$NAS_ROOT/.versions/gdrive"
 PHOTOS_DIR="$NAS_ROOT/photos"
@@ -206,14 +218,57 @@ rclone_ok() {  # rc outfile
     return 1
 }
 
+# The mirror's directory tree, one relative path per line, with any path whose
+# basename repeats NESTING_MIN_REPEATS+ times in a row (a/a/a/a/a): the
+# footprint of a Drive shortcut pointing at its own parent, which rclone
+# follows until --max-depth. Only the shortest path of each loop is printed,
+# and loops already listed in the excludes file (anchored `/dir/**` lines)
+# are left out, since those stay on disk until removed by hand.
+detect_nesting_loops() {
+    local hit skip prefix
+    find "$MIRROR_DIR" -mindepth 1 -type d 2>/dev/null \
+        | awk -v root="$MIRROR_DIR/" -v min="$NESTING_MIN_REPEATS" '
+            { rel = substr($0, length(root) + 1); n = split(rel, p, "/"); run = 1
+              for (i = 2; i <= n; i++) {
+                  if (p[i] == p[i-1]) { run++; if (run >= min) { print n "\t" rel; break } }
+                  else run = 1
+              } }' \
+        | sort -n | cut -f2- \
+        | while IFS= read -r hit; do
+            skip=0
+            for prefix in "${NESTED_SEEN[@]-}"; do
+                [ -n "$prefix" ] || continue
+                case "$hit" in "$prefix"|"$prefix"/*) skip=1; break ;; esac
+            done
+            [ "$skip" -eq 1 ] && continue
+            NESTED_SEEN+=("$hit")
+            echo "$hit"
+        done
+}
+NESTED_SEEN=()
+[ -r "$EXCLUDES_FILE" ] && while IFS= read -r line; do
+    case "$line" in
+        /*/\*\*) line="${line#/}"; NESTED_SEEN+=("${line%/\*\*}") ;;
+    esac
+done < "$EXCLUDES_FILE"
+
 if [ "$TAKEOUT_ONLY" -eq 1 ]; then
     log "takeout-only: skipping rclone sync"
+elif [ ! -r "$EXCLUDES_FILE" ]; then
+    fail "excludes-missing" "exclude file $EXCLUDES_FILE is missing or unreadable — refusing to sync without it (it keeps Drive's backups/ and the known shortcut loops out of the mirror)"
 else
+    # No --fast-list: on this Drive a shortcut inside `Choir` points back at
+    # `Choir` itself, and the recursive listing --fast-list does up front never
+    # ends (17 minutes, zero transfers, nothing in the log). Without it the
+    # walk still loops, but transfers start at once and the loop is visible
+    # in the log, stops at --max-depth and is named by detect_nesting_loops.
     rclone_args=(sync "$RCLONE_REMOTE" "$MIRROR_DIR"
         --backup-dir "$VERSIONS_DIR/$TODAY"
-        --exclude 'backups/**' --drive-acknowledge-abuse --fast-list
+        --exclude-from "$EXCLUDES_FILE"
+        --drive-acknowledge-abuse --drive-skip-dangling-shortcuts
+        --max-depth "$MAX_DEPTH"
         --transfers 8 --checkers 16 --create-empty-src-dirs
-        --stats 5m --stats-one-line --stats-log-level NOTICE --log-level NOTICE)
+        --stats 5m --stats-one-line --stats-log-level NOTICE --log-level INFO)
     [ "$DRY_RUN" -eq 1 ] && rclone_args+=(--dry-run)
     log "rclone ${rclone_args[*]}"
     sync_start=$(date +%s)
@@ -225,6 +280,15 @@ else
         log "OK: rclone sync finished (exit $rc) in $(( $(date +%s) - sync_start ))s"
     else
         fail "rclone-sync" "rclone sync exited $rc after $(( $(date +%s) - sync_start ))s: $(grep 'ERROR' "$SCRATCH/rclone.out" | tail -3 | tr '\n' ' ')"
+    fi
+
+    # --- 4b. Shortcut-loop detector (warning, not a failure) ------------------
+    loops=$(detect_nesting_loops | head -5 || true)
+    if [ -n "$loops" ]; then
+        log "WARNING: self-referencing folder nesting in the mirror (a Drive shortcut pointing at its own parent?): $(echo "$loops" | tr '\n' ' ')"
+        notify "Cloud mirror WARNING: folder loop in the mirror" \
+            "Directories nested ${NESTING_MIN_REPEATS}+ levels deep under their own name in $MIRROR_DIR: $(echo "$loops" | tr '\n' ' '). Delete the self-referencing shortcut in Drive (right-click the nested folder inside its parent → Remove) or add /<path>/** to $EXCLUDES_FILE, then rm -rf the leftover tree under $MIRROR_DIR by hand." \
+            default warning
     fi
 fi
 
