@@ -7,6 +7,7 @@ Scheduled scripts that run the archon pipeline on this machine:
 - watch pipeline health (CI red, zombie runs, disk pressure)
 - daily release tags
 - Supabase DB backups
+- nightly mirror of the owner's Google Drive to the NAS root, with the Google Takeout (Google Photos) archives unpacked
 - weekly light cache trim and weekly tool-freshness check + upgrade of the user-level tools
 - weekly Archon engine update to the newest upstream release
 
@@ -22,6 +23,7 @@ Required keys (see individual scripts for which ones each uses):
 
 - `ANNIE_DB_URL`, `RELI_DB_URL`, `FILMDUEL_DB_URL`, `KINDRED_DB_URL`, `LACHESIS_DB_URL` — Supabase connection strings used by `backup-dbs.sh`. Missing entries cause that DB to be skipped (not a hard failure). The URL is parsed into the libpq `PG*` environment (`lib/pg-backup.sh`) so it never appears on a command line.
 - `NTFY_TOPIC` — private ntfy.sh topic for notifications. No fallback default; scripts fail loud if missing.
+- `NAS_ROOT` (optional) — where `cloud-mirror.sh` keeps the Drive mirror and the extracted Takeout content (default `/mnt/ext-fast/nas`). Set it here when the NAS moves to an external drive; see "Cloud mirror".
 
 Set perms: `chmod 600 ~/.config/archon-cron/secrets.env`.
 
@@ -76,6 +78,36 @@ ls ~/.local/opt/postgresql-17/lib/vector.so ~/.local/opt/postgresql-17/share/ext
 ```
 
 Each project logs `OK: <project> restored: <archive> (<n> rows in <schema.table> = backup count, <t> tables in <schema>, <ms>ms)` or `ERROR: <project> restore FAILED — <reason>`; any failure exits 1 and ntfys (`NTFY_TOPIC`). The run is summarised in `~/.archon/pipeline-health-state/restore-test-status` in the style of `db-backup-status` (`last_run`, `last_run_status`, `last_run_failed`, `last_ok`, then one `<project>=ok|failed|skipped ...` line each); `pipeline-health-cron.sh` (`check_restore_test`) ntfys once when the last run failed or no successful run landed within `RESTORE_TEST_MAX_AGE_D` (8) days. To run it by hand: `ops/cron/restore-test.sh` (`PG_BIN`, `BACKUP_ROOT`, `DB_BACKUP_STATE_DIR`, `RESTORE_TEST_TMP_ROOT` override the defaults). Note what the test does *not* prove: the Supabase `auth` schema (user accounts) is outside the `--schema=public` dumps, so a real disaster recovery of kindred also needs the auth users back before its foreign keys can be validated.
+
+## Cloud mirror: Google Drive + Google Takeout (Photos)
+
+`cloud-mirror.sh` (cron, 03:30 daily) mirrors the owner's whole Google Drive to local disk and unpacks the Google Takeout archives that Google delivers into it. Layout under `$NAS_ROOT` (default `/mnt/ext-fast/nas`, override in `secrets.env`):
+
+```
+.nas-root                    marker — the script aborts (exit 1 + ntfy) when it is missing; never created by the script
+gdrive/                      rclone sync of gdrive-full: (Drive's backups/ excluded)
+.versions/gdrive/YYYYMMDD/   --backup-dir: what was deleted or overwritten on Drive that day; days older than 30 are pruned
+photos/                      Takeout content with the leading Takeout/ stripped: photos/Google Photos/<album>/...
+.state/takeout-manifest.tsv  sha256 <TAB> size <TAB> path (relative to $NAS_ROOT) <TAB> ingested-at — one line per ingested archive
+```
+
+The remote is `gdrive-full:` (type drive, scope `drive.readonly`) — not `gdrive:`, the read-write remote `backup-dbs.sh` uploads with, and not `dbs_backup:`. The sync is exactly `rclone sync gdrive-full: $NAS_ROOT/gdrive --backup-dir $NAS_ROOT/.versions/gdrive/$(date +%Y%m%d) --exclude 'backups/**' --drive-acknowledge-abuse --fast-list --transfers 8 --checkers 16 --create-empty-src-dirs --stats 5m --stats-one-line --stats-log-level NOTICE --log-level NOTICE`; `backups/` on Drive is what this same machine uploads via `backup-dbs.sh`, so it is excluded rather than mirrored back. rclone exit 0 and 9 (nothing transferred) are success; a nonzero exit whose only `ERROR` lines are duplicate-directory notices (next paragraph) is success with a warning; anything else fails the run — the Takeout ingest still runs on whatever did land. Steps, in order: marker → free-space guard (refuses to start below `CLOUD_MIRROR_MIN_FREE_GIB`, 20 GiB) → `flock` (a run that overlaps a still-running one logs `another cloud-mirror run holds ...` and exits 0) → rclone sync → prune `.versions` → Takeout ingest → status file → on any failure ntfy `Cloud mirror FAILED` (tag floppy_disk) and exit 1. `--dry-run` passes `--dry-run` to rclone, prints `would ingest` for every unseen archive, extracts nothing and writes no status file; `--takeout-only` skips the sync and pruning is unaffected. Log: `~/.local/state/archon-cron/logs/cloud-mirror.log`.
+
+**Takeout ingest.** Takeout is configured for 12 monthly *incremental* exports (first full, then diffs), format `.tgz`, delivered to Drive; archives are named like `takeout-20260920T090000Z-001.tgz` and contain `Takeout/Google Photos/<album or "Photos from YYYY">/<file>` plus `.json` sidecars. Drive holds **three folders literally named `Takeout`** (one receives the exports, the other two are old Google Sites exports). rclone cannot represent same-named siblings: it logs `Duplicate directory found in source - ignoring` and mirrors only one of them. The ingest therefore never assumes a folder — it scans the whole mirror for `takeout-*.tgz` / `takeout-*.zip`. If a new export is on Drive but not under `gdrive/` after a nightly run, it landed in a `Takeout` folder rclone skipped: rename the two stale folders on Drive (e.g. `Takeout (sites)`) and the next run picks it up. Extraction is purely additive: nothing already under `photos/` is ever deleted; `tar --keep-newer-files --strip-components=1` replaces only older copies and leaves a newer local file alone; an archive already in the manifest is skipped (same relative path and size → not even re-hashed; otherwise by sha256, so a moved archive is not extracted twice). GNU tar 1.35 exits 2 in that mode for every directory that already exists and every file it keeps, so tar runs under `LC_ALL=C` and a nonzero exit counts as success only when every stderr line is one of those known notices. Each archive is verified first (`gzip -t` / `unzip -t`); a corrupt one is logged as `ERROR`, kept out of the manifest (so it is retried and keeps failing nightly until it is fixed or removed from Drive) and the run continues with the others. `.zip` exports are staged under `photos/.staging.*` and streamed through the same tar, so the layout is identical.
+
+**Status and alerts.** `~/.archon/pipeline-health-state/cloud-mirror-status` holds `last_run`, `last_run_status`, `last_run_failed`, `last_ok` and `newest_takeout_epoch` (mtime of the newest archive seen in the mirror, 0 if none; a run that aborts before scanning keeps the previous value). `pipeline-health-cron.sh` (`check_cloud_mirror`) ntfys once per episode when `last_ok` is older than `CLOUD_MIRROR_MAX_AGE_H` (48) hours, and — separately, at most once a day — `Google Takeout export may have stopped` when `newest_takeout_epoch` is older than `CLOUD_MIRROR_TAKEOUT_MAX_AGE_D` (45) days or is 0: the monthly export stopped, or the 12-month schedule ran out and has to be re-armed at takeout.google.com (this doubles as the yearly re-arm reminder).
+
+**Moving `$NAS_ROOT` to an external drive.** Wait for a running mirror to finish (`cloud-mirror.lock` in the state dir is held while it runs), then:
+
+```
+sudo mount /dev/disk/by-label/<nas> /mnt/nas        # fstab entry with `nofail` so an unplugged drive does not block boot
+rsync -aHAX --info=progress2 /mnt/ext-fast/nas/ /mnt/nas/
+touch /mnt/nas/.nas-root
+echo 'NAS_ROOT=/mnt/nas' >> ~/.config/archon-cron/secrets.env
+ops/cron/cloud-mirror.sh --dry-run                  # must log "cloud mirror start (NAS_ROOT=/mnt/nas" and transfer nothing
+```
+
+The marker is the whole point of that last step: the script never creates it, and it must live on the drive, never on the mountpoint directory itself. With the drive unplugged the mountpoint is an empty directory on the root filesystem; without the marker the script refuses to fill it (`.nas-root is missing`, exit 1, ntfy) instead of mirroring hundreds of GB onto `/`. The manifest stores paths relative to `$NAS_ROOT`, so it stays valid after the move; delete the old `/mnt/ext-fast/nas` once a real run has succeeded on the new root.
 
 ## Host maintenance
 
@@ -179,6 +211,7 @@ Status lives in `~/.archon/pipeline-health-state/archon-update-status` (`last_ru
 | `archon-update.sh` | 03:00 Sundays | merges the newest upstream release tag into the fork's `upstream-sync-*` branch in a worktree, proves it (`bun install`, `type-check`, the serial test suite, `generate:bundled`, `validate workflows` against the live CLI as baseline), pushes it to the fork, swaps `/mnt/ext-fast/archon` onto it and restarts `archon-serve.service`; rolls back on a failed health check; ntfy + one GitHub issue per tag on any failure, ntfy on success; no-op when current. Deferred while any archon run is running. Writes `archon-update-status`; `pipeline-health-cron.sh` (`check_archon_update`) ntfys once when it reads `failed` or no ok run in 8 days. See "Archon auto-update" |
 | `backup-dbs.sh` | every 3h (at :17) | Supabase → local + rclone to Google Drive. Verified dumps only: pinned pg17 client, schema check, min size, sanity-table row count; fails loud (exit 1 + ntfy) and deletes empty artifacts; writes a `<archive>.meta` sidecar with the verified row count |
 | `restore-test.sh` | Sunday 04:30 | restores the newest archive of every project into a throwaway socket-only PostgreSQL 17 cluster (`psql -v ON_ERROR_STOP=1`) and checks schema, sanity table and row count against the backup's `.meta`; fails loud (exit 1 + ntfy), status in `restore-test-status` for `pipeline-health-cron.sh` |
+| `cloud-mirror.sh` | 03:30 daily | `rclone sync gdrive-full:` → `$NAS_ROOT/gdrive` (Drive `backups/` excluded; deleted/overwritten files kept 30 days under `.versions/gdrive/YYYYMMDD`), then additive ingest of every `takeout-*.tgz`/`.zip` found anywhere in the mirror into `$NAS_ROOT/photos` (manifest keyed by sha256, `tar --keep-newer-files`, corrupt archives fail loud and the run continues). Refuses to run without `$NAS_ROOT/.nas-root` or below 20 GiB free; one `flock`. Status in `cloud-mirror-status` for `pipeline-health-cron.sh` (`check_cloud_mirror`: mirror stale >48h once per episode, Takeout export >45d daily). `--dry-run`, `--takeout-only`. See "Cloud mirror" |
 | `daily-release-cron.sh` | 08:00 daily | tag + release per repo if main moved since last release |
 | `pipeline-health-cron.sh --trim` | 05:00 Sunday | the light autoclean only (see "Weekly light trim"): uv/pip prune, idle Gradle caches, old APKs, stale worktrees, stale `/tmp` entries; never the hot-cache steps |
 | `tool-freshness.sh --apply` | 09:00 Monday | installed vs latest for bun, gh, shellcheck, uv, node (newest LTS + EOL), Archon checkout, pg_dump; upgrades bun (not while an archon run is live; restarts archon-serve), gh, shellcheck and the postgresql-17 tree (checksums verified, self-tested, rolled back on failure; `lib/tool-update.sh`); one ntfy only when something was upgraded, failed, skipped or is still behind; result in `~/.archon/pipeline-health-state/tool-freshness` |
