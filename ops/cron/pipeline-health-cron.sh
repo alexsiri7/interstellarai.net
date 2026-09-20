@@ -1839,89 +1839,6 @@ check_db_backup() {
 }
 
 # ----------------------------------------------------------------------------
-# Check 9e: cloud mirror freshness + Takeout export liveness. cloud-mirror.sh
-#   (cron, 03:30 daily) writes $STATE_DIR/cloud-mirror-status in the
-#   db-backup-status shape plus newest_takeout_epoch=<mtime of the newest
-#   takeout-*.tgz/.zip anywhere in the Drive mirror, 0 if none>. The script
-#   ntfys its own failures (corrupt archive, rclone error, unmounted NAS);
-#   this catches the run that never happened or keeps failing: alert once per
-#   episode when no successful mirror landed within CLOUD_MIRROR_MAX_AGE_H
-#   hours (default 48: one missed nightly run). Separately, at most once a
-#   day, alert when the newest Takeout archive is older than
-#   CLOUD_MIRROR_TAKEOUT_MAX_AGE_D days (default 45): the monthly Google
-#   Photos export stopped, or the 12-month schedule ran out and has to be
-#   re-armed at takeout.google.com. Skipped while no mirror has recorded a
-#   newest_takeout_epoch (the mirror alert already covers that case).
-# ----------------------------------------------------------------------------
-check_cloud_mirror() {
-  local status_file="$STATE_DIR/cloud-mirror-status"
-  local marker="$STATE_DIR/cloud-mirror-alerted"
-  local takeout_marker="$STATE_DIR/cloud-mirror-takeout-alerted"
-  local max_age_h="${CLOUD_MIRROR_MAX_AGE_H:-48}"
-  local takeout_max_d="${CLOUD_MIRROR_TAKEOUT_MAX_AGE_D:-45}"
-  local max_age=$(( max_age_h * 3600 ))
-  local takeout_max=$(( takeout_max_d * 86400 ))
-  local now last_ok=0 last_status="" last_failed="" newest="" problem="" takeout_problem=""
-  now=$(date +%s)
-
-  if [ -f "$status_file" ]; then
-    last_ok=$(grep -s '^last_ok=' "$status_file" | cut -d= -f2)
-    last_status=$(grep -s '^last_run_status=' "$status_file" | cut -d= -f2)
-    last_failed=$(grep -s '^last_run_failed=' "$status_file" | cut -d= -f2)
-    newest=$(grep -s '^newest_takeout_epoch=' "$status_file" | cut -d= -f2)
-    [[ "$last_ok" =~ ^[0-9]+$ ]] || last_ok=0
-    [[ "$newest" =~ ^[0-9]+$ ]] || newest=""
-  fi
-
-  if [ "$last_ok" -eq 0 ]; then
-    problem="no successful cloud mirror recorded ($status_file missing or never ok)"
-    [ "$last_status" = "failed" ] && problem="$problem; last run failed${last_failed:+ ($last_failed)}"
-  elif [ $(( now - last_ok )) -gt "$max_age" ]; then
-    problem="last successful cloud mirror $(( (now - last_ok) / 3600 ))h ago (limit ${max_age_h}h)"
-    [ -n "$last_status" ] && problem="$problem; last run: $last_status${last_failed:+ ($last_failed)}"
-  fi
-
-  if [ -z "$problem" ]; then
-    if [ -f "$marker" ]; then
-      rm -f "$marker"
-      log "cloud-mirror: recovered — successful mirror landed"
-    fi
-  else
-    log "cloud-mirror: $problem"
-    if [ ! -f "$marker" ]; then   # alert once per stale episode
-      notify "Cloud mirror stale" \
-        "$problem. Check $LOG_DIR/cloud-mirror.log (is the NAS drive mounted? \$NAS_ROOT/.nas-root must exist) and run ops/cron/cloud-mirror.sh by hand." \
-        high floppy_disk
-      touch "$marker"
-    fi
-  fi
-
-  # Takeout liveness — only once a mirror has scanned for archives.
-  [ -n "$newest" ] || return 0
-  if [ "$newest" -eq 0 ]; then
-    takeout_problem="no Google Takeout archive anywhere in the Drive mirror"
-  elif [ $(( now - newest )) -gt "$takeout_max" ]; then
-    takeout_problem="newest Google Takeout archive in the mirror is $(( (now - newest) / 86400 ))d old (limit ${takeout_max_d}d)"
-  fi
-  if [ -z "$takeout_problem" ]; then
-    if [ -f "$takeout_marker" ]; then
-      rm -f "$takeout_marker"
-      log "cloud-mirror: Takeout recovered — a fresh archive is in the mirror"
-    fi
-    return 0
-  fi
-  log "cloud-mirror: $takeout_problem"
-  # once per day: the marker's mtime is the last alert
-  if [ -f "$takeout_marker" ] && [ $(( now - $(stat -c %Y "$takeout_marker") )) -lt 86400 ]; then
-    return 0
-  fi
-  notify "Google Takeout export may have stopped" \
-    "$takeout_problem. The monthly Google Photos export may have stopped, or its 12-month schedule ran out: re-arm it at https://takeout.google.com (Google Photos, export to Drive, .tgz, scheduled exports). Re-alerts daily until a new takeout-*.tgz reaches the mirror." \
-    high camera
-  touch "$takeout_marker"
-}
-
-# ----------------------------------------------------------------------------
 # Check 9b: weekly system maintenance. system-maintenance.sh (cron, Sundays
 #   04:00) writes $STATE_DIR/system-maintenance-status in the db-backup-status
 #   shape. It ntfys its own failures; this catches the run that never happened
@@ -2153,7 +2070,6 @@ reconcile_zombies
 check_parked_runs
 check_disk
 check_db_backup
-check_cloud_mirror
 check_system_maintenance
 check_archon_update
 check_restore_test
