@@ -107,6 +107,9 @@ status_val() { grep "^$1=" "$T/state/cloud-mirror-status" | cut -d= -f2; }
     ! grep -qx -- '--exclude' "$STUB_ARGV"
     grep -qxF -- 'backups/**' "$CRON_DIR/cloud-mirror.excludes"
     grep -qxF -- '/Choir/Choir/**' "$CRON_DIR/cloud-mirror.excludes"
+    grep -qxF -- '/Travel/Greece Apr 2022/Greece Apr 2022/**' "$CRON_DIR/cloud-mirror.excludes"
+    # every pattern line is either backups/** or an anchored /dir/** the loop detector can read back
+    ! grep -v '^#' "$CRON_DIR/cloud-mirror.excludes" | grep -v '^$' | grep -qvE '^(backups/\*\*|/.+/\*\*)$'
     grep -qx -- '--drive-acknowledge-abuse' "$STUB_ARGV"
     grep -qx -- '--drive-skip-dangling-shortcuts' "$STUB_ARGV"
     # a self-referencing Drive shortcut made --fast-list hang for 17 minutes

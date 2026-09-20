@@ -10,3 +10,5 @@
 backups/**
 # /Choir/Choir is a Drive shortcut pointing at its own parent -> infinite recursion
 /Choir/Choir/**
+# /Travel/Greece Apr 2022/Greece Apr 2022 is a Drive shortcut (1-2rIe6o…) pointing at its own parent
+/Travel/Greece Apr 2022/Greece Apr 2022/**
