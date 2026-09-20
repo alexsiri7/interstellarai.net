@@ -1,0 +1,12 @@
+# rclone --exclude-from for cloud-mirror.sh (one filter pattern per line,
+# rclone filtering syntax: a leading / anchors at the remote root, ** matches
+# everything below). Override the file with CLOUD_MIRROR_EXCLUDES.
+#
+# Excluded paths are excluded on BOTH sides of the sync: adding a line here
+# stops mirroring the path but never deletes what is already on disk — remove
+# a leftover tree under $NAS_ROOT/gdrive by hand.
+
+# this machine's own DB backups (backup-dbs.sh uploads them; already on local disk)
+backups/**
+# /Choir/Choir is a Drive shortcut pointing at its own parent -> infinite recursion
+/Choir/Choir/**
