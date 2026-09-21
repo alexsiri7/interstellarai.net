@@ -271,3 +271,142 @@ make_tmp_root() {
     run autoclean_idle_dir "$STATE_DIR/missing" 30
     [ "$status" -eq 0 ]
 }
+
+# ── stale archon worktrees ───────────────────────────────────────────────────
+
+# autoclean_stale_worktrees walks the real $HOME and $BASE_DIR, so it is only
+# loaded once both point into the sandbox, with a `gh` that records its argv
+# to $GH_CALLS and answers from $GH_OPEN_BRANCHES (or fails when $GH_FAIL is
+# set).
+make_worktree_sandbox() {
+    export HOME="$STATE_DIR/home"
+    export BASE_DIR="$STATE_DIR/base"
+    export GH_CALLS="$STATE_DIR/gh-calls"; : > "$GH_CALLS"
+    git init -q "$BASE_DIR/reli"
+    export LEGACY="$BASE_DIR/.archon/worktrees/ext-fast/reli/archon"
+    export MODERN="$HOME/.archon/workspaces/alexsiri7/reli/worktrees/archon"
+    local old="5 hours ago"
+    mkdir -p "$LEGACY/task-archon-ship-1" "$LEGACY/task-archon-ship-2" "$LEGACY/task-archon-ship-3" "$MODERN/task-archon-ship-4"
+    dd if=/dev/zero of="$LEGACY/task-archon-ship-1/blob" bs=1M count=5 status=none
+    dd if=/dev/zero of="$MODERN/task-archon-ship-4/blob" bs=1M count=2 status=none
+    touch -d "$old" "$LEGACY/task-archon-ship-1" "$LEGACY/task-archon-ship-2" "$MODERN/task-archon-ship-4"
+    # task-archon-ship-3 keeps its fresh mtime; task-archon-ship-2 has an open PR.
+    export GH_OPEN_BRANCHES="archon/task-archon-ship-2"
+    gh() {
+        echo "gh $*" >> "$GH_CALLS"
+        [ -n "${GH_FAIL:-}" ] && return 1
+        printf '%s\n' "$GH_OPEN_BRANCHES"
+    }
+    export -f gh
+    load_fn autoclean_stale_worktrees
+}
+
+@test "autoclean_stale_worktrees removes stale worktrees under the legacy and 0.10 layouts, keeps open-PR and fresh ones" {
+    make_worktree_sandbox
+    run autoclean_stale_worktrees
+    [ "$status" -eq 0 ]
+    [ ! -e "$LEGACY/task-archon-ship-1" ]
+    [ ! -e "$MODERN/task-archon-ship-4" ]
+    [ -d "$LEGACY/task-archon-ship-2" ]      # open PR
+    [ -d "$LEGACY/task-archon-ship-3" ]      # modified <4h
+    [[ "$output" == *"pruned 2 stale worktrees for reli"* ]]
+    [[ "$output" != *"failed"* ]]
+}
+
+@test "autoclean_stale_worktrees asks gh for more than its default page of 30 open PRs" {
+    make_worktree_sandbox
+    run autoclean_stale_worktrees
+    [ "$status" -eq 0 ]
+    grep -q '^gh pr list .*--limit [0-9]' "$GH_CALLS"
+    local limit; limit=$(sed -n 's/^gh pr list .*--limit \([0-9]*\).*/\1/p' "$GH_CALLS" | head -1)
+    [ "$limit" -gt 30 ]
+}
+
+@test "autoclean_stale_worktrees --dry-run lists each candidate with its size and a total, removes nothing" {
+    make_worktree_sandbox
+    run autoclean_stale_worktrees --dry-run
+    [ "$status" -eq 0 ]
+    [ -d "$LEGACY/task-archon-ship-1" ]
+    [ -d "$MODERN/task-archon-ship-4" ]
+    [[ "$output" == *"would remove $LEGACY/task-archon-ship-1 ("*"MB)"* ]]
+    [[ "$output" == *"would remove $MODERN/task-archon-ship-4 ("*"MB)"* ]]
+    [[ "$output" != *"task-archon-ship-2"* ]]
+    [[ "$output" != *"task-archon-ship-3"* ]]
+    [[ "$output" != *"pruned"* ]]
+    local total; total=$(printf '%s\n' "$output" | sed -n 's/.*dry run — 2 stale worktrees, \([0-9]*\)MB total.*/\1/p')
+    [ -n "$total" ] && [ "$total" -ge 7 ]
+}
+
+@test "autoclean_stale_worktrees skips a project whose gh pr list fails" {
+    make_worktree_sandbox
+    export GH_FAIL=1
+    run autoclean_stale_worktrees
+    [ "$status" -eq 0 ]
+    [ -d "$LEGACY/task-archon-ship-1" ]
+    [ -d "$MODERN/task-archon-ship-4" ]
+    [[ "$output" == *"gh pr list failed for reli — skipping its worktrees"* ]]
+}
+
+# ── check_disk ───────────────────────────────────────────────────────────────
+
+# Each mount reads 90% first and the given value once its cleanup has run;
+# a mount not listed reads 50%. The autoclean entry points and notify only
+# record the call.
+#   make_disk_sandbox /=<after> /mnt/ext-fast=<after>
+make_disk_sandbox() {
+    export CALLS="$STATE_DIR/calls"; : > "$CALLS"
+    export LOG_DIR="$STATE_DIR/logs"
+    export DISK_AFTER="$*"
+    disk_used_pct() {
+        local after; after=$(printf '%s\n' $DISK_AFTER | sed -n "s|^$1=||p")
+        [ -n "$after" ] || { echo 50; return; }
+        local read_marker="$STATE_DIR/read-${1//\//_}"
+        if [ -e "$read_marker" ]; then echo "$after"; else touch "$read_marker"; echo 90; fi
+    }
+    autoclean_root() { echo "autoclean_root" >> "$CALLS"; }
+    autoclean_stale_worktrees() { echo "autoclean_stale_worktrees" >> "$CALLS"; }
+    notify() { echo "notify $1|$2|$3|$4" >> "$CALLS"; }
+    load_fn check_disk
+}
+
+@test "check_disk on / pressure runs autoclean_root and skips the ntfy once recovered" {
+    make_disk_sandbox /=70
+    run check_disk
+    [ "$status" -eq 0 ]
+    grep -qx 'autoclean_root' "$CALLS"
+    ! grep -q 'autoclean_stale_worktrees' "$CALLS"
+    ! grep -q '^notify' "$CALLS"
+    [[ "$output" == *"disk / at 90% — running conservative autoclean before ntfy"* ]]
+    [[ "$output" == *"disk / 90% → 70% after cleanup"* ]]
+    [[ "$output" == *"disk / recovered (90% → 70%) — no ntfy"* ]]
+}
+
+@test "check_disk on / pressure still ntfys, naming every autoclean step, when the cleanup did not bring it under 85%" {
+    make_disk_sandbox /=88
+    run check_disk
+    [ "$status" -eq 0 ]
+    grep -qx 'autoclean_root' "$CALLS"
+    grep -qx "notify Disk warning: / 88% (was 90%)|Autoclean ran (go/bun/npm/uv/pip caches, journal vacuum, idle Gradle caches, old APKs, stale worktrees and /tmp dirs) but disk still >=85%. See $LOG_DIR/pipeline-health.log for per-step results.|high|warning" "$CALLS"
+    [[ "$output" == *"disk / still at 88% after cleanup — ntfying"* ]]
+}
+
+@test "check_disk on /mnt/ext-fast pressure removes stale worktrees and skips the ntfy once recovered" {
+    make_disk_sandbox /mnt/ext-fast=70
+    run check_disk
+    [ "$status" -eq 0 ]
+    grep -qx 'autoclean_stale_worktrees' "$CALLS"
+    ! grep -q 'autoclean_root' "$CALLS"
+    ! grep -q '^notify' "$CALLS"
+    [[ "$output" == *"disk /mnt/ext-fast at 90% — removing stale worktrees before ntfy"* ]]
+    [[ "$output" == *"disk /mnt/ext-fast 90% → 70% after cleanup"* ]]
+    [[ "$output" == *"disk /mnt/ext-fast recovered (90% → 70%) — no ntfy"* ]]
+}
+
+@test "check_disk on /mnt/ext-fast pressure still ntfys when the cleanup did not bring it under 85%" {
+    make_disk_sandbox /mnt/ext-fast=88
+    run check_disk
+    [ "$status" -eq 0 ]
+    grep -qx 'autoclean_stale_worktrees' "$CALLS"
+    grep -qx "notify Disk warning: /mnt/ext-fast 88% (was 90%)|Stale archon worktrees were removed but disk still >=85%. Pipeline will stall if this fills. See $LOG_DIR/pipeline-health.log.|high|warning" "$CALLS"
+    [[ "$output" == *"disk /mnt/ext-fast still at 88% after cleanup — ntfying"* ]]
+}
