@@ -12,10 +12,11 @@
 #      (dedup per project+workflow in scheduled-health/ subdir)
 #   2. Prod deploy failed or lagging main HEAD → file issue + fire archon (dedup by SHA)
 #   3. Zombie archon DB runs (status=running, age >4h) → abandon
-#   4. Disk >85% on / or /mnt/ext-fast → ntfy. For `/`, run a conservative
-#      autoclean first (go/bun/npm/uv/pip caches, user journal, idle Gradle
-#      version caches, APK builds >30d, stale archon worktrees, stale /tmp
-#      dirs) and only ntfy if still >=85%; every failing step is logged
+#   4. Disk >85% on / or /mnt/ext-fast → autoclean, then ntfy only if still
+#      >=85%. For `/` that is the conservative full set (go/bun/npm/uv/pip
+#      caches, user journal, idle Gradle version caches, APK builds >30d,
+#      stale archon worktrees, stale /tmp dirs); for /mnt/ext-fast, where the
+#      worktrees live, only the stale-worktree step; every failing step is logged
 #   5. No pipeline progress in last tick (no commits, no archon completions)
 #      while work is pending (queued/in-progress issues or actionable PRs):
 #        - If token-limit markers in recent logs → wait, retry next tick
@@ -40,14 +41,19 @@
 # worktrees, stale /tmp entries), logs the MB freed and exits. It never runs
 # the >=85%-only steps that wipe hot caches (go clean -cache, bun pm cache rm,
 # npm cache clean), skips the throttle gate and does none of the health checks.
+#
+# `--list-stale-worktrees` is the dry run of the stale-worktree step: it logs
+# every worktree the autoclean would remove, with its size and a total, and
+# removes nothing. Same gates skipped as `--trim`.
 
 set -uo pipefail
 
 MODE=tick
 case "${1:-}" in
   --trim) MODE=trim; shift ;;
+  --list-stale-worktrees) MODE=list-worktrees; shift ;;
   "") ;;
-  *) echo "usage: $0 [--trim]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--trim|--list-stale-worktrees]" >&2; exit 2 ;;
 esac
 
 # /snap/bin: uv (and go) are snaps, and cron does not put it on PATH.
@@ -977,9 +983,10 @@ reconcile_zombies() {
 }
 
 # ----------------------------------------------------------------------------
-# Check 3: Disk warning — ntfy if / or /mnt/ext-fast above 85%. For `/`,
-# attempt conservative cache cleanup first; only ntfy if still over threshold
-# after cleanup. Every step is non-fatal and every failure is logged with its
+# Check 3: Disk warning — ntfy if / or /mnt/ext-fast above 85%, after an
+# autoclean attempt: the conservative cache cleanup for `/`, the stale-worktree
+# step alone for /mnt/ext-fast. Only ntfy if still over threshold after
+# cleanup. Every step is non-fatal and every failure is logged with its
 # exit code: a step that fails silently is one that never frees anything.
 # ----------------------------------------------------------------------------
 disk_used_pct() {
@@ -1163,25 +1170,40 @@ autoclean_apks() {
   return 0
 }
 
-# Remove stale Archon worktrees from ~/.archon/workspaces whose branch has no
-# open PR. Covers the retry-loop accumulation pattern (hundreds of failed task
-# dirs from a broken archon period). Prunes git metadata after deletion.
+# autoclean_stale_worktrees [--dry-run] — remove Archon task worktrees whose
+# branch has no open PR and that nothing has touched for 4h. Covers the
+# retry-loop accumulation pattern (hundreds of failed task dirs from a broken
+# archon period). Two layouts hold them: the 0.10 one under
+# ~/.archon/workspaces/{ext-fast,alexsiri7}/<project>/worktrees/archon and the
+# pre-0.10 one under $BASE_DIR/.archon/worktrees/ext-fast/<project>/archon
+# (~/.archon/worktrees is a symlink to it), which held 509 dirs / 148 GB by
+# 2026-09-21 because only the first was scanned. Both register against the
+# main checkout at $BASE_DIR/<project>, so one `worktree prune` there covers
+# either. A project whose `gh pr list` fails is skipped: an empty answer
+# would read as "no open PRs" and delete live work.
+# --dry-run logs each candidate with its size and a total, removes nothing.
 autoclean_stale_worktrees() {
+  local dry_run=0
+  [ "${1:-}" = "--dry-run" ] && dry_run=1
+  local candidates=0 total_mb=0
   for repo_dir in "$BASE_DIR"/*/; do
     [ -d "$repo_dir/.git" ] || continue
     local project; project=$(basename "$repo_dir")
 
     # One API call per repo to get all open PR branches.
     local open_branches
-    open_branches=$(gh pr list --repo "alexsiri7/$project" --state open \
-      --json headRefName --jq '.[].headRefName' 2>/dev/null || echo "")
+    if ! open_branches=$(gh pr list --repo "alexsiri7/$project" --state open \
+        --json headRefName --jq '.[].headRefName' 2>/dev/null); then
+      log "autoclean: gh pr list failed for $project — skipping its worktrees"
+      continue
+    fi
 
     local removed=0
-    # Worktrees live under workspaces/ext-fast/<project>/ and workspaces/alexsiri7/<project>/
     local wt_base
     for wt_base in \
       "$HOME/.archon/workspaces/ext-fast/$project/worktrees/archon" \
-      "$HOME/.archon/workspaces/alexsiri7/$project/worktrees/archon"; do
+      "$HOME/.archon/workspaces/alexsiri7/$project/worktrees/archon" \
+      "$BASE_DIR/.archon/worktrees/ext-fast/$project/archon"; do
       [ -d "$wt_base" ] || continue
       while IFS= read -r wt_path; do
         local wt_name; wt_name=$(basename "$wt_path")
@@ -1192,6 +1214,12 @@ autoclean_stale_worktrees() {
         fi
         # Keep if modified in the last 4h — task may be in-progress but pre-PR.
         if find "$wt_path" -maxdepth 0 -mmin -240 2>/dev/null | grep -q .; then
+          continue
+        fi
+        if [ "$dry_run" -eq 1 ]; then
+          local size; size=$(dir_size_mb "$wt_path")
+          log "autoclean: would remove $wt_path (${size}MB)"
+          candidates=$((candidates + 1)); total_mb=$((total_mb + size))
           continue
         fi
         local rc=0
@@ -1210,6 +1238,8 @@ autoclean_stale_worktrees() {
       log "autoclean: pruned $removed stale worktrees for $project"
     fi
   done
+  [ "$dry_run" -eq 1 ] && log "autoclean: dry run — $candidates stale worktrees, ${total_mb}MB total"
+  return 0
 }
 
 # Remove stale build/test artifacts from the tmp root ($PIPELINE_HEALTH_TMP_ROOT,
@@ -1295,10 +1325,23 @@ check_disk() {
           log "disk / recovered (${before}% → ${after}%) — no ntfy"
         fi
       else
-        log "disk $mount at ${used}% — ntfying"
-        notify "Disk warning: $mount ${used}%" \
-          "Pipeline will stall if this fills. Investigate and clean." \
-          high warning
+        # The caches autoclean_root clears live under $HOME on /; the only
+        # autoclean target on this mount is the worktrees.
+        local before="$used"
+        log "disk $mount at ${before}% — removing stale worktrees before ntfy"
+        autoclean_stale_worktrees
+        local after
+        after=$(disk_used_pct "$mount")
+        [ -n "$after" ] || after="$before"
+        log "disk $mount ${before}% → ${after}% after cleanup"
+        if [ "$after" -ge 85 ]; then
+          log "disk $mount still at ${after}% after cleanup — ntfying"
+          notify "Disk warning: $mount ${after}% (was ${before}%)" \
+            "Stale archon worktrees were removed but disk still >=85%. Pipeline will stall if this fills. See $LOG_DIR/pipeline-health.log." \
+            high warning
+        else
+          log "disk $mount recovered (${before}% → ${after}%) — no ntfy"
+        fi
       fi
     fi
   done
@@ -2050,6 +2093,10 @@ archon workflow get $run_id --json" \
 # ----------------------------------------------------------------------------
 if [ "$MODE" = trim ]; then
   run_trim
+  exit 0
+fi
+if [ "$MODE" = list-worktrees ]; then
+  autoclean_stale_worktrees --dry-run
   exit 0
 fi
 
