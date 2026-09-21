@@ -1190,9 +1190,10 @@ autoclean_stale_worktrees() {
     [ -d "$repo_dir/.git" ] || continue
     local project; project=$(basename "$repo_dir")
 
-    # One API call per repo to get all open PR branches.
+    # One API call per repo to get all open PR branches. gh's default page is
+    # 30; a PR past that would read as "no open PR" and its worktree deleted.
     local open_branches
-    if ! open_branches=$(gh pr list --repo "alexsiri7/$project" --state open \
+    if ! open_branches=$(gh pr list --repo "alexsiri7/$project" --state open --limit 200 \
         --json headRefName --jq '.[].headRefName' 2>/dev/null); then
       log "autoclean: gh pr list failed for $project — skipping its worktrees"
       continue

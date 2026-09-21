@@ -275,11 +275,13 @@ make_tmp_root() {
 # ── stale archon worktrees ───────────────────────────────────────────────────
 
 # autoclean_stale_worktrees walks the real $HOME and $BASE_DIR, so it is only
-# loaded once both point into the sandbox, with a `gh` that answers from
-# $GH_OPEN_BRANCHES (or fails when $GH_FAIL is set).
+# loaded once both point into the sandbox, with a `gh` that records its argv
+# to $GH_CALLS and answers from $GH_OPEN_BRANCHES (or fails when $GH_FAIL is
+# set).
 make_worktree_sandbox() {
     export HOME="$STATE_DIR/home"
     export BASE_DIR="$STATE_DIR/base"
+    export GH_CALLS="$STATE_DIR/gh-calls"; : > "$GH_CALLS"
     git init -q "$BASE_DIR/reli"
     export LEGACY="$BASE_DIR/.archon/worktrees/ext-fast/reli/archon"
     export MODERN="$HOME/.archon/workspaces/alexsiri7/reli/worktrees/archon"
@@ -291,6 +293,7 @@ make_worktree_sandbox() {
     # task-archon-ship-3 keeps its fresh mtime; task-archon-ship-2 has an open PR.
     export GH_OPEN_BRANCHES="archon/task-archon-ship-2"
     gh() {
+        echo "gh $*" >> "$GH_CALLS"
         [ -n "${GH_FAIL:-}" ] && return 1
         printf '%s\n' "$GH_OPEN_BRANCHES"
     }
@@ -308,6 +311,15 @@ make_worktree_sandbox() {
     [ -d "$LEGACY/task-archon-ship-3" ]      # modified <4h
     [[ "$output" == *"pruned 2 stale worktrees for reli"* ]]
     [[ "$output" != *"failed"* ]]
+}
+
+@test "autoclean_stale_worktrees asks gh for more than its default page of 30 open PRs" {
+    make_worktree_sandbox
+    run autoclean_stale_worktrees
+    [ "$status" -eq 0 ]
+    grep -q '^gh pr list .*--limit [0-9]' "$GH_CALLS"
+    local limit; limit=$(sed -n 's/^gh pr list .*--limit \([0-9]*\).*/\1/p' "$GH_CALLS" | head -1)
+    [ "$limit" -gt 30 ]
 }
 
 @test "autoclean_stale_worktrees --dry-run lists each candidate with its size and a total, removes nothing" {
