@@ -1308,42 +1308,33 @@ check_disk() {
     local used
     used=$(disk_used_pct "$mount")
     [ -n "$used" ] || continue
-    if [ "$used" -ge 85 ]; then
-      if [ "$mount" = "/" ]; then
-        local before="$used"
-        log "disk / at ${before}% — running conservative autoclean before ntfy"
-        autoclean_root
-        local after
-        after=$(disk_used_pct "/")
-        [ -n "$after" ] || after="$before"
-        log "disk / ${before}% → ${after}% after cleanup"
-        if [ "$after" -ge 85 ]; then
-          log "disk / still at ${after}% after cleanup — ntfying"
-          notify "Disk warning: / ${after}% (was ${before}%)" \
-            "Autoclean ran (go/bun/npm/uv/pip caches, journal vacuum, idle Gradle caches, old APKs, stale worktrees and /tmp dirs) but disk still >=85%. See $LOG_DIR/pipeline-health.log for per-step results." \
-            high warning
-        else
-          log "disk / recovered (${before}% → ${after}%) — no ntfy"
-        fi
-      else
-        # The caches autoclean_root clears live under $HOME on /; the only
-        # autoclean target on this mount is the worktrees.
-        local before="$used"
-        log "disk $mount at ${before}% — removing stale worktrees before ntfy"
-        autoclean_stale_worktrees
-        local after
-        after=$(disk_used_pct "$mount")
-        [ -n "$after" ] || after="$before"
-        log "disk $mount ${before}% → ${after}% after cleanup"
-        if [ "$after" -ge 85 ]; then
-          log "disk $mount still at ${after}% after cleanup — ntfying"
-          notify "Disk warning: $mount ${after}% (was ${before}%)" \
-            "Stale archon worktrees were removed but disk still >=85%. Pipeline will stall if this fills. See $LOG_DIR/pipeline-health.log." \
-            high warning
-        else
-          log "disk $mount recovered (${before}% → ${after}%) — no ntfy"
-        fi
-      fi
+    [ "$used" -ge 85 ] || continue
+
+    # The caches autoclean_root clears live under $HOME on /; the only
+    # autoclean target on /mnt/ext-fast is the worktrees.
+    local clean_fn clean_verb clean_body
+    if [ "$mount" = "/" ]; then
+      clean_fn=autoclean_root
+      clean_verb="running conservative autoclean"
+      clean_body="Autoclean ran (go/bun/npm/uv/pip caches, journal vacuum, idle Gradle caches, old APKs, stale worktrees and /tmp dirs) but disk still >=85%. See $LOG_DIR/pipeline-health.log for per-step results."
+    else
+      clean_fn=autoclean_stale_worktrees
+      clean_verb="removing stale worktrees"
+      clean_body="Stale archon worktrees were removed but disk still >=85%. Pipeline will stall if this fills. See $LOG_DIR/pipeline-health.log."
+    fi
+
+    local before="$used"
+    log "disk $mount at ${before}% — $clean_verb before ntfy"
+    "$clean_fn"
+    local after
+    after=$(disk_used_pct "$mount")
+    [ -n "$after" ] || after="$before"
+    log "disk $mount ${before}% → ${after}% after cleanup"
+    if [ "$after" -ge 85 ]; then
+      log "disk $mount still at ${after}% after cleanup — ntfying"
+      notify "Disk warning: $mount ${after}% (was ${before}%)" "$clean_body" high warning
+    else
+      log "disk $mount recovered (${before}% → ${after}%) — no ntfy"
     fi
   done
 }

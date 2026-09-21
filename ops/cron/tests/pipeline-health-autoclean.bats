@@ -349,41 +349,64 @@ make_worktree_sandbox() {
 
 # ── check_disk ───────────────────────────────────────────────────────────────
 
-# / stays at 50%; /mnt/ext-fast reads 90% first and $EXT_FAST_AFTER once the
-# cleanup has run. The autoclean entry points and notify only record the call.
+# Each mount reads 90% first and the given value once its cleanup has run;
+# a mount not listed reads 50%. The autoclean entry points and notify only
+# record the call.
+#   make_disk_sandbox /=<after> /mnt/ext-fast=<after>
 make_disk_sandbox() {
     export CALLS="$STATE_DIR/calls"; : > "$CALLS"
     export LOG_DIR="$STATE_DIR/logs"
-    export EXT_FAST_AFTER="$1"
+    export DISK_AFTER="$*"
     disk_used_pct() {
-        case "$1" in
-            /) echo 50 ;;
-            /mnt/ext-fast)
-                if [ -e "$STATE_DIR/ext-fast-read" ]; then echo "$EXT_FAST_AFTER"; else touch "$STATE_DIR/ext-fast-read"; echo 90; fi ;;
-        esac
+        local after; after=$(printf '%s\n' $DISK_AFTER | sed -n "s|^$1=||p")
+        [ -n "$after" ] || { echo 50; return; }
+        local read_marker="$STATE_DIR/read-${1//\//_}"
+        if [ -e "$read_marker" ]; then echo "$after"; else touch "$read_marker"; echo 90; fi
     }
     autoclean_root() { echo "autoclean_root" >> "$CALLS"; }
     autoclean_stale_worktrees() { echo "autoclean_stale_worktrees" >> "$CALLS"; }
-    notify() { echo "notify $1" >> "$CALLS"; }
+    notify() { echo "notify $1|$2|$3|$4" >> "$CALLS"; }
     load_fn check_disk
 }
 
+@test "check_disk on / pressure runs autoclean_root and skips the ntfy once recovered" {
+    make_disk_sandbox /=70
+    run check_disk
+    [ "$status" -eq 0 ]
+    grep -qx 'autoclean_root' "$CALLS"
+    ! grep -q 'autoclean_stale_worktrees' "$CALLS"
+    ! grep -q '^notify' "$CALLS"
+    [[ "$output" == *"disk / at 90% — running conservative autoclean before ntfy"* ]]
+    [[ "$output" == *"disk / 90% → 70% after cleanup"* ]]
+    [[ "$output" == *"disk / recovered (90% → 70%) — no ntfy"* ]]
+}
+
+@test "check_disk on / pressure still ntfys, naming every autoclean step, when the cleanup did not bring it under 85%" {
+    make_disk_sandbox /=88
+    run check_disk
+    [ "$status" -eq 0 ]
+    grep -qx 'autoclean_root' "$CALLS"
+    grep -qx "notify Disk warning: / 88% (was 90%)|Autoclean ran (go/bun/npm/uv/pip caches, journal vacuum, idle Gradle caches, old APKs, stale worktrees and /tmp dirs) but disk still >=85%. See $LOG_DIR/pipeline-health.log for per-step results.|high|warning" "$CALLS"
+    [[ "$output" == *"disk / still at 88% after cleanup — ntfying"* ]]
+}
+
 @test "check_disk on /mnt/ext-fast pressure removes stale worktrees and skips the ntfy once recovered" {
-    make_disk_sandbox 70
+    make_disk_sandbox /mnt/ext-fast=70
     run check_disk
     [ "$status" -eq 0 ]
     grep -qx 'autoclean_stale_worktrees' "$CALLS"
     ! grep -q 'autoclean_root' "$CALLS"
     ! grep -q '^notify' "$CALLS"
+    [[ "$output" == *"disk /mnt/ext-fast at 90% — removing stale worktrees before ntfy"* ]]
     [[ "$output" == *"disk /mnt/ext-fast 90% → 70% after cleanup"* ]]
     [[ "$output" == *"disk /mnt/ext-fast recovered (90% → 70%) — no ntfy"* ]]
 }
 
 @test "check_disk on /mnt/ext-fast pressure still ntfys when the cleanup did not bring it under 85%" {
-    make_disk_sandbox 88
+    make_disk_sandbox /mnt/ext-fast=88
     run check_disk
     [ "$status" -eq 0 ]
     grep -qx 'autoclean_stale_worktrees' "$CALLS"
-    grep -qx 'notify Disk warning: /mnt/ext-fast 88% (was 90%)' "$CALLS"
+    grep -qx "notify Disk warning: /mnt/ext-fast 88% (was 90%)|Stale archon worktrees were removed but disk still >=85%. Pipeline will stall if this fills. See $LOG_DIR/pipeline-health.log.|high|warning" "$CALLS"
     [[ "$output" == *"disk /mnt/ext-fast still at 88% after cleanup — ntfying"* ]]
 }
