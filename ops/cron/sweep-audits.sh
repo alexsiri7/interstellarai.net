@@ -68,10 +68,10 @@ notify() {
     -d "$msg" "ntfy.sh/$NTFY_TOPIC" 2>/dev/null || true
 }
 
-# Args: outcome (ok|failed), reason (empty when ok), account dir, run log.
+# Args: outcome (ok|failed), reason (empty when ok), account dir.
 record_sweep() {
-  printf 'last_run=%s\noutcome=%s\nreason=%s\nsweep=%s\nrepo=%s\naccount=%s\nlog=%s\n' \
-    "$(date +%s)" "$1" "$2" "$sweep_name" "$repo_name" "$3" "$4" > "$STATE_DIR/last-sweep"
+  printf 'last_run=%s\noutcome=%s\nreason=%s\nsweep=%s\nrepo=%s\naccount=%s\n' \
+    "$(date +%s)" "$1" "$2" "$sweep_name" "$repo_name" "$3" > "$STATE_DIR/last-sweep"
   log "summary: outcome=$1${2:+ ($2)} sweep=$sweep_name repo=$repo_name account=${3:-none}"
 }
 
@@ -137,7 +137,7 @@ done
 if [ -z "$local_path" ]; then
   log "ERROR: no local clone found for $repo"
   notify "Sweep: $repo_name" "No local clone found" high warning
-  record_sweep failed no-clone "" ""
+  record_sweep failed no-clone ""
   exit 1
 fi
 
@@ -154,7 +154,7 @@ done
 if [ -z "$account_dir" ]; then
   log "$repo_name: $sweep_name sweep not run — no Claude account in CLAUDE_ACCOUNTS passes the probe"
   notify "Sweep failed: $repo_name" "$sweep_name not run — every Claude account failed auth" high x
-  record_sweep failed auth "" ""
+  record_sweep failed auth ""
   exit 1
 fi
 export CLAUDE_CONFIG_DIR="$account_dir"
@@ -170,11 +170,11 @@ cd "$local_path"
 if CLAUDECODE=0 archon workflow run "$workflow" "$prompt" > "$logfile" 2>&1; then
   log "$repo_name: $sweep_name sweep complete"
   notify "Sweep done: $repo_name" "$sweep_name complete — check for PR" default mag
-  record_sweep ok "" "$account_dir" "$logfile"
+  record_sweep ok "" "$account_dir"
 else
   log "$repo_name: $sweep_name sweep failed (see $logfile)"
   notify "Sweep failed: $repo_name" "$sweep_name failed — check $logfile" high x
-  record_sweep failed workflow "$account_dir" "$logfile"
+  record_sweep failed workflow "$account_dir"
 fi
 
 rm -f "$lock_file"
