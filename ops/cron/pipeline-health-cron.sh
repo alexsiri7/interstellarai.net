@@ -30,6 +30,9 @@
 #   8. Shipped-PR ntfy → emit "Shipped: repo #issue" for PRs that closed issues
 #      in the last 24h, when the deploy URL is currently healthy
 #      (dedup per-PR)
+#  9e. Claude accounts: once a day, a real request against every config dir in
+#      CLAUDE_ACCOUNTS (lib/claude-auth.sh) → ntfy once per day per failing
+#      account + one `human-needed` tracking issue, closed on recovery
 #
 # Crontab (logs live under ~/.local/state/archon-cron/logs, which survives a
 # reboot; /tmp does not):
@@ -74,6 +77,8 @@ source "$SCRIPT_DIR/lib/archon-active-runs.sh"
 [ "$MODE" = tick ] && archon_runs_snapshot
 # shellcheck source=lib/ci-skip.sh
 source "$SCRIPT_DIR/lib/ci-skip.sh"
+# shellcheck source=lib/claude-auth.sh
+source "$SCRIPT_DIR/lib/claude-auth.sh"
 BASE_DIR="${BASE_DIR:-/mnt/ext-fast}"
 STATE_DIR="$HOME/.archon/pipeline-health-state"
 # Where the crontab sends every script's stdout/stderr (see ops/cron/crontab).
@@ -2026,6 +2031,26 @@ check_restore_test() {
 }
 
 # ----------------------------------------------------------------------------
+# Check 9e: Claude account auth. The nightly sweep probes only the accounts it
+#   reaches, so an expired token on the other one would sit unnoticed until its
+#   slot; probe every CLAUDE_ACCOUNTS dir once a day (the first tick after
+#   midnight) so it surfaces within a day. Alerting, the tracking issue and
+#   recovery are lib/claude-auth.sh's.
+# ----------------------------------------------------------------------------
+check_claude_auth() {
+  local stamp="$CLAUDE_AUTH_STATE_DIR/last-probe" today dir
+  today=$(date +%F)
+  [ "$(cat "$stamp" 2>/dev/null)" = "$today" ] && return 0
+  mkdir -p "$CLAUDE_AUTH_STATE_DIR"
+  local -a accounts
+  IFS=':' read -ra accounts <<< "$CLAUDE_ACCOUNTS"
+  for dir in "${accounts[@]}"; do
+    claude_auth_check "$dir" && log "claude-auth: $dir ok"
+  done
+  echo "$today" > "$stamp"
+}
+
+# ----------------------------------------------------------------------------
 # Check 10: Paused archon runs nothing will resume. reconcile_zombies reaps
 # stale `running` rows and deliberately leaves `paused` ones to the server's
 # continuation scheduler; this is the other half — the runs that scheduler has
@@ -2112,5 +2137,6 @@ check_db_backup
 check_system_maintenance
 check_archon_update
 check_restore_test
+check_claude_auth
 check_progress
 log "=== done ==="

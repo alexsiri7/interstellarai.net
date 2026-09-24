@@ -8,6 +8,7 @@ export PATH="$HOME/.bun/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 PROJECTS_FILE="$SCRIPT_DIR/../cron/archon-projects.txt"
+SWEEP_STATUS_FILE="$HOME/.archon/sweep-state/last-sweep"   # written by ops/cron/sweep-audits.sh
 OWNER="alexsiri7"
 
 # Colours
@@ -45,6 +46,24 @@ ci_status() {
                 elif (map(select(.conclusion!="success" and .conclusion!="skipped" and .conclusion!="neutral")) | length) > 0 then "fail"
                 else "pass" end' 2>/dev/null || echo "err")
     echo "$result"
+}
+
+sweep_status() {
+    [ -r "$SWEEP_STATUS_FILE" ] || { printf "${DIM}no sweep recorded${RESET}"; return; }
+    local key val last_run=0 outcome="" reason="" sweep="" repo="" account=""
+    while IFS='=' read -r key val; do
+        case "$key" in
+            last_run) last_run="$val" ;; outcome) outcome="$val" ;; reason) reason="$val" ;;
+            sweep) sweep="$val" ;; repo) repo="$val" ;; account) account="$val" ;;
+        esac
+    done < "$SWEEP_STATUS_FILE"
+    local when; when=$(date -d "@$last_run" '+%F %H:%M' 2>/dev/null || echo "?")
+    if [ "$outcome" = ok ]; then
+        printf "${GREEN}OK${RESET}"
+    else
+        printf "${RED}FAILED (%s)${RESET}" "${reason:-unknown}"
+    fi
+    printf "  %s on %s, %s%s" "$sweep" "$repo" "$when" "${account:+, account ${account##*/}}"
 }
 
 # --- Header ---
@@ -90,6 +109,7 @@ for REPO in "${PROJECTS[@]}"; do
 done
 
 echo ""
+printf "last sweep: %s\n\n" "$(sweep_status)"
 if [ "$any_stuck" -eq 1 ]; then
     printf "${RED}CI red on main in at least one project — check above.${RESET}\n\n"
 fi

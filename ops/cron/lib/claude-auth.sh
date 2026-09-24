@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# Claude account health for the cron scripts that spend Claude tokens.
+# Usage:
+#   source "$SCRIPT_DIR/lib/claude-auth.sh"
+#   claude_auth_check "$dir"    # probe one config dir, alert/recover, 0 = usable
+#
+# `claude auth status` still reports loggedIn: true for a config dir whose
+# OAuth token the API rejects (401 on ~/.claude-secondary from 2026-09-11 lost
+# seven nightly sweeps before anyone noticed), so the probe is a real,
+# minimal request.
+#
+# A failing account gets one ntfy per day and one open `human-needed` issue on
+# CLAUDE_AUTH_ISSUE_REPO naming the re-login command, commented on once a day
+# while it keeps failing and closed by the first probe that passes again.
+# `human-needed` is outside issue-pickup-cron.sh's ingest labels, so the issue
+# is never fed back into archon. Per-account state lives in
+# CLAUDE_AUTH_STATE_DIR, shared by every caller so they do not alert twice.
+#
+# Callers provide log() and notify().
+
+[ -n "${_ARCHON_CLAUDE_AUTH_SH:-}" ] && return 0
+_ARCHON_CLAUDE_AUTH_SH=1
+
+# Colon-separated config dirs; secrets.env may override (it is sourced later).
+CLAUDE_ACCOUNTS="${CLAUDE_ACCOUNTS:-$HOME/.claude:$HOME/.claude-secondary}"
+CLAUDE_AUTH_STATE_DIR="${CLAUDE_AUTH_STATE_DIR:-$HOME/.archon/pipeline-health-state/claude-auth}"
+CLAUDE_AUTH_ISSUE_REPO="alexsiri7/interstellarai.net"
+CLAUDE_AUTH_PROBE_TIMEOUT="${CLAUDE_AUTH_PROBE_TIMEOUT:-90}"
+
+# Echoes the probe's last output line (the API error on failure).
+claude_auth_probe() {
+  local dir="$1" out rc
+  out=$(CLAUDE_CONFIG_DIR="$dir" CLAUDECODE=0 \
+    timeout "$CLAUDE_AUTH_PROBE_TIMEOUT" claude -p --model haiku "ok" </dev/null 2>&1)
+  rc=$?
+  [ "$rc" -eq 124 ] && out="probe timed out after ${CLAUDE_AUTH_PROBE_TIMEOUT}s"
+  printf '%s\n' "$out" | tail -1
+  return "$rc"
+}
+
+claude_auth_issue_title() { echo "Claude account auth failing: $1"; }
+
+# Echoes the open tracking issue number for $1 (empty if none); non-zero when
+# gh itself failed, so a flaky listing never reads as "no issue yet".
+claude_auth_find_issue() {
+  local title list
+  title=$(claude_auth_issue_title "$1")
+  list=$(gh issue list --repo "$CLAUDE_AUTH_ISSUE_REPO" --state open --label human-needed \
+    --limit 100 --json number,title 2>/dev/null) || return 1
+  jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$list"
+}
+
+claude_auth_failed() {
+  local dir="$1" detail="$2"
+  local key="${dir//\//_}" today issue
+  local failing="$CLAUDE_AUTH_STATE_DIR/$key.failing" alerted="$CLAUDE_AUTH_STATE_DIR/$key.alerted"
+  today=$(date +%F)
+  mkdir -p "$CLAUDE_AUTH_STATE_DIR"
+  touch "$failing"
+  log "claude-auth: $dir failed the probe: $detail"
+
+  local first_today=1
+  [ "$(cat "$alerted" 2>/dev/null)" = "$today" ] && first_today=0
+
+  if issue=$(claude_auth_find_issue "$dir"); then
+    if [ -z "$issue" ]; then
+      gh label create --repo "$CLAUDE_AUTH_ISSUE_REPO" human-needed \
+        --color D93F0B --description "Needs a human — not picked up by archon" >/dev/null 2>&1 || true
+      if gh issue create --repo "$CLAUDE_AUTH_ISSUE_REPO" --label human-needed \
+          --title "$(claude_auth_issue_title "$dir")" --body "$(cat <<EOF
+The Claude account in \`$dir\` fails a real request, so cron jobs that use it (the nightly sweep-audits rotation) cannot run on it:
+
+\`\`\`
+$detail
+\`\`\`
+
+Log in again:
+
+\`\`\`
+CLAUDE_CONFIG_DIR=$dir claude auth login
+\`\`\`
+
+Auto-filed by \`ops/cron/lib/claude-auth.sh\`; \`sweep-audits.sh\` falls back to another account in \`CLAUDE_ACCOUNTS\` meanwhile. This issue is closed automatically once the probe passes again.
+EOF
+)" >/dev/null 2>&1; then
+        log "claude-auth: opened tracking issue for $dir"
+      else
+        log "claude-auth: WARNING: could not open tracking issue for $dir"
+      fi
+    elif [ "$first_today" -eq 1 ]; then
+      gh issue comment "$issue" --repo "$CLAUDE_AUTH_ISSUE_REPO" \
+        --body "Still failing on $today: \`$detail\`" >/dev/null 2>&1 || true
+    fi
+  else
+    log "claude-auth: WARNING: could not list issues on $CLAUDE_AUTH_ISSUE_REPO"
+  fi
+
+  [ "$first_today" -eq 1 ] || return 0
+  notify "Claude account auth failing: ${dir##*/}" \
+    "$dir: $detail
+Re-login: CLAUDE_CONFIG_DIR=$dir claude auth login" \
+    high key
+  echo "$today" > "$alerted"
+}
+
+claude_auth_recovered() {
+  local dir="$1"
+  local key="${dir//\//_}" issue
+  local failing="$CLAUDE_AUTH_STATE_DIR/$key.failing"
+  [ -f "$failing" ] || return 0
+  issue=$(claude_auth_find_issue "$dir") || return 0
+  if [ -n "$issue" ] && ! gh issue close "$issue" --repo "$CLAUDE_AUTH_ISSUE_REPO" \
+      --comment "The probe passes again on $(date +%F); closing." >/dev/null 2>&1; then
+    log "claude-auth: WARNING: could not close tracking issue #$issue for $dir"
+    return 0
+  fi
+  rm -f "$failing" "$CLAUDE_AUTH_STATE_DIR/$key.alerted"
+  log "claude-auth: $dir recovered${issue:+ — closed #$issue}"
+}
+
+claude_auth_check() {
+  local dir="$1" detail
+  if detail=$(claude_auth_probe "$dir"); then
+    claude_auth_recovered "$dir"
+    return 0
+  fi
+  claude_auth_failed "$dir" "$detail"
+  return 1
+}
