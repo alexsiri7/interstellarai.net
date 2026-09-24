@@ -69,7 +69,9 @@ STUB
     PROMOTED_ISSUES=()
 
     # shellcheck disable=SC1090
-    source <(grep -E '^(INGEST|ARCHON|HUMAN)_LABELS=\(|^STUCK_AGE_SECONDS=' "$SCRIPT_FILE")
+    source <(grep -E '^(INGEST|ARCHON)_LABELS=\(|^STUCK_AGE_SECONDS=' "$SCRIPT_FILE")
+    # shellcheck source=../lib/human-labels.sh
+    source "$(dirname "$SCRIPT_FILE")/lib/human-labels.sh"
     load_fn has_open_blockers
     load_fn has_archon_label
     load_fn has_human_label

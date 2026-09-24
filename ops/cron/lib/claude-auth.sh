@@ -9,17 +9,20 @@
 # seven nightly sweeps before anyone noticed), so the probe is a real,
 # minimal request.
 #
-# A failing account gets one ntfy per day and one open `human-needed` issue on
-# CLAUDE_AUTH_ISSUE_REPO naming the re-login command, commented on once a day
-# while it keeps failing and closed by the first probe that passes again.
-# `human-needed` is outside issue-pickup-cron.sh's ingest labels, so the issue
-# is never fed back into archon. Per-account state lives in
+# A failing account gets one ntfy per day and one open HUMAN_NEEDED_LABEL issue
+# on CLAUDE_AUTH_ISSUE_REPO naming the re-login command, commented on once a
+# day while it keeps failing and closed by the first probe that passes again.
+# That label is one of HUMAN_LABELS, so issue-pickup-cron.sh never feeds the
+# issue back into archon. Per-account state lives in
 # CLAUDE_AUTH_STATE_DIR, shared by every caller so they do not alert twice.
 #
 # Callers provide log() and notify().
 
 [ -n "${_ARCHON_CLAUDE_AUTH_SH:-}" ] && return 0
 _ARCHON_CLAUDE_AUTH_SH=1
+
+# shellcheck source=lib/human-labels.sh
+source "$(dirname "${BASH_SOURCE[0]}")/human-labels.sh"
 
 # Colon-separated config dirs; secrets.env may override (it is sourced later).
 CLAUDE_ACCOUNTS="${CLAUDE_ACCOUNTS:-$HOME/.claude:$HOME/.claude-secondary}"
@@ -45,7 +48,7 @@ claude_auth_issue_title() { echo "Claude account auth failing: $1"; }
 claude_auth_find_issue() {
   local title list
   title=$(claude_auth_issue_title "$1")
-  list=$(gh issue list --repo "$CLAUDE_AUTH_ISSUE_REPO" --state open --label human-needed \
+  list=$(gh issue list --repo "$CLAUDE_AUTH_ISSUE_REPO" --state open --label "$HUMAN_NEEDED_LABEL" \
     --limit 100 --json number,title 2>/dev/null) || return 1
   jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$list"
 }
@@ -64,9 +67,9 @@ claude_auth_failed() {
 
   if issue=$(claude_auth_find_issue "$dir"); then
     if [ -z "$issue" ]; then
-      gh label create --repo "$CLAUDE_AUTH_ISSUE_REPO" human-needed \
+      gh label create --repo "$CLAUDE_AUTH_ISSUE_REPO" "$HUMAN_NEEDED_LABEL" \
         --color D93F0B --description "Needs a human — not picked up by archon" >/dev/null 2>&1 || true
-      if gh issue create --repo "$CLAUDE_AUTH_ISSUE_REPO" --label human-needed \
+      if gh issue create --repo "$CLAUDE_AUTH_ISSUE_REPO" --label "$HUMAN_NEEDED_LABEL" \
           --title "$(claude_auth_issue_title "$dir")" --body "$(cat <<EOF
 The Claude account in \`$dir\` fails a real request, so cron jobs that use it (the nightly sweep-audits rotation) cannot run on it:
 
@@ -108,7 +111,10 @@ claude_auth_recovered() {
   local key="${dir//\//_}" issue
   local failing="$CLAUDE_AUTH_STATE_DIR/$key.failing"
   [ -f "$failing" ] || return 0
-  issue=$(claude_auth_find_issue "$dir") || return 0
+  if ! issue=$(claude_auth_find_issue "$dir"); then
+    log "claude-auth: WARNING: could not list issues on $CLAUDE_AUTH_ISSUE_REPO (recovery check for $dir)"
+    return 0
+  fi
   if [ -n "$issue" ] && ! gh issue close "$issue" --repo "$CLAUDE_AUTH_ISSUE_REPO" \
       --comment "The probe passes again on $(date +%F); closing." >/dev/null 2>&1; then
     log "claude-auth: WARNING: could not close tracking issue #$issue for $dir"

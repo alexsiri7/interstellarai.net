@@ -123,6 +123,23 @@ open_issue_for() {
     [ ! -e "$CLAUDE_AUTH_STATE_DIR/${BAD//\//_}.alerted" ]
 }
 
+@test "a failed issue listing during recovery is logged and keeps the failing state" {
+    claude_auth_check "$BAD" || true
+    rm "$BAD/broken"
+    touch "$GH_ISSUES.fail"
+    run claude_auth_check "$BAD"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"could not list issues"*"recovery check for $BAD"* ]]
+    [ -e "$CLAUDE_AUTH_STATE_DIR/${BAD//\//_}.failing" ]
+}
+
+@test "the tracking issue's label is one issue-pickup-cron.sh never ingests" {
+    SCRIPT_FILE="$BATS_TEST_DIRNAME/../issue-pickup-cron.sh"
+    # shellcheck disable=SC1090
+    source <(awk '/^has_human_label\(\)/{p=1} p{print} p && /^}$/{p=0}' "$SCRIPT_FILE")
+    has_human_label "[\"bug\",\"$HUMAN_NEEDED_LABEL\"]"
+}
+
 @test "a probe that hangs is cut off and counts as a failure" {
     cat > "$TEST_TMP/bin/claude" <<'EOF'
 #!/usr/bin/env bash

@@ -303,7 +303,7 @@ sha_attempt_decide() {
 
 # Labels that mean "this issue already has an owner" — any archon:* pipeline
 # state, or a human-intent label. Keep TRACKED_HUMAN_LABELS in sync with
-# HUMAN_LABELS in issue-pickup-cron.sh. Filing a second issue beside one of
+# HUMAN_LABELS in lib/human-labels.sh. Filing a second issue beside one of
 # these is the #75 refile loop.
 TRACKED_HUMAN_LABELS='["manual-review","factory-gap","human-needed","wontfix","duplicate","question"]'
 # archon:* states that mean a run is actually moving. The other archon:* states

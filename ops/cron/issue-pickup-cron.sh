@@ -36,10 +36,8 @@ INGEST_LABELS=("enhancement" "bug")
 # Labels archon already manages — presence of any of these means "don't re-queue".
 ARCHON_LABELS=("archon:queued" "archon:in-progress" "archon:triage-in-progress" "archon:done" "archon:failed" "archon:skipped" "archon:blocked")
 
-# Labels that signal human-only intent — triage must not reclassify these and
-# auto_queue must not ingest them. requirements-gap issues are filed by the
-# requirements-audit sweep and vetted by a human before ingest (#72).
-HUMAN_LABELS=("manual-review" "factory-gap" "human-needed" "wontfix" "duplicate" "question" "requirements-gap")
+# shellcheck source=lib/human-labels.sh
+source "$SCRIPT_DIR/lib/human-labels.sh"
 
 PROJECTS=("${DEFAULT_PROJECTS[@]}")
 [ $# -gt 0 ] && PROJECTS=("$@")
