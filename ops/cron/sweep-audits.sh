@@ -22,6 +22,12 @@
 # Night 16: cosmic-match     — requirements-audit
 # (cycle repeats)
 #
+# Before the workflow runs, the slot's Claude account (CLAUDE_ACCOUNTS,
+# alternating per slot) is probed with a real request; a failing account is
+# reported through lib/claude-auth.sh and the next one is tried. Every run that
+# gets that far records its outcome in $STATE_DIR/last-sweep for
+# ops/bin/pipeline-status.
+#
 # Ported from archon/scripts/poll-sweep.sh. Matches the style of the other
 # ops/cron scripts (log/notify helpers, SECRETS_FILE, SCRIPT_DIR, STATE_DIR).
 #
@@ -36,10 +42,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/throttle.sh
 source "$SCRIPT_DIR/lib/throttle.sh"
 should_tick "sweep-audits" || exit 0
+# shellcheck source=lib/claude-auth.sh
+source "$SCRIPT_DIR/lib/claude-auth.sh"
 BASE_DIR="/mnt/ext-fast"
 STATE_DIR="$HOME/.archon/sweep-state"
 LOG_DIR="$HOME/.archon/logs/sweep"
-CLAUDE_ACCOUNTS="${CLAUDE_ACCOUNTS:-$HOME/.claude:$HOME/.claude-secondary}"
 
 # NTFY_TOPIC loaded from secrets.env. Fail loud if unset.
 SECRETS_FILE="${ARCHON_CRON_SECRETS:-$HOME/.config/archon-cron/secrets.env}"
@@ -59,6 +66,13 @@ notify() {
   curl -s -o /dev/null \
     -H "Title: $title" -H "Priority: $priority" -H "Tags: $tags" \
     -d "$msg" "ntfy.sh/$NTFY_TOPIC" 2>/dev/null || true
+}
+
+# Args: outcome (ok|failed), reason (empty when ok), account dir.
+record_sweep() {
+  printf 'last_run=%s\noutcome=%s\nreason=%s\nsweep=%s\nrepo=%s\naccount=%s\n' \
+    "$(date +%s)" "$1" "$2" "$sweep_name" "$repo_name" "$3" > "$STATE_DIR/last-sweep"
+  log "summary: outcome=$1${2:+ ($2)} sweep=$sweep_name repo=$repo_name account=${3:-none}"
 }
 
 # Rotation config. Deliberately hardcoded (not loaded from archon-projects.txt):
@@ -123,12 +137,26 @@ done
 if [ -z "$local_path" ]; then
   log "ERROR: no local clone found for $repo"
   notify "Sweep: $repo_name" "No local clone found" high warning
+  record_sweep failed no-clone ""
   exit 1
 fi
 
-# Alternate Claude accounts per slot
+# Alternate Claude accounts per slot, falling back through the rest in order.
 IFS=':' read -ra accounts <<< "$CLAUDE_ACCOUNTS"
-account_dir="${accounts[$((slot % ${#accounts[@]}))]}"
+account_dir=""
+for (( i = 0; i < ${#accounts[@]}; i++ )); do
+  candidate="${accounts[$(( (slot + i) % ${#accounts[@]} ))]}"
+  if claude_auth_check "$candidate"; then
+    account_dir="$candidate"
+    break
+  fi
+done
+if [ -z "$account_dir" ]; then
+  log "$repo_name: $sweep_name sweep not run — no Claude account in CLAUDE_ACCOUNTS passes the probe"
+  notify "Sweep failed: $repo_name" "$sweep_name not run — every Claude account failed auth" high x
+  record_sweep failed auth ""
+  exit 1
+fi
 export CLAUDE_CONFIG_DIR="$account_dir"
 
 log "repo: $local_path"
@@ -142,9 +170,11 @@ cd "$local_path"
 if CLAUDECODE=0 archon workflow run "$workflow" "$prompt" > "$logfile" 2>&1; then
   log "$repo_name: $sweep_name sweep complete"
   notify "Sweep done: $repo_name" "$sweep_name complete — check for PR" default mag
+  record_sweep ok "" "$account_dir"
 else
   log "$repo_name: $sweep_name sweep failed (see $logfile)"
   notify "Sweep failed: $repo_name" "$sweep_name failed — check $logfile" high x
+  record_sweep failed workflow "$account_dir"
 fi
 
 rm -f "$lock_file"
