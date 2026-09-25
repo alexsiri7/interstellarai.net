@@ -238,7 +238,9 @@ auto_triage() {
 # Survivor, first match wins: a closed issue (already worked), an in-progress
 # one (never kill a live run), the bridge's (it is queued at filing time and
 # carries the sentry label), the lowest number. Every other open member is closed
-# as its duplicate, except in-progress and human-owned ones.
+# as its duplicate, except in-progress and human-owned ones. Only the two filed
+# shapes are ever closed: a hand-written issue that pastes the link (say, a
+# regression report) must not be closed against the old fixed issue.
 dedupe_sentry() {
   local project="$1"
   local open_json closed_json
@@ -269,6 +271,7 @@ dedupe_sentry() {
     def sentry_id: [(.body // "") | capture("sentry\\.io/issues/(?<id>[0-9]+)")][0].id;
     (.[0] | map({number, open: true, labels: [.labels[].name],
                  bridge: ((.body // "") | test("\\*\\*Sentry issue ID:\\*\\*")),
+                 app: ((.body // "") | test("^Sentry Issue: \\[")),
                  id: sentry_id})) as $open
     | (.[1] | map(select(.stateReason == "COMPLETED")
                   | {number, open: false, labels: [], bridge: false, id: sentry_id})) as $closed
@@ -278,7 +281,7 @@ dedupe_sentry() {
        // (map(select(.labels | index("archon:in-progress"))) | min_by(.number))
        // (map(select(.bridge)) | min_by(.number))
        // min_by(.number)) as $survivor
-    | .[] | select(.open and .number != $survivor.number)
+    | .[] | select(.open and (.bridge or .app) and .number != $survivor.number)
     | [.number, $survivor.number, .id, (.labels | tojson)] | @tsv' 2>/dev/null)
 }
 

@@ -175,6 +175,16 @@ closed_issue() { printf '{"number":%s,"body":"%s","stateReason":"%s"}' "$1" "$2"
     [ "$(gh_calls -- 'issue close')" -eq 0 ]
 }
 
+@test "a hand-written issue that pastes the Sentry link is not closed" {
+    echo "[$(open_issue 500 'Regression of #432, see https://alex-siri.sentry.io/issues/147429034/' '[{"name":"bug"}]')]" > "$T/fixtures/open.json"
+    echo "[$(closed_issue 432 "$(bridge_body 147429034)" COMPLETED)]" > "$T/fixtures/closed.json"
+    load_fn dedupe_sentry
+
+    dedupe_sentry testproj
+
+    [ "$(gh_calls -- 'issue close')" -eq 0 ]
+}
+
 @test "a human-owned duplicate is not closed" {
     echo "[$(open_issue 431 "$(app_body 147429034)" '[{"name":"bug"},{"name":"factory-gap"}]')]" > "$T/fixtures/open.json"
     echo "[$(closed_issue 432 "$(bridge_body 147429034)" COMPLETED)]" > "$T/fixtures/closed.json"
