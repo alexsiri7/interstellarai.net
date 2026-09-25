@@ -13,12 +13,17 @@ setup() {
     # Stub gh: records argv and answers `gh api` with what its --jq would print:
     # "<total>\t<open>" for sub_issues (absent = no sub-issues), one of
     # completed-issue / merged-pr / pr / other for a single issue or PR.
+    # `issue view` prints the body-<issue> fixture (default: an ordinary body),
+    # or fails with GH_VIEW_RC.
     cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_ARGV"
 case "$*" in
   *sub_issues*)       cat "$GH_FIXTURES/sub-$(sed -E 's#.*/issues/([0-9]+)/.*#\1#' <<<"$*")" 2>/dev/null || printf '0\t0\n' ;;
   "api "*/issues/*)   cat "$GH_FIXTURES/ref-${2##*/}" 2>/dev/null || exit 1 ;;
+  *"issue view"*)
+    [ -n "${GH_VIEW_RC:-}" ] && exit "$GH_VIEW_RC"
+    cat "$GH_FIXTURES/body-$(sed -E 's/^issue view ([0-9]+).*/\1/' <<<"$*")" 2>/dev/null || echo 'An ordinary issue.' ;;
   *"issue close"*)    exit "${GH_CLOSE_RC:-0}" ;;
   *"issue edit"*)     exit "${GH_EDIT_RC:-0}" ;;
   *"issue comment"*)  exit 0 ;;
@@ -241,4 +246,59 @@ assert_untouched() {
     [ "$(gh_calls 'issue edit')" -eq 0 ]
     [ "$(gh_calls 'issue comment')" -eq 0 ]
     [[ "$output" == *"#7 — GitHub confirms already fixed by merged PR #50, but the close failed"* ]]
+}
+
+# un-reminder #450 (2026-09-25): PR #449 is what turned Release red, not a fix.
+health_verdict() {
+    printf '%s\n' "$1" > "$RUN_LOG"
+    printf '## Main CI red\n\nAuto-filed by `pipeline-health-cron.sh`. Main CI is a pipeline bottleneck.\n' > "$T/fixtures/body-450"
+    fixture ref-449 merged-pr
+}
+
+@test "the real #450 verdict parks a health-filed issue instead of closing it via the merged PR it cites" {
+    health_verdict 'No delivery needed: Issue #450 flags Release CI failing at the current main HEAD (6975b17), but that commit — PR #449, merged one step before the issue was auto-filed — deliberately added the guard that fails Release when the secret is unset.
+Report: /x'
+
+    run "$SCRIPT" testproj 450 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    grep -q -- "issue edit 450 --repo alexsiri7/testproj --remove-label archon:in-progress --add-label archon:skipped" "$GH_ARGV"
+    [ "$(gh_calls 'issue close')" -eq 0 ]
+    [ "$(gh_calls 'api ')" -eq 0 ]
+    grep -q -- "issue comment 450 " "$GH_ARGV"
+    grep -q "Not auto-closed: the issue was filed by pipeline-health-cron.sh" "$GH_ARGV"
+}
+
+@test "--recheck leaves a parked health-filed verdict untouched even when it names a merged PR" {
+    health_verdict 'No delivery needed: main is red because merged PR #449 added a guard; owner action needed.
+
+Parked as archon:skipped. Remove the label and add archon:queued to run it again.'
+
+    run "$SCRIPT" --recheck testproj 450 "$RUN_LOG"
+
+    [ "$status" -eq 1 ]
+    assert_untouched
+}
+
+@test "a failed issue lookup parks rather than closes" {
+    printf 'No delivery needed: already fixed by PR #50.\nReport: /x\n' > "$RUN_LOG"
+    fixture ref-50 merged-pr
+    export GH_VIEW_RC=1
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_parked 7
+}
+
+@test "an empty non-health body still closes on a merged PR" {
+    printf 'No delivery needed: already fixed by PR #50.\nReport: /x\n' > "$RUN_LOG"
+    fixture ref-50 merged-pr
+    : > "$T/fixtures/body-7"
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    grep -q -- "issue close 7 --repo alexsiri7/testproj --reason completed --comment" "$GH_ARGV"
+    [ "$(gh_calls 'Not auto-closed')" -eq 0 ]
 }

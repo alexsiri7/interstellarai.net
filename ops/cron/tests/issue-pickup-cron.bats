@@ -337,6 +337,40 @@ STUB
     [ "$SUMMARY_STALE" -eq 1 ]
 }
 
+# #107: pipeline-health fires archon-ship on the issues it files, logging under
+# its own names rather than cron-issue-<N>-*.
+@test "unstick_stale settles a stale health-filed issue from its pipeline-health run log" {
+    echo '[{"number":73}]' > "$T/fixtures/in-progress.json"
+    echo '2026-01-01T00:00:00Z' > "$T/fixtures/events-73"
+    echo '["bug","archon:in-progress"]' > "$T/fixtures/labels-73"
+    mkdir -p "$T/base/testproj/.archon-logs"
+    local run_log="$T/base/testproj/.archon-logs/health-ci-fix-aaaaaaaa-issue-73-20260101-000000.log"
+    : > "$run_log"
+    stub_settle
+    load_fn unstick_stale
+
+    unstick_stale testproj
+
+    grep -qxF "ARGS testproj 73 $run_log" "$SETTLE_RECORD"
+    [ "$(gh_calls -- '--add-label archon:queued')" -eq 0 ]
+    [ "$SUMMARY_STALE" -eq 1 ]
+}
+
+@test "unstick_stale does not take another issue's pipeline-health log for its own" {
+    echo '[{"number":73}]' > "$T/fixtures/in-progress.json"
+    echo '2026-01-01T00:00:00Z' > "$T/fixtures/events-73"
+    echo '["bug","archon:in-progress"]' > "$T/fixtures/labels-73"
+    mkdir -p "$T/base/testproj/.archon-logs"
+    : > "$T/base/testproj/.archon-logs/health-ci-fix-aaaaaaaa-issue-730-20260101-000000.log"
+    stub_settle
+    load_fn unstick_stale
+
+    unstick_stale testproj
+
+    [ ! -s "$SETTLE_RECORD" ]
+    grep -q -- "issue edit 73 --repo alexsiri7/testproj --remove-label archon:in-progress --add-label archon:queued" "$GH_ARGV"
+}
+
 @test "unstick_stale leaves an issue alone while its in-progress label is young" {
     echo '[{"number":73}]' > "$T/fixtures/in-progress.json"
     date -u +%Y-%m-%dT%H:%M:%SZ > "$T/fixtures/events-73"

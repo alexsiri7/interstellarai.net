@@ -74,6 +74,18 @@ stub_gh_for_main_ci() {
     }
 }
 
+# The launch runs as a background job nothing waits for, so poll for its record.
+# `command sleep`: setup() stubs sleep out. $1 is the log name's prefix; the
+# path is repo-relative so no argv carries the project's directory.
+assert_settled_launch() {
+    for _ in $(seq 1 100); do [ -s "$STATE_DIR/nohup-argv" ] && break; command sleep 0.05; done
+    grep -qxF "$SCRIPT_DIR/lib/settle-ship-outcome.sh" "$STATE_DIR/nohup-argv"
+    grep -qxF "test-project" "$STATE_DIR/nohup-argv"
+    grep -qxF "bash" "$STATE_DIR/nohup-argv"
+    grep -qxF "42" "$STATE_DIR/nohup-argv"
+    grep -qE "^\.archon-logs/$1-issue-42-[0-9-]+\.log\$" "$STATE_DIR/nohup-argv"
+}
+
 # Globals and stubs check_main_ci reads that live outside its own body.
 setup_main_ci_env() {
     mkdir -p "$STATE_DIR/main-ci" "$STATE_DIR/escalated-main"
@@ -92,7 +104,9 @@ setup_main_ci_env() {
     add_to_project() { :; }
     file_stuck_issue() { :; }
     archon() { :; }
-    nohup() { :; }
+    SCRIPT_DIR="$STATE_DIR/scriptdir"
+    # Records the settle wrapper's environment and argv; see assert_settled_launch.
+    nohup() { printf '%s\n' "$SETTLE_SCRIPT" "$SETTLE_PROJECT" "$@" > "$STATE_DIR/nohup-argv"; }
     disown() { :; }
     load_tracked_labels
     load_fn find_tracked_issue
@@ -338,6 +352,18 @@ stub_gh_issues() {
     [ ! -f "$ISSUE_SENTINEL" ]
     [ ! -f "$STATE_DIR/main-ci/test-project" ]
     [ ! -f "$STATE_DIR/main-ci-cooldown-test-project" ]
+}
+
+# #107: a run that ends with no PR must not leave the issue archon:in-progress.
+@test "check_main_ci launches archon-ship through the settle wrapper" {
+    setup_main_ci_env
+    RUNS_FIXTURE='[{"databaseId":1,"conclusion":"failure","headSha":"aaa","workflowName":"CI"}]'
+    stub_gh_for_main_ci
+
+    check_main_ci "test-project"
+
+    [ -f "$ISSUE_SENTINEL" ]
+    assert_settled_launch health-ci-fix-aaa
 }
 
 @test "check_main_ci sees a red CI masked by a later green Release at the same SHA" {
@@ -598,7 +624,9 @@ setup_prod_deploy_env() {
     mkdir -p "$BASE_DIR/test-project/.git"
     ISSUE_SENTINEL="$STATE_DIR/issue-created"
     archon() { :; }
-    nohup() { :; }
+    SCRIPT_DIR="$STATE_DIR/scriptdir"
+    # Records the settle wrapper's environment and argv; see assert_settled_launch.
+    nohup() { printf '%s\n' "$SETTLE_SCRIPT" "$SETTLE_PROJECT" "$@" > "$STATE_DIR/nohup-argv"; }
     disown() { :; }
     # HEAD "aaa" is hours old unless a case is about a fresh push.
     HEAD_FIXTURE='{"sha":"aaa","ts":"2026-01-01T00:00:00Z"}'
@@ -659,6 +687,7 @@ setup_prod_deploy_env() {
     grep -q "Prod deploy failed on main" "$ISSUE_SENTINEL"
     grep -q "archon:in-progress" "$ISSUE_SENTINEL"
     [ -f "$STATE_DIR/prod-deploy-failed-test-project-aaa" ]
+    assert_settled_launch health-prod-deploy-aaa
 }
 
 @test "check_prod_deploy waits on a fresh HEAD that no deploy has reached yet" {
