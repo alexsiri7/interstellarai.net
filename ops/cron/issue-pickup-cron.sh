@@ -348,8 +348,8 @@ unstick_stale() {
     fi
 
     # A run that ended with a "nothing to deliver" verdict is not stuck: settle
-    # it (close or park) instead of paying for the same triage again. Reads the newest run log for
-    # this issue; see lib/settle-ship-outcome.sh.
+    # it (close or park) instead of paying for the same triage again. Reads the
+    # newest run log for this issue; see lib/settle-ship-outcome.sh.
     local last_log
     last_log=$(ls -t "$repo_dir"/.archon-logs/cron-issue-"$num"-*.log 2>/dev/null | head -1)
     if [ -n "$last_log" ] && "$SCRIPT_DIR/lib/settle-ship-outcome.sh" "$project" "$num" "$last_log"; then
