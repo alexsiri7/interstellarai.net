@@ -20,6 +20,11 @@
 # failure on the way, parks the issue as archon:skipped with the verdict as a
 # comment, so a human decides and bug-bankruptcy ages it out.
 #
+# Issues pipeline-health-cron.sh files (Main CI red, Prod deploy failed/lagging)
+# are never closed (#107): they track live CI/deploy state, and a PR their
+# verdict names is usually what broke it, not a fix (un-reminder #450 cites
+# merged PR #449, the cause of the red). They are always parked for a human.
+#
 # Exit 0 when a verdict was found and recorded, 1 when the log carries none
 # (crash, rate limit, delivered PR) so the caller keeps its existing handling.
 #
@@ -67,7 +72,17 @@ Closed as archon:done: ${evidence}. Reopen and add archon:queued to run it again
   exit 0
 }
 
+health_filed=0
 if [[ "$verdict" == "No delivery needed: "* ]]; then
+  # Keyed on the marker every pipeline-health issue body carries. A failed
+  # lookup counts as health-filed, since any gh failure parks.
+  health_filed=1
+  if body=$(gh issue view "$issue" --repo "$repo" --json body --jq '.body' 2>/dev/null); then
+    # shellcheck disable=SC2016  # the backticks are issue markdown, not shell
+    [[ "$body" == *'Auto-filed by `pipeline-health-cron.sh`'* ]] || health_filed=0
+  fi
+fi
+if [ "$health_filed" = 0 ] && [[ "$verdict" == "No delivery needed: "* ]]; then
   read -r sub_total sub_open < <(gh api "repos/$repo/issues/$issue/sub_issues?per_page=100" \
     --jq '[length, ([.[] | select(.state == "open")] | length)] | @tsv' 2>/dev/null)
   if [[ "${sub_total:-}" =~ ^[0-9]+$ && "${sub_open:-}" =~ ^[0-9]+$ ]] \
@@ -105,7 +120,10 @@ if ! gh issue edit "$issue" --repo "$repo" \
   echo "$(date -Is) [issue-pickup] $project: #$issue — could not park as archon:skipped"
   exit 1
 fi
+health_note=""
+[ "$health_filed" = 1 ] \
+  && health_note=" Not auto-closed: the issue was filed by pipeline-health-cron.sh (CI/deploy state), or its body could not be read, so a human decides."
 gh issue comment "$issue" --repo "$repo" --body "archon-ship finished without a PR: ${verdict}
 
-Parked as archon:skipped. Remove the label and add archon:queued to run it again. Run log: \`${run_log}\`" >/dev/null 2>&1 || true
+Parked as archon:skipped. Remove the label and add archon:queued to run it again.${health_note} Run log: \`${run_log}\`" >/dev/null 2>&1 || true
 echo "$(date -Is) [issue-pickup] $project: #$issue settled as archon:skipped (${verdict:0:120})"
