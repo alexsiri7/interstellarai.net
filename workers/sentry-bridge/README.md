@@ -17,6 +17,12 @@ Sentry issue.created
   → archon pipeline auto-queues it after 5 minutes
 ```
 
+The worker's dedup only sees its own issues. If a Sentry alert rule also has a
+"create a GitHub issue" action (un-reminder's rule 492005 did), every crash is
+filed twice, about a second apart; switch that action off in Sentry's alert
+rules. `ops/cron/issue-pickup-cron.sh` closes such duplicates regardless
+(`dedupe_sentry`, keyed on the `sentry.io/issues/<id>` link in the body).
+
 ## One-time Sentry setup (user action)
 
 Sentry org: `alex-siri` on the EU region (`de.sentry.io`).
