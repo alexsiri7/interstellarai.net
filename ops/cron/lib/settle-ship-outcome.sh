@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# settle-ship-outcome.sh <project> <issue> <run-log>
+# settle-ship-outcome.sh [--recheck] <project> <issue> <run-log|verdict-file>
 #
 # Records a "nothing to deliver" verdict from an archon-ship run on its issue.
 #
@@ -22,9 +22,24 @@
 #
 # Exit 0 when a verdict was found and recorded, 1 when the log carries none
 # (crash, rate limit, delivered PR) so the caller keeps its existing handling.
+#
+# --recheck: issue-pickup's settle_parked passes the verdict parked on an
+# archon:skipped issue, so one GitHub could not confirm at run time (or parked
+# before #104) still closes once it can. It closes on the same confirmation and
+# removes archon:skipped; when nothing confirms it exits 1 without touching the
+# issue, because it runs every tick.
 set -uo pipefail
 
+recheck=0
+[ "${1:-}" = "--recheck" ] && { recheck=1; shift; }
 project="$1"; issue="$2"; run_log="$3"
+if [ "$recheck" = 1 ]; then
+  from_label="archon:skipped"
+  close_note="Re-checked by issue-pickup from the verdict parked on this issue."
+else
+  from_label="archon:in-progress"
+  close_note="Run log: \`${run_log}\`"
+fi
 [ -r "$run_log" ] || exit 1
 
 # The two ship outcome reports that end without a PR (see the ship workflow's
@@ -40,9 +55,13 @@ close_as_done() {
   local evidence="$1"; shift
   gh issue close "$issue" --repo "$repo" "$@" --comment "archon-ship finished without a PR: ${verdict}
 
-Closed as archon:done: ${evidence}. Reopen and add archon:queued to run it again. Run log: \`${run_log}\`" >/dev/null 2>&1 || return 1
+Closed as archon:done: ${evidence}. Reopen and add archon:queued to run it again. ${close_note}" >/dev/null 2>&1 || {
+    [ "$recheck" = 1 ] \
+      && echo "$(date -Is) [issue-pickup] $project: #$issue — GitHub confirms ${evidence}, but the close failed"
+    return 1
+  }
   gh issue edit "$issue" --repo "$repo" \
-    --remove-label "archon:in-progress" --add-label "archon:done" >/dev/null 2>&1 \
+    --remove-label "$from_label" --add-label "archon:done" >/dev/null 2>&1 \
     || echo "$(date -Is) [issue-pickup] $project: #$issue — closed, but could not relabel archon:done"
   echo "$(date -Is) [issue-pickup] $project: #$issue settled as archon:done (${evidence})"
   exit 0
@@ -59,7 +78,7 @@ if [[ "$verdict" == "No delivery needed: "* ]]; then
   # Bare same-repo refs only ("owner/repo#N" is excluded), self dropped, the
   # first five checked to bound the API calls.
   mapfile -t refs < <(
-    awk '/^No delivery needed: /{p=1} p && /^Report: /{exit} p' "$run_log" \
+    awk '/^No delivery needed: /{p=1} p && /^(Report: |Parked as archon:skipped)/{exit} p' "$run_log" \
       | grep -oE '(^|[^A-Za-z0-9/_.-])#[0-9]+' | grep -oE '[0-9]+$' \
       | awk -v self="$issue" '$0 != self && !seen[$0]++' | head -5)
   declare -A kind=()
@@ -79,6 +98,7 @@ if [[ "$verdict" == "No delivery needed: "* ]]; then
       && close_as_done "already fixed by merged PR #$ref" --reason completed
   done
 fi
+[ "$recheck" = 1 ] && exit 1
 
 if ! gh issue edit "$issue" --repo "$repo" \
     --remove-label "archon:in-progress" --add-label "archon:skipped" >/dev/null 2>&1; then
