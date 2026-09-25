@@ -68,10 +68,41 @@ stub_gh_for_main_ci() {
             "run view") echo "build" ;;
             "api repos/alexsiri7/test-project/commits/main") echo "$HEAD_SHA_FIXTURE" ;;
             "issue list") echo "${ISSUE_LIST_FIXTURE:-[]}" ;;
-            "issue create") touch "$ISSUE_SENTINEL"; echo "https://github.com/alexsiri7/test-project/issues/42" ;;
+            "issue create") touch "$ISSUE_SENTINEL"; record_issue_body "$@"; echo "https://github.com/alexsiri7/test-project/issues/42" ;;
             *) echo "" ;;
         esac
     }
+}
+
+record_issue_body() {
+    while [ $# -gt 1 ]; do
+        [ "$1" = "--body" ] && printf '%s\n' "$2" > "$STATE_DIR/issue-body"
+        shift
+    done
+}
+
+# #107: settle-ship-outcome.sh must recognise the body a fire site really
+# filed, so a verdict citing the merged PR that broke CI parks the issue rather
+# than closing it. Runs the real settle script against the captured body.
+assert_settle_parks_filed_body() {
+    local bin="$STATE_DIR/settle-bin" run_log="$STATE_DIR/settle-run.log"
+    mkdir -p "$bin"
+    cat > "$bin/gh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STATE_DIR/settle-gh-argv"
+case "$*" in
+  *sub_issues*)         printf '0\t0\n' ;;
+  "api "*/issues/49*)   echo merged-pr ;;
+  *"issue view"*)       cat "$STATE_DIR/issue-body" ;;
+esac
+STUB
+    chmod +x "$bin/gh"
+    printf 'No delivery needed: main is red because merged PR #49 added a guard.\nReport: /x\n' > "$run_log"
+
+    (unset -f gh; PATH="$bin:$PATH" "$(dirname "$SCRIPT_FILE")/lib/settle-ship-outcome.sh" test-project 42 "$run_log")
+
+    grep -q -- "issue edit 42 --repo alexsiri7/test-project --remove-label archon:in-progress --add-label archon:skipped" "$STATE_DIR/settle-gh-argv"
+    [ "$(grep -c -- "issue close" "$STATE_DIR/settle-gh-argv")" -eq 0 ]
 }
 
 # The launch runs as a background job nothing waits for, so poll for its record.
@@ -111,6 +142,7 @@ setup_main_ci_env() {
     load_tracked_labels
     load_fn find_tracked_issue
     load_fn sha_attempt_decide
+    load_fn fire_ship_and_settle
     load_fn check_main_ci
 }
 
@@ -364,6 +396,7 @@ stub_gh_issues() {
 
     [ -f "$ISSUE_SENTINEL" ]
     assert_settled_launch health-ci-fix-aaa
+    assert_settle_parks_filed_body
 }
 
 @test "check_main_ci sees a red CI masked by a later green Release at the same SHA" {
@@ -613,7 +646,7 @@ stub_gh_for_prod_deploy() {
             "api repos/alexsiri7/test-project/deployments?per_page=10") echo "$DEPLOYMENTS_FIXTURE" ;;
             "api repos/alexsiri7/test-project/deployments/"*) echo "$DEPLOY_STATUS_FIXTURE" ;;
             "issue list") echo "" ;;
-            "issue create") echo "$*" > "$ISSUE_SENTINEL"; echo "https://github.com/alexsiri7/test-project/issues/42" ;;
+            "issue create") echo "$*" > "$ISSUE_SENTINEL"; record_issue_body "$@"; echo "https://github.com/alexsiri7/test-project/issues/42" ;;
             *) echo "" ;;
         esac
     }
@@ -636,6 +669,7 @@ setup_prod_deploy_env() {
     DEPLOYMENTS_FIXTURE='[]'
     HEAD_DEPLOYMENTS_FIXTURE='[]'
     DEPLOY_STATUS_FIXTURE='success'
+    load_fn fire_ship_and_settle
     load_fn check_prod_deploy
 }
 
@@ -662,6 +696,7 @@ setup_prod_deploy_env() {
     grep -q "Prod deploy lagging main" "$ISSUE_SENTINEL"
     grep -q "archon:queued" "$ISSUE_SENTINEL"
     [ -f "$STATE_DIR/prod-deploy-stale-test-project-aaa" ]
+    assert_settle_parks_filed_body
 }
 
 @test "check_prod_deploy trusts a production deployment at HEAD when no run lists it" {
@@ -688,6 +723,7 @@ setup_prod_deploy_env() {
     grep -q "archon:in-progress" "$ISSUE_SENTINEL"
     [ -f "$STATE_DIR/prod-deploy-failed-test-project-aaa" ]
     assert_settled_launch health-prod-deploy-aaa
+    assert_settle_parks_filed_body
 }
 
 @test "check_prod_deploy waits on a fresh HEAD that no deploy has reached yet" {

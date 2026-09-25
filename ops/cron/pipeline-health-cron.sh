@@ -331,6 +331,28 @@ find_tracked_issue() {
 }
 
 # ----------------------------------------------------------------------------
+# fire_ship_and_settle <project> <issue> <repo-dir> <log>: run archon-ship on
+# the issue in the background; the wrapper settles a no-PR verdict on it as
+# soon as the run exits (lib/settle-ship-outcome.sh parks health-filed issues,
+# never closes them — #107). Same shape as issue-pickup's pick_and_fire: the
+# wrapper's command line carries the literal "fix #$1" and a repo-relative log
+# path, so the pgrep guards only see the archon child. unstick_stale finds the
+# log by its "-issue-N-" part.
+# ----------------------------------------------------------------------------
+fire_ship_and_settle() {
+  local project="$1" issue_num="$2" repo_dir="$3" logf="$4"
+  (
+    cd "$repo_dir"
+    CLAUDECODE=0 SETTLE_SCRIPT="$SCRIPT_DIR/lib/settle-ship-outcome.sh" SETTLE_PROJECT="$project" \
+      nohup bash -c '
+        archon workflow run archon-ship "fix #$1" >"$2" 2>&1
+        "$SETTLE_SCRIPT" "$SETTLE_PROJECT" "$1" "$2"' \
+      ship-wrapper "$issue_num" "${logf#"$repo_dir"/}" 2>/dev/null &
+    disown
+  )
+}
+
+# ----------------------------------------------------------------------------
 # Check 1: Main CI red — file issue + fire archon immediately, dedup by SHA.
 # ----------------------------------------------------------------------------
 check_main_ci() {
@@ -506,21 +528,7 @@ EOF
 
   mkdir -p "$repo_dir/.archon-logs"
   local logf="$repo_dir/.archon-logs/health-ci-fix-${sha:0:8}-issue-${issue_num}-$(date +%Y%m%d-%H%M%S).log"
-  # The wrapper settles a no-PR verdict on the issue as soon as the run exits
-  # (lib/settle-ship-outcome.sh parks health-filed issues, never closes them —
-  # #107). Same shape as issue-pickup's pick_and_fire: the wrapper's command
-  # line carries the literal "fix #$1" and a repo-relative log path, so the
-  # pgrep guards only see the archon child. unstick_stale finds the log by its
-  # "-issue-N-" part.
-  (
-    cd "$repo_dir"
-    CLAUDECODE=0 SETTLE_SCRIPT="$SCRIPT_DIR/lib/settle-ship-outcome.sh" SETTLE_PROJECT="$project" \
-      nohup bash -c '
-        archon workflow run archon-ship "fix #$1" >"$2" 2>&1
-        "$SETTLE_SCRIPT" "$SETTLE_PROJECT" "$1" "$2"' \
-      ship-wrapper "$issue_num" "${logf#"$repo_dir"/}" 2>/dev/null &
-    disown
-  )
+  fire_ship_and_settle "$project" "$issue_num" "$repo_dir" "$logf"
   log "$project: archon fired for issue #$issue_num (log $logf)"
 }
 
@@ -896,16 +904,7 @@ EOF
 
     mkdir -p "$repo_dir/.archon-logs"
     local logf="$repo_dir/.archon-logs/health-prod-deploy-${deploy_sha:0:8}-issue-${issue_num}-$(date +%Y%m%d-%H%M%S).log"
-    # Settled on exit like check_main_ci's launch.
-    (
-      cd "$repo_dir"
-      CLAUDECODE=0 SETTLE_SCRIPT="$SCRIPT_DIR/lib/settle-ship-outcome.sh" SETTLE_PROJECT="$project" \
-        nohup bash -c '
-          archon workflow run archon-ship "fix #$1" >"$2" 2>&1
-          "$SETTLE_SCRIPT" "$SETTLE_PROJECT" "$1" "$2"' \
-        ship-wrapper "$issue_num" "${logf#"$repo_dir"/}" 2>/dev/null &
-      disown
-    )
+    fire_ship_and_settle "$project" "$issue_num" "$repo_dir" "$logf"
     log "$project: archon fired for issue #$issue_num (log $logf)"
     return
   fi
