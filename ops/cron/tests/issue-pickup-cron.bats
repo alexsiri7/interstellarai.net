@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Tests for dedupe_sentry, unstick_stale, auto_queue, auto_triage,
+# Tests for dedupe_sentry, settle_parked, unstick_stale, auto_queue, auto_triage,
 # promote_unblocked and pick_and_fire in ops/cron/issue-pickup-cron.sh.
 #
 # Run: bunx bats ops/cron/tests/issue-pickup-cron.bats
@@ -23,6 +23,7 @@ case "$*" in
   *"issue list"*"--label archon:blocked"*)     cat "$GH_FIXTURES/blocked.json" ;;
   *"issue list"*"--label archon:queued"*)      cat "$GH_FIXTURES/queued.json" ;;
   *"issue list"*"--label archon:in-progress"*) cat "$GH_FIXTURES/in-progress.json" ;;
+  *"issue list"*"--label archon:skipped"*)     cat "$GH_FIXTURES/skipped.json" ;;
   *"issue list"*"--state closed"*)             cat "$GH_FIXTURES/closed.json" ;;
   *"issue list"*)                              cat "$GH_FIXTURES/open.json" ;;
   *"issue view "*)                             cat "$GH_FIXTURES/labels-$(sed -E 's/^issue view ([0-9]+).*/\1/' <<<"$*")" 2>/dev/null || echo '[]' ;;
@@ -45,6 +46,7 @@ STUB
     echo '[]' > "$T/fixtures/blocked.json"
     echo '[]' > "$T/fixtures/queued.json"
     echo '[]' > "$T/fixtures/in-progress.json"
+    echo '[]' > "$T/fixtures/skipped.json"
 
     # Nothing is running: no live process, no run in the archon DB.
     pgrep() { return 1; }
@@ -67,6 +69,7 @@ STUB
     SUMMARY_BLOCKED=0
     SUMMARY_PROMOTED=0
     SUMMARY_DEDUPED=0
+    SUMMARY_SETTLED=0
     SUMMARY_ACTION="none"
     SUMMARY_NOTE=""
     QUEUED_ISSUES=()
@@ -206,6 +209,81 @@ closed_issue() { printf '{"number":%s,"body":"%s","stateReason":"%s"}' "$1" "$2"
 
     [ "$SUMMARY_DEDUPED" -eq 0 ]
     grep -q "#431 — could not close as duplicate of #432" "$LOGGED"
+}
+
+# ── settle_parked ────────────────────────────────────────────────────────────
+
+PARKED_PREFIX='archon-ship finished without a PR: '
+PARK_TAIL='\n\nParked as archon:skipped. Remove the label and add archon:queued to run it again. Run log: `logs/x.log`'
+skipped_issue() { printf '{"number":%s,"comments":[%s]}' "$1" "$2"; }
+comment() { printf '{"author":{"login":"alexsiri7"},"body":"%s"}' "$1"; }
+parked_comment() { comment "${PARKED_PREFIX}No delivery needed: $1$PARK_TAIL"; }
+
+# Stands in for lib/settle-ship-outcome.sh: records its argv and the verdict file.
+stub_settle() {
+    mkdir -p "$T/lib"
+    cat > "$T/lib/settle-ship-outcome.sh" <<'STUB'
+#!/usr/bin/env bash
+{ echo "ARGS $*"; cat "$4"; } >> "$SETTLE_RECORD"
+exit "${SETTLE_RC:-0}"
+STUB
+    chmod +x "$T/lib/settle-ship-outcome.sh"
+    export SETTLE_RECORD="$T/settle-record"
+    : > "$SETTLE_RECORD"
+    load_fn settle_parked
+}
+
+@test "settle_parked re-checks a skipped issue whose last comment is the parked verdict" {
+    echo "[$(skipped_issue 535 "$(parked_comment 'merged PR #541 already delivered it.')")]" > "$T/fixtures/skipped.json"
+    stub_settle
+
+    settle_parked testproj
+
+    grep -qx "ARGS --recheck testproj 535 .*" "$SETTLE_RECORD"
+    grep -qx "No delivery needed: merged PR #541 already delivered it." "$SETTLE_RECORD"
+    [ "$(grep -c "^archon-ship finished" "$SETTLE_RECORD")" -eq 0 ]
+    [ "$SUMMARY_SETTLED" -eq 1 ]
+}
+
+@test "settle_parked re-checks only the parked verdicts" {
+    local human reopened started
+    human="$(parked_comment 'fixed by #50.'),$(comment 'Keep this open, I want a regression test.')"
+    started="$(comment "${PARKED_PREFIX}No delivery started: investigate found no safe boundary.${PARK_TAIL}")"
+    reopened="$(comment "${PARKED_PREFIX}No delivery needed: fixed by #50.\\n\\nClosed as archon:done: already fixed by merged PR #50. Reopen and add archon:queued to run it again.")"
+    printf '[%s,%s,%s,%s,%s]\n' \
+        "$(skipped_issue 1 "$human")" \
+        "$(skipped_issue 2 '')" \
+        "$(skipped_issue 3 "$started")" \
+        "$(skipped_issue 4 "$reopened")" \
+        "$(skipped_issue 5 "$(parked_comment 'fixed by #50.')")" > "$T/fixtures/skipped.json"
+    stub_settle
+
+    settle_parked testproj
+
+    [ "$(grep -c '^ARGS ' "$SETTLE_RECORD")" -eq 1 ]
+    grep -qx "ARGS --recheck testproj 5 .*" "$SETTLE_RECORD"
+}
+
+# Unlike dedupe_sentry: the run-time settle closes these on the same evidence.
+@test "settle_parked re-checks a verdict on a human-labelled issue" {
+    printf '[{"number":534,"labels":[{"name":"requirements-gap"}],"comments":[%s]}]\n' \
+        "$(parked_comment 'already resolved: PR #542.')" > "$T/fixtures/skipped.json"
+    stub_settle
+
+    settle_parked testproj
+
+    grep -qx "ARGS --recheck testproj 534 .*" "$SETTLE_RECORD"
+}
+
+@test "a verdict GitHub still cannot confirm is not counted as settled" {
+    echo "[$(skipped_issue 7 "$(parked_comment 'false positive.')")]" > "$T/fixtures/skipped.json"
+    stub_settle
+    export SETTLE_RC=1
+
+    settle_parked testproj
+
+    grep -q "^ARGS --recheck testproj 7 " "$SETTLE_RECORD"
+    [ "$SUMMARY_SETTLED" -eq 0 ]
 }
 
 # ── unstick_stale ────────────────────────────────────────────────────────────

@@ -52,6 +52,7 @@ SUMMARY_QUEUED=0
 SUMMARY_BLOCKED=0
 SUMMARY_PROMOTED=0
 SUMMARY_DEDUPED=0
+SUMMARY_SETTLED=0
 SUMMARY_ACTION="none"
 SUMMARY_NOTE=""
 # Issue numbers this tick flipped to archon:queued, for pick_and_fire to
@@ -283,6 +284,39 @@ dedupe_sentry() {
        // min_by(.number)) as $survivor
     | .[] | select(.open and (.bridge or .app) and .number != $survivor.number)
     | [.number, $survivor.number, .id, (.labels | tojson)] | @tsv' 2>/dev/null)
+}
+
+# --- Phase -1b: re-check parked "No delivery needed" verdicts ---
+# settle-ship-outcome.sh parks a verdict GitHub cannot confirm when the run ends
+# (the PR it names is not merged yet, an epic still has an open sub-issue), and
+# everything parked before #104 was parked unconfirmed. Nothing else ever looks
+# at them again (#103), so every tick re-runs the same confirmation (--recheck)
+# on each open archon:skipped issue whose last comment is that parked verdict.
+# A human comment after the verdict opts the issue out; so does the close
+# comment on a reopened issue, which lacks the park marker. Human-intent labels
+# do not: they keep autonomous work from starting, and this starts none — the
+# run-time settle already closes such issues on the same evidence.
+settle_parked() {
+  local project="$1"
+  local issues nums num verdict_file
+  issues=$(gh issue list --repo "alexsiri7/$project" --state open --label "archon:skipped" \
+    --limit 100 --json number,comments 2>/dev/null || echo "[]")
+  nums=$(echo "$issues" | jq -r '.[]
+    | ((.comments // [])[-1].body // "") as $b
+    | select(($b | startswith("archon-ship finished without a PR: No delivery needed: "))
+             and ($b | contains("\n\nParked as archon:skipped.")))
+    | .number' 2>/dev/null)
+  [ -n "$nums" ] || return 0
+
+  verdict_file=$(mktemp)
+  for num in $nums; do
+    echo "$issues" | jq -r --argjson n "$num" '.[] | select(.number == $n)
+      | .comments[-1].body | sub("^archon-ship finished without a PR: "; "")' > "$verdict_file"
+    if "$SCRIPT_DIR/lib/settle-ship-outcome.sh" --recheck "$project" "$num" "$verdict_file"; then
+      SUMMARY_SETTLED=$((SUMMARY_SETTLED + 1))
+    fi
+  done
+  rm -f "$verdict_file"
 }
 
 # --- Phase 0: un-stick stale archon:in-progress issues ---
@@ -589,11 +623,13 @@ for PROJECT in "${PROJECTS[@]}"; do
   SUMMARY_STALE=0
   SUMMARY_QUEUED=0
   SUMMARY_DEDUPED=0
+  SUMMARY_SETTLED=0
   SUMMARY_ACTION="none"
   SUMMARY_NOTE=""
 
   ensure_labels "$PROJECT"
   dedupe_sentry "$PROJECT"
+  settle_parked "$PROJECT"
   unstick_stale "$PROJECT"
   auto_queue "$PROJECT"
   promote_unblocked "$PROJECT"
@@ -601,7 +637,7 @@ for PROJECT in "${PROJECTS[@]}"; do
   # Triage only runs when the fix queue is idle — it fills otherwise-empty ticks.
   [ "$SUMMARY_ACTION" = "none" ] && auto_triage "$PROJECT"
 
-  summary="$PROJECT: queued=$SUMMARY_QUEUED blocked=$SUMMARY_BLOCKED in-progress=$SUMMARY_IN_PROGRESS stale=$SUMMARY_STALE promoted=$SUMMARY_PROMOTED deduped=$SUMMARY_DEDUPED action=$SUMMARY_ACTION"
+  summary="$PROJECT: queued=$SUMMARY_QUEUED blocked=$SUMMARY_BLOCKED in-progress=$SUMMARY_IN_PROGRESS stale=$SUMMARY_STALE promoted=$SUMMARY_PROMOTED deduped=$SUMMARY_DEDUPED settled=$SUMMARY_SETTLED action=$SUMMARY_ACTION"
   [ -n "$SUMMARY_NOTE" ] && summary="$summary ($SUMMARY_NOTE)"
   log "$summary"
 done

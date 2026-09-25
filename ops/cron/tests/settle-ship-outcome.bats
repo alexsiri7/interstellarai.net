@@ -177,3 +177,66 @@ LOG
     grep -q -- "issue close 7 --repo alexsiri7/testproj --reason completed" "$GH_ARGV"
     [ "$(gh_calls 'api repos/alexsiri7/testproj/issues/60 ')" -eq 0 ]
 }
+
+# ── --recheck ────────────────────────────────────────────────────────────────
+
+# issue-pickup's settle_parked passes the parked comment with its
+# "archon-ship finished without a PR: " prefix already stripped.
+parked_verdict() { printf 'No delivery needed: %s\n\nParked as archon:skipped. Remove the label and add archon:queued to run it again. Run log: `logs/archon-runs/7.log`\n' "$1" > "$RUN_LOG"; }
+
+assert_untouched() {
+    [ "$(gh_calls 'issue close')" -eq 0 ]
+    [ "$(gh_calls 'issue edit')" -eq 0 ]
+    [ "$(gh_calls 'issue comment')" -eq 0 ]
+}
+
+# Run every tick: re-parking would post the same comment every 15 minutes.
+@test "--recheck leaves an unconfirmable parked verdict untouched" {
+    parked_verdict 'false positive, nothing to change.'
+
+    run "$SCRIPT" --recheck testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 1 ]
+    [ "$(gh_calls 'sub_issues')" -eq 1 ]
+    assert_untouched
+}
+
+# The verdict parked on filmduel #535 (2026-09-10).
+@test "--recheck closes a parked verdict naming a merged PR, removing archon:skipped" {
+    parked_verdict 'Merged PR #541 already delivered exactly that: the watchlist toggle ships on HEAD. Recommend closing #7.'
+    fixture ref-541 merged-pr
+
+    run "$SCRIPT" --recheck testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    grep -q -- "issue close 7 --repo alexsiri7/testproj --reason completed --comment" "$GH_ARGV"
+    grep -q -- "issue edit 7 --repo alexsiri7/testproj --remove-label archon:skipped --add-label archon:done" "$GH_ARGV"
+    [ "$(gh_calls 'archon:in-progress')" -eq 0 ]
+    grep -q "Re-checked by issue-pickup" "$GH_ARGV"
+    [ "$(gh_calls 'Run log:')" -eq 0 ]
+}
+
+@test "--recheck does not search past the Parked paragraph" {
+    printf 'No delivery needed: nothing left to do, see #61.\n\nParked as archon:skipped. See #60.\n' > "$RUN_LOG"
+    fixture ref-60 completed-issue
+
+    run "$SCRIPT" --recheck testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 1 ]
+    [ "$(gh_calls 'api repos/alexsiri7/testproj/issues/61 ')" -eq 1 ]
+    [ "$(gh_calls 'api repos/alexsiri7/testproj/issues/60 ')" -eq 0 ]
+    assert_untouched
+}
+
+@test "--recheck with a failed close exits 1 without re-parking" {
+    parked_verdict 'already fixed at HEAD by PR #50.'
+    fixture ref-50 merged-pr
+    export GH_CLOSE_RC=1
+
+    run "$SCRIPT" --recheck testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 1 ]
+    [ "$(gh_calls 'issue close 7 ')" -eq 1 ]
+    [ "$(gh_calls 'issue edit')" -eq 0 ]
+    [ "$(gh_calls 'issue comment')" -eq 0 ]
+}
