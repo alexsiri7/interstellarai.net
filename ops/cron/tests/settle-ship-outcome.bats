@@ -155,6 +155,7 @@ LOG
     [ "$status" -eq 0 ]
     grep -q -- "issue edit 7 --repo alexsiri7/testproj --remove-label archon:in-progress --add-label archon:skipped" "$GH_ARGV"
     [ "$(gh_calls '--add-label archon:done')" -eq 0 ]
+    [[ "$output" != *"close failed"* ]]
 }
 
 @test "a log with no verdict exits 1 and touches nothing" {
@@ -239,4 +240,5 @@ assert_untouched() {
     [ "$(gh_calls 'issue close 7 ')" -eq 1 ]
     [ "$(gh_calls 'issue edit')" -eq 0 ]
     [ "$(gh_calls 'issue comment')" -eq 0 ]
+    [[ "$output" == *"#7 — GitHub confirms already fixed by merged PR #50, but the close failed"* ]]
 }

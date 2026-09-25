@@ -55,7 +55,11 @@ close_as_done() {
   local evidence="$1"; shift
   gh issue close "$issue" --repo "$repo" "$@" --comment "archon-ship finished without a PR: ${verdict}
 
-Closed as archon:done: ${evidence}. Reopen and add archon:queued to run it again. ${close_note}" >/dev/null 2>&1 || return 1
+Closed as archon:done: ${evidence}. Reopen and add archon:queued to run it again. ${close_note}" >/dev/null 2>&1 || {
+    [ "$recheck" = 1 ] \
+      && echo "$(date -Is) [issue-pickup] $project: #$issue — GitHub confirms ${evidence}, but the close failed"
+    return 1
+  }
   gh issue edit "$issue" --repo "$repo" \
     --remove-label "$from_label" --add-label "archon:done" >/dev/null 2>&1 \
     || echo "$(date -Is) [issue-pickup] $project: #$issue — closed, but could not relabel archon:done"

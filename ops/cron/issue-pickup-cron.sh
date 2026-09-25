@@ -301,7 +301,10 @@ settle_parked() {
   local issues nums num verdict_file
   issues=$(gh issue list --repo "alexsiri7/$project" --state open --label "archon:skipped" \
     --limit 100 --json number,comments 2>/dev/null || echo "[]")
+  # issue list returns at most the oldest 100 comments of each issue, so on a
+  # longer thread [-1] is not the last comment and could hide a human's reply.
   nums=$(echo "$issues" | jq -r '.[]
+    | select((.comments // []) | length < 100)
     | ((.comments // [])[-1].body // "") as $b
     | select(($b | startswith("archon-ship finished without a PR: No delivery needed: "))
              and ($b | contains("\n\nParked as archon:skipped.")))

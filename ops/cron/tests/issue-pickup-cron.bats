@@ -264,6 +264,22 @@ STUB
     grep -qx "ARGS --recheck testproj 5 .*" "$SETTLE_RECORD"
 }
 
+# gh issue list truncates to the oldest 100 comments: the parked verdict at
+# position 100 may have human replies after it.
+@test "settle_parked skips an issue whose comments may be truncated" {
+    local comments i
+    comments="$(comment 'first')"
+    for i in $(seq 2 99); do comments="$comments,$(comment "reply $i")"; done
+    comments="$comments,$(parked_comment 'fixed by #50.')"
+    echo "[$(skipped_issue 8 "$comments"),$(skipped_issue 9 "$(parked_comment 'fixed by #50.')")]" > "$T/fixtures/skipped.json"
+    stub_settle
+
+    settle_parked testproj
+
+    [ "$(grep -c '^ARGS ' "$SETTLE_RECORD")" -eq 1 ]
+    grep -qx "ARGS --recheck testproj 9 .*" "$SETTLE_RECORD"
+}
+
 # Unlike dedupe_sentry: the run-time settle closes these on the same evidence.
 @test "settle_parked re-checks a verdict on a human-labelled issue" {
     printf '[{"number":534,"labels":[{"name":"requirements-gap"}],"comments":[%s]}]\n' \
