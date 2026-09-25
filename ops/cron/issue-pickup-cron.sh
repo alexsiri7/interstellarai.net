@@ -45,12 +45,13 @@ PROJECTS=("${DEFAULT_PROJECTS[@]}")
 log() { echo "$(date -Is) $LOG_PREFIX $*"; }
 
 # Per-tick, per-project summary state. Reset at the start of each project
-# iteration, populated by the three phases, emitted after pick_and_fire.
+# iteration, populated by the phases, emitted after pick_and_fire.
 SUMMARY_IN_PROGRESS=0
 SUMMARY_STALE=0
 SUMMARY_QUEUED=0
 SUMMARY_BLOCKED=0
 SUMMARY_PROMOTED=0
+SUMMARY_DEDUPED=0
 SUMMARY_ACTION="none"
 SUMMARY_NOTE=""
 # Issue numbers this tick flipped to archon:queued, for pick_and_fire to
@@ -221,6 +222,64 @@ auto_triage() {
   disown
   log "$project: triage launched for #$triage_issue (pid=$!, log=$logf)"
   SUMMARY_ACTION="triage #$triage_issue"
+}
+
+# --- Phase -1: close duplicate Sentry issues ---
+# Every Sentry crash is filed twice about a second apart: once by Sentry's own
+# GitHub app (Alert Rule action, body "Sentry Issue: [X](…/issues/<id>/)") and
+# once by workers/sentry-bridge (body carries "**Sentry issue ID:** <id>" and the
+# same link). Without this both get worked (#103: un-reminder #431/#432). The
+# `sentry` label is no key — the app's issues do not carry it — so issues are
+# grouped by the sentry.io/issues/<id> link in their body, across open issues and
+# the 100 most recently closed-completed ones. Issues closed any other way
+# (including by this phase) never survive, or tick N+1 would close tick N's
+# survivor as a duplicate of the issue tick N closed.
+#
+# Survivor, first match wins: a closed issue (already worked), an in-progress
+# one (never kill a live run), the bridge's (it is queued at filing time and
+# carries the sentry label), the lowest number. Every other open member is closed
+# as its duplicate, except in-progress and human-owned ones.
+dedupe_sentry() {
+  local project="$1"
+  local open_json closed_json
+  open_json=$(gh issue list --repo "alexsiri7/$project" --state open --limit 100 \
+    --json number,body,labels 2>/dev/null || echo "[]")
+  closed_json=$(gh issue list --repo "alexsiri7/$project" --state closed --limit 100 \
+    --json number,body,stateReason 2>/dev/null || echo "[]")
+
+  local num survivor sentry_id labels_json
+  while IFS=$'\t' read -r num survivor sentry_id labels_json; do
+    [ -n "$num" ] || continue
+    if echo "$labels_json" | grep -q '"archon:in-progress"'; then
+      log "$project: #$num duplicates #$survivor (Sentry $sentry_id) but is in progress, leaving it"
+      continue
+    fi
+    if has_human_label "$labels_json"; then
+      log "$project: #$num duplicates #$survivor (Sentry $sentry_id) but is human-owned, leaving it"
+      continue
+    fi
+    if gh issue close "$num" --repo "alexsiri7/$project" --duplicate-of "$survivor" \
+        --comment "Duplicate of #$survivor: both carry Sentry issue $sentry_id. Closed by issue-pickup's Sentry dedupe." >/dev/null 2>&1; then
+      log "$project: #$num closed as duplicate of #$survivor (Sentry $sentry_id)"
+      SUMMARY_DEDUPED=$((SUMMARY_DEDUPED + 1))
+    else
+      log "$project: #$num — could not close as duplicate of #$survivor"
+    fi
+  done < <(printf '%s\n%s\n' "$open_json" "$closed_json" | jq -rs '
+    def sentry_id: [(.body // "") | capture("sentry\\.io/issues/(?<id>[0-9]+)")][0].id;
+    (.[0] | map({number, open: true, labels: [.labels[].name],
+                 bridge: ((.body // "") | test("\\*\\*Sentry issue ID:\\*\\*")),
+                 id: sentry_id})) as $open
+    | (.[1] | map(select(.stateReason == "COMPLETED")
+                  | {number, open: false, labels: [], bridge: false, id: sentry_id})) as $closed
+    | $open + $closed | map(select(.id != null)) | group_by(.id)[]
+    | select(length > 1 and any(.open))
+    | ((map(select(.open | not)) | min_by(.number))
+       // (map(select(.labels | index("archon:in-progress"))) | min_by(.number))
+       // (map(select(.bridge)) | min_by(.number))
+       // min_by(.number)) as $survivor
+    | .[] | select(.open and .number != $survivor.number)
+    | [.number, $survivor.number, .id, (.labels | tojson)] | @tsv' 2>/dev/null)
 }
 
 # --- Phase 0: un-stick stale archon:in-progress issues ---
@@ -526,10 +585,12 @@ for PROJECT in "${PROJECTS[@]}"; do
   SUMMARY_IN_PROGRESS=0
   SUMMARY_STALE=0
   SUMMARY_QUEUED=0
+  SUMMARY_DEDUPED=0
   SUMMARY_ACTION="none"
   SUMMARY_NOTE=""
 
   ensure_labels "$PROJECT"
+  dedupe_sentry "$PROJECT"
   unstick_stale "$PROJECT"
   auto_queue "$PROJECT"
   promote_unblocked "$PROJECT"
@@ -537,7 +598,7 @@ for PROJECT in "${PROJECTS[@]}"; do
   # Triage only runs when the fix queue is idle — it fills otherwise-empty ticks.
   [ "$SUMMARY_ACTION" = "none" ] && auto_triage "$PROJECT"
 
-  summary="$PROJECT: queued=$SUMMARY_QUEUED blocked=$SUMMARY_BLOCKED in-progress=$SUMMARY_IN_PROGRESS stale=$SUMMARY_STALE promoted=$SUMMARY_PROMOTED action=$SUMMARY_ACTION"
+  summary="$PROJECT: queued=$SUMMARY_QUEUED blocked=$SUMMARY_BLOCKED in-progress=$SUMMARY_IN_PROGRESS stale=$SUMMARY_STALE promoted=$SUMMARY_PROMOTED deduped=$SUMMARY_DEDUPED action=$SUMMARY_ACTION"
   [ -n "$SUMMARY_NOTE" ] && summary="$summary ($SUMMARY_NOTE)"
   log "$summary"
 done

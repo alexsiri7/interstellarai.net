@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
-# Tests for unstick_stale, auto_queue, auto_triage, promote_unblocked and
-# pick_and_fire in ops/cron/issue-pickup-cron.sh.
+# Tests for dedupe_sentry, unstick_stale, auto_queue, auto_triage,
+# promote_unblocked and pick_and_fire in ops/cron/issue-pickup-cron.sh.
 #
 # Run: bunx bats ops/cron/tests/issue-pickup-cron.bats
 
@@ -23,6 +23,7 @@ case "$*" in
   *"issue list"*"--label archon:blocked"*)     cat "$GH_FIXTURES/blocked.json" ;;
   *"issue list"*"--label archon:queued"*)      cat "$GH_FIXTURES/queued.json" ;;
   *"issue list"*"--label archon:in-progress"*) cat "$GH_FIXTURES/in-progress.json" ;;
+  *"issue list"*"--state closed"*)             cat "$GH_FIXTURES/closed.json" ;;
   *"issue list"*)                              cat "$GH_FIXTURES/open.json" ;;
   *"issue view "*)                             cat "$GH_FIXTURES/labels-$(sed -E 's/^issue view ([0-9]+).*/\1/' <<<"$*")" 2>/dev/null || echo '[]' ;;
   *"pr list"*)                                 echo 0 ;;
@@ -30,6 +31,7 @@ case "$*" in
   *sub_issues*)                                cat "$GH_FIXTURES/children-$(issue_of "$*")" 2>/dev/null || echo 0 ;;
   */events*)                                   cat "$GH_FIXTURES/events-$(issue_of "$*")" 2>/dev/null || true ;;
   *"issue edit"*)                              exit "${GH_EDIT_RC:-0}" ;;
+  *"issue close"*)                             exit "${GH_CLOSE_RC:-0}" ;;
   *"issue comment"*)                           exit 0 ;;
 esac
 STUB
@@ -39,6 +41,7 @@ STUB
     export GH_FIXTURES="$T/fixtures"
     : > "$GH_ARGV"
     echo '[]' > "$T/fixtures/open.json"
+    echo '[]' > "$T/fixtures/closed.json"
     echo '[]' > "$T/fixtures/blocked.json"
     echo '[]' > "$T/fixtures/queued.json"
     echo '[]' > "$T/fixtures/in-progress.json"
@@ -63,6 +66,7 @@ STUB
     SUMMARY_QUEUED=0
     SUMMARY_BLOCKED=0
     SUMMARY_PROMOTED=0
+    SUMMARY_DEDUPED=0
     SUMMARY_ACTION="none"
     SUMMARY_NOTE=""
     QUEUED_ISSUES=()
@@ -94,6 +98,104 @@ load_fn() {
 gh_calls() {
     [ "$1" = "--" ] && shift
     grep -c -- "$1" "$GH_ARGV" || true
+}
+
+# ── dedupe_sentry ────────────────────────────────────────────────────────────
+
+# First lines of the two bodies Sentry files for one crash (un-reminder #431 by
+# Sentry's GitHub app, #432 by workers/sentry-bridge).
+app_body() { printf 'Sentry Issue: [UN-REMINDER-1C](https://alex-siri.sentry.io/issues/%s/?referrer=github_integration)\\n\\n```\\ntimeout\\n```' "$1"; }
+bridge_body() { printf 'Automatically created from Sentry — do not edit the title (used for dedup).\\n\\n**Sentry link:** https://alex-siri.sentry.io/issues/%s/\\n**Sentry issue ID:** %s' "$1" "$1"; }
+open_issue() { printf '{"number":%s,"body":"%s","labels":%s}' "$1" "$2" "$3"; }
+closed_issue() { printf '{"number":%s,"body":"%s","stateReason":"%s"}' "$1" "$2" "$3"; }
+
+@test "an open app/sentry issue whose bridge sibling is closed is closed as its duplicate" {
+    echo "[$(open_issue 431 "$(app_body 147429034)" '[{"name":"bug"},{"name":"archon:skipped"}]')]" > "$T/fixtures/open.json"
+    echo "[$(closed_issue 432 "$(bridge_body 147429034)" COMPLETED)]" > "$T/fixtures/closed.json"
+    load_fn dedupe_sentry
+
+    dedupe_sentry testproj
+
+    grep -q -- "issue close 431 --repo alexsiri7/testproj --duplicate-of 432 " "$GH_ARGV"
+    [ "$SUMMARY_DEDUPED" -eq 1 ]
+    grep -q "#431 closed as duplicate of #432 (Sentry 147429034)" "$LOGGED"
+}
+
+@test "when both are open the bridge issue survives" {
+    echo "[$(open_issue 445 "$(app_body 149228383)" '[{"name":"bug"}]'),$(open_issue 446 "$(bridge_body 149228383)" '[{"name":"bug"},{"name":"sentry"},{"name":"archon:queued"}]')]" > "$T/fixtures/open.json"
+    load_fn dedupe_sentry
+
+    dedupe_sentry testproj
+
+    grep -q -- "issue close 445 --repo alexsiri7/testproj --duplicate-of 446 " "$GH_ARGV"
+    [ "$(gh_calls -- 'issue close 446')" -eq 0 ]
+    [ "$SUMMARY_DEDUPED" -eq 1 ]
+}
+
+# The tick after the one above: 445 is closed, but as a duplicate, so it must
+# not become the survivor that closes 446.
+@test "an issue closed other than as completed never survives" {
+    echo "[$(open_issue 446 "$(bridge_body 149228383)" '[{"name":"bug"},{"name":"sentry"}]')]" > "$T/fixtures/open.json"
+    echo "[$(closed_issue 445 "$(app_body 149228383)" DUPLICATE),$(closed_issue 444 "$(app_body 149228383)" NOT_PLANNED)]" > "$T/fixtures/closed.json"
+    load_fn dedupe_sentry
+
+    dedupe_sentry testproj
+
+    [ "$(gh_calls -- 'issue close')" -eq 0 ]
+    [ "$SUMMARY_DEDUPED" -eq 0 ]
+}
+
+@test "an in-progress duplicate survives over the bridge issue" {
+    echo "[$(open_issue 445 "$(app_body 149228383)" '[{"name":"bug"},{"name":"archon:in-progress"}]'),$(open_issue 446 "$(bridge_body 149228383)" '[{"name":"sentry"}]')]" > "$T/fixtures/open.json"
+    load_fn dedupe_sentry
+
+    dedupe_sentry testproj
+
+    grep -q -- "issue close 446 --repo alexsiri7/testproj --duplicate-of 445 " "$GH_ARGV"
+    [ "$(gh_calls -- 'issue close 445')" -eq 0 ]
+}
+
+@test "an in-progress duplicate is never closed" {
+    echo "[$(open_issue 445 "$(app_body 149228383)" '[{"name":"archon:in-progress"}]'),$(open_issue 446 "$(bridge_body 149228383)" '[{"name":"archon:in-progress"}]')]" > "$T/fixtures/open.json"
+    load_fn dedupe_sentry
+
+    dedupe_sentry testproj
+
+    [ "$(gh_calls -- 'issue close')" -eq 0 ]
+    grep -q "#446 duplicates #445 (Sentry 149228383) but is in progress" "$LOGGED"
+}
+
+@test "issues with different Sentry IDs, or GitHub /issues/N links, are left alone" {
+    echo "[$(open_issue 1 "$(app_body 111)" '[]'),$(open_issue 2 "$(bridge_body 222)" '[]'),$(open_issue 3 'see https://github.com/x/y/issues/12' '[]'),$(open_issue 4 'see https://github.com/x/y/issues/12' '[]'),$(open_issue 5 '' '[]')]" > "$T/fixtures/open.json"
+    echo '[{"number":6,"body":null,"stateReason":"COMPLETED"}]' > "$T/fixtures/closed.json"
+    load_fn dedupe_sentry
+
+    dedupe_sentry testproj
+
+    [ "$(gh_calls -- 'issue close')" -eq 0 ]
+}
+
+@test "a human-owned duplicate is not closed" {
+    echo "[$(open_issue 431 "$(app_body 147429034)" '[{"name":"bug"},{"name":"factory-gap"}]')]" > "$T/fixtures/open.json"
+    echo "[$(closed_issue 432 "$(bridge_body 147429034)" COMPLETED)]" > "$T/fixtures/closed.json"
+    load_fn dedupe_sentry
+
+    dedupe_sentry testproj
+
+    [ "$(gh_calls -- 'issue close')" -eq 0 ]
+    grep -q "#431 duplicates #432 (Sentry 147429034) but is human-owned" "$LOGGED"
+}
+
+@test "a failed duplicate close is logged and not counted" {
+    echo "[$(open_issue 431 "$(app_body 147429034)" '[{"name":"bug"}]')]" > "$T/fixtures/open.json"
+    echo "[$(closed_issue 432 "$(bridge_body 147429034)" COMPLETED)]" > "$T/fixtures/closed.json"
+    export GH_CLOSE_RC=1
+    load_fn dedupe_sentry
+
+    dedupe_sentry testproj
+
+    [ "$SUMMARY_DEDUPED" -eq 0 ]
+    grep -q "#431 — could not close as duplicate of #432" "$LOGGED"
 }
 
 # ── unstick_stale ────────────────────────────────────────────────────────────
