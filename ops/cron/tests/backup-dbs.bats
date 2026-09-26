@@ -35,7 +35,9 @@ setup() {
 if [ "${1:-}" = "--version" ]; then echo "pg_dump (PostgreSQL) ${STUB_PG_DUMP_VERSION:-17.6}"; exit 0; fi
 printf '%s ' "$@" >> "$STUB_ARGV"; echo >> "$STUB_ARGV"
 env | grep '^PG' > "$STUB_ENV"
-[ -n "${STUB_DUMP_FILE:-}" ] && cat "$STUB_DUMP_FILE"
+if [ -n "${STUB_DUMP_DIR:-}" ]; then        # one dump file per --schema
+    for a in "$@"; do case "$a" in --schema=*) cat "$STUB_DUMP_DIR/${a#--schema=}.sql" ;; esac; done
+elif [ -n "${STUB_DUMP_FILE:-}" ]; then cat "$STUB_DUMP_FILE"; fi
 exit "${STUB_DUMP_RC:-0}"
 STUB
 
@@ -219,4 +221,26 @@ archives() { find "$T/backups/reli" -name '*.sql.gz' 2>/dev/null; }
     [ ! -f "$T/backups/reli/reli-20260901-001701.sql.gz" ]
     [ ! -f "$T/backups/reli/reli-20260901-001701.sql.gz.meta" ]
     [ "$(archives | wc -l)" -eq 1 ]
+}
+
+@test "kindred-auth dumps --schema=auth and thaleia --schema=events through their own URLs, each verified on its sanity table" {
+    printf '%s\n' 'KINDRED_DB_URL=postgresql://kindred:k@kindred.example.com:5432/postgres' \
+        'THALEIA_DB_URL=postgresql://thaleia:t@shared.example.com:5432/postgres' > "$T/secrets.env"
+    mkdir -p "$T/dumps"
+    pad() { head -c 300000 /dev/urandom | base64; }
+    { echo "CREATE TABLE public.entries ("; echo ");"; pad; } > "$T/dumps/public.sql"
+    { echo "CREATE SCHEMA auth;"; echo "CREATE TABLE auth.users ("; echo ");"; pad; } > "$T/dumps/auth.sql"
+    { echo "CREATE SCHEMA events;"; echo "CREATE TABLE events.sources ("; echo ");"; pad; } > "$T/dumps/events.sql"
+    export STUB_DUMP_DIR="$T/dumps" STUB_ROWS=4
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK: kindred backed up"*"4 rows in public.entries"* ]]
+    [[ "$output" == *"OK: kindred-auth backed up: $T/backups/kindred-auth/kindred-auth-"*"4 rows in auth.users"* ]]
+    [[ "$output" == *"OK: thaleia backed up: $T/backups/thaleia/thaleia-"*"4 rows in events.sources"* ]]
+    [[ "$output" == *"Backup complete (ok: kindred thaleia kindred-auth; skipped: annie reli filmduel lachesis)"* ]]
+    grep -q -- '--no-owner --no-acl --schema=auth' "$STUB_ARGV"
+    grep -q -- '--no-owner --no-acl --schema=events' "$STUB_ARGV"
+    grep -q '^table=auth.users$' "$T"/backups/kindred-auth/*.meta
+    grep -q '^table=events.sources$' "$T"/backups/thaleia/*.meta
+    ! grep -q 'kindred:k\|thaleia:t\|postgresql://' "$STUB_ARGV"
 }

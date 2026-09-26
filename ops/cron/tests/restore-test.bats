@@ -91,6 +91,67 @@ make_archive() {
     echo "$f"
 }
 
+# make_schema_archive PROJECT BASENAME ROWS SCHEMA.TABLE SQL_FILE — an
+# archive of one non-public schema: SQL_FILE is the dump body, padded past
+# the 1 KB minimum, plus its .meta sidecar.
+make_schema_archive() {
+    local dir="$T/backups/$1" f="$T/backups/$1/$2.sql.gz"
+    mkdir -p "$dir"
+    { echo "-- PostgreSQL database dump"; cat "$5"
+      head -c 3000 /dev/urandom | base64 | sed 's/^/-- /'; } | gzip > "$f"
+    printf 'rows=%s\ntable=%s\n' "$3" "$4" > "$f.meta"
+    echo "$f"
+}
+
+# A pg_dump --schema=auth of Supabase Auth, cut down: it brings its own
+# auth.users / auth.uid() and FKs inside auth.
+auth_dump_sql() {
+    cat <<'SQL'
+CREATE SCHEMA auth;
+CREATE FUNCTION auth.uid() RETURNS uuid
+    LANGUAGE sql STABLE
+    AS $$ select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $$;
+CREATE TABLE auth.users (
+    id uuid NOT NULL,
+    email character varying(255)
+);
+CREATE TABLE auth.identities (
+    id uuid NOT NULL,
+    user_id uuid NOT NULL
+);
+COPY auth.users (id, email) FROM stdin;
+00000000-0000-0000-0000-000000000001	a@example.com
+00000000-0000-0000-0000-000000000002	b@example.com
+\.
+ALTER TABLE ONLY auth.users
+    ADD CONSTRAINT users_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY auth.identities
+    ADD CONSTRAINT identities_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
+SQL
+}
+
+# A pg_dump --schema=events (Thaleia on the consolidated project).
+events_dump_sql() {
+    cat <<'SQL'
+CREATE SCHEMA events;
+CREATE TABLE events.sources (
+    id bigint NOT NULL,
+    key text NOT NULL
+);
+CREATE TABLE events.events (
+    id uuid DEFAULT gen_random_uuid() NOT NULL
+);
+COPY events.sources (id, key) FROM stdin;
+1	ticketmaster
+2	barbican
+\.
+SQL
+}
+
+only_configured() {
+    printf '%s\n' "$@" > "$T/secrets.env"
+}
+
 cluster_dirs() { find "$T" -maxdepth 1 -name 'restore-test.*' 2>/dev/null; }
 
 @test "newest archive restores into a socket-only throwaway cluster, matches the recorded count, exits 0" {
@@ -99,7 +160,7 @@ cluster_dirs() { find "$T" -maxdepth 1 -name 'restore-test.*' 2>/dev/null; }
     [[ "$output" == *"Throwaway cluster up: $T/restore-test."* ]]
     [[ "$output" == *"OK: reli restored: $T/backups/reli/reli-20260919-091701.sql.gz (224 rows in public.things = backup count, 9 tables in public,"* ]]
     [[ "$output" == *"SKIP: annie"* ]]
-    [[ "$output" == *"Restore test complete (ok: reli; skipped: annie filmduel kindred lachesis)"* ]]
+    [[ "$output" == *"Restore test complete (ok: reli; skipped: annie filmduel kindred lachesis thaleia kindred-auth)"* ]]
     grep -q -- '-A trust' "$T/initdb.argv"
     grep -q -- "-k $T/restore-test\." "$T/pg_ctl.argv"
     grep -q -- "listen_addresses=''" "$T/pg_ctl.argv"
@@ -135,7 +196,7 @@ cluster_dirs() { find "$T" -maxdepth 1 -name 'restore-test.*' 2>/dev/null; }
     run "$SCRIPT"
     [ "$status" -eq 1 ]
     [[ "$output" == *"ERROR: reli restore FAILED — public.things has 200 rows after restore, backup recorded 224"* ]]
-    [[ "$output" == *"ERROR: restore test FAILED for: reli (ok: none; skipped: annie filmduel kindred lachesis)"* ]]
+    [[ "$output" == *"ERROR: restore test FAILED for: reli (ok: none; skipped: annie filmduel kindred lachesis thaleia kindred-auth)"* ]]
     grep -q '^last_run_status=failed$' "$T/state/restore-test-status"
     grep -q '^last_run_failed=reli$' "$T/state/restore-test-status"
     grep -q '^last_ok=0$' "$T/state/restore-test-status"
@@ -249,12 +310,52 @@ SQL
     grep -q '^CREATE EXTENSION vector SCHEMA extensions;$' "$T/restored-restore_reli.sql"
 }
 
+@test "an auth-schema archive (kindred-auth) restores without the auth stub, into a hyphen-free database, FKs inside auth untouched" {
+    only_configured 'KINDRED_DB_URL=postgresql://u:p@h/d'
+    auth_dump_sql > "$T/auth.sql"
+    make_schema_archive kindred-auth kindred-auth-20260919-091701 2 auth.users "$T/auth.sql" > /dev/null
+    make_archive kindred kindred-20260919-091701 224 > /dev/null
+    sed -i 's/^table=public.things$/table=public.entries/' "$T/backups/kindred/kindred-20260919-091701.sql.gz.meta"
+    export STUB_ROWS=2
+    run "$SCRIPT"
+    [[ "$output" == *"OK: kindred-auth restored: $T/backups/kindred-auth/kindred-auth-20260919-091701.sql.gz (2 rows in auth.users = backup count, 9 tables in auth, "*"ms)"* ]]
+    [[ "$output" != *"kindred-auth restored:"*"NOT VALID"* ]]
+    grep -q -- '-d restore_kindred_auth' "$T/psql.argv"
+    f="$T/restored-restore_kindred_auth.sql"
+    [ -f "$f" ]
+    # The archive's own CREATE SCHEMA auth / auth.users / auth.uid() are the only ones.
+    [ "$(grep -c '^CREATE SCHEMA auth;$' "$f")" -eq 1 ]
+    [ "$(grep -c '^CREATE TABLE auth.users ' "$f")" -eq 1 ]
+    [ "$(grep -c '^CREATE FUNCTION auth.uid()' "$f")" -eq 1 ]
+    ! grep -q 'DROP SCHEMA public' "$f"
+    grep -q '^CREATE SCHEMA extensions;$' "$f"
+    grep -q '^    ADD CONSTRAINT identities_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;$' "$f"
+    # kindred's public archive still gets the full shim.
+    grep -q '^DROP SCHEMA public CASCADE;$' "$T/restored-restore_kindred.sql"
+    grep -q '^CREATE TABLE auth.users (id uuid PRIMARY KEY);$' "$T/restored-restore_kindred.sql"
+}
+
+@test "a non-public schema archive (thaleia/events) keeps public and gets the auth stub" {
+    only_configured 'THALEIA_DB_URL=postgresql://u:p@h/d'
+    events_dump_sql > "$T/events.sql"
+    make_schema_archive thaleia thaleia-20260919-091701 2 events.sources "$T/events.sql" > /dev/null
+    export STUB_ROWS=2
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK: thaleia restored: $T/backups/thaleia/thaleia-20260919-091701.sql.gz (2 rows in events.sources = backup count, 9 tables in events,"* ]]
+    [[ "$output" == *"Restore test complete (ok: thaleia; skipped: annie reli filmduel kindred lachesis kindred-auth)"* ]]
+    f="$T/restored-restore_thaleia.sql"
+    ! grep -q 'DROP SCHEMA public' "$f"
+    grep -q '^CREATE FUNCTION auth.uid()' "$f"
+    grep -q '^CREATE TABLE events.sources ($' "$f"
+}
+
 @test "missing server binaries fail every project loud and name the README" {
     rm "$T/bin/initdb"
     run "$SCRIPT"
     [ "$status" -eq 1 ]
     [[ "$output" == *"ERROR: $T/bin/initdb missing"* ]]
-    [[ "$output" == *"ERROR: restore test FAILED for: annie,reli,filmduel,kindred,lachesis"* ]]
+    [[ "$output" == *"ERROR: restore test FAILED for: annie,reli,filmduel,kindred,lachesis,thaleia,kindred-auth"* ]]
     grep -q '^reli=failed cluster-not-started$' "$T/state/restore-test-status"
     grep -q '^last_run_status=failed$' "$T/state/restore-test-status"
 }
@@ -306,5 +407,31 @@ SQL
     run "$SCRIPT"
     [ "$status" -eq 1 ]
     [[ "$output" == *"public.things has 3 rows after restore, backup recorded 4"* ]]
+    [ -z "$(cluster_dirs)" ]
+}
+
+@test "real cluster: an auth-schema archive (kindred-auth) restores with its own auth.users and internal FKs" {
+    real_setup
+    only_configured 'KINDRED_DB_URL=postgresql://u:p@h/d'
+    auth_dump_sql > "$T/auth.sql"
+    make_schema_archive kindred-auth kindred-auth-20260919-091701 2 auth.users "$T/auth.sql" > /dev/null
+    run "$SCRIPT"
+    echo "$output"
+    # KINDRED_DB_URL also configures `kindred` (public), which has no archive
+    # here and fails; only kindred-auth is under test.
+    [[ "$output" == *"ERROR: restore test FAILED for: kindred (ok: kindred-auth;"* ]]
+    [[ "$output" == *"OK: kindred-auth restored: "*"(2 rows in auth.users = backup count, 2 tables in auth, "*"ms)"* ]]
+    [ -z "$(cluster_dirs)" ]
+}
+
+@test "real cluster: a non-public schema archive (thaleia/events) restores" {
+    real_setup
+    only_configured 'THALEIA_DB_URL=postgresql://u:p@h/d'
+    events_dump_sql > "$T/events.sql"
+    make_schema_archive thaleia thaleia-20260919-091701 2 events.sources "$T/events.sql" > /dev/null
+    run "$SCRIPT"
+    echo "$output"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK: thaleia restored: "*"(2 rows in events.sources = backup count, 2 tables in events, "*"ms)"* ]]
     [ -z "$(cluster_dirs)" ]
 }

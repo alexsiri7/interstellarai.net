@@ -18,16 +18,21 @@
 # NTFY_TOPIC and to know which projects are configured (unset URL → skipped,
 # exactly as backup-dbs.sh skips them).
 #
-# The archives are `pg_dump --schema=public` from Supabase, so they reference
-# two things a bare cluster lacks and which are not part of the backup:
+# The archives are single-schema pg_dumps from Supabase (`public` for most
+# apps, the app's own schema once it has moved into the consolidated project,
+# `auth` for the Supabase Auth users), so they reference things a bare
+# cluster lacks and which are not part of that archive:
 #   - the Supabase `auth` schema (auth.uid() in RLS policies, auth.users as a
 #     foreign-key target) and the `extensions` schema — a stub of each is
-#     created before the restore (see supabase_shim);
+#     created before the restore (see supabase_shim), except the stub of the
+#     schema the archive itself contains (an `auth` archive brings the real
+#     auth.users/auth.uid(), so stubbing it would collide);
 #   - pgvector (`extensions.vector`, hnsw indexes) — the real extension, built
 #     into ~/.local/opt/postgresql-17 (see ops/cron/README.md), is created
 #     only when the archive uses it.
 # Foreign keys pointing into those stub schemas are added NOT VALID, since
-# the referenced rows (Supabase auth users) are not in the archive. Every
+# the referenced rows (Supabase auth users) are not in the archive; foreign
+# keys inside the archive's own schema are left alone. Every
 # such rewrite is counted and logged. Nothing else in the archive is changed.
 #
 # Output: log lines per project (OK: / ERROR:), a status file for
@@ -169,21 +174,29 @@ expected_rows() {
     printf '%s' "$rows"; return 0
 }
 
-# supabase_shim ARCHIVE → the SQL that precedes the archive: drop the public
-# schema (the dump recreates it — template0 already has one), stub the
-# Supabase-managed schemas the dump refers to, and create pgvector when the
+# supabase_shim ARCHIVE SCHEMA → the SQL that precedes the archive of
+# SCHEMA: drop the public schema when the dump is of `public` (it recreates
+# it — template0 already has one), stub the Supabase-managed schemas the dump
+# refers to unless the dump is that schema, and create pgvector when the
 # archive uses it.
 supabase_shim() {
-    cat <<'SQL'
-DROP SCHEMA public CASCADE;
+    local archive="$1" schema="$2"
+    if [ "$schema" = "public" ]; then
+        echo 'DROP SCHEMA public CASCADE;'
+    fi
+    if [ "$schema" != "auth" ]; then
+        cat <<'SQL'
 CREATE SCHEMA auth;
 CREATE TABLE auth.users (id uuid PRIMARY KEY);
 CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS $$ SELECT NULL::uuid $$;
 CREATE FUNCTION auth.role() RETURNS text LANGUAGE sql STABLE AS $$ SELECT NULL::text $$;
 CREATE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE sql STABLE AS $$ SELECT NULL::jsonb $$;
-CREATE SCHEMA extensions;
 SQL
-    if archive_uses_vector "$1"; then
+    fi
+    if [ "$schema" != "extensions" ]; then
+        echo 'CREATE SCHEMA extensions;'
+    fi
+    if archive_uses_vector "$archive"; then
         echo 'CREATE EXTENSION vector SCHEMA extensions;'
     fi
 }
@@ -194,10 +207,20 @@ archive_uses_vector() {
     [ "${n:-0}" -gt 0 ]
 }
 
-# Foreign keys whose target lives in a stub schema are added NOT VALID: the
-# rows they point at (Supabase auth users) are not part of the backup. The
-# regex is pinned to pg_dump's own layout for FK constraints.
-FK_STUB_RE='^(    ADD CONSTRAINT [^ ]+ FOREIGN KEY \([^)]*\) REFERENCES (auth|extensions)\.[^;]*);$'
+# fk_stub_re SCHEMA → sed -E regex for foreign keys whose target lives in a
+# stub schema (auth/extensions, minus SCHEMA itself: an auth archive's FKs
+# to auth.users point at real rows). Those are added NOT VALID: the rows
+# they point at (Supabase auth users) are not part of the backup. The regex
+# is pinned to pg_dump's own layout for FK constraints.
+fk_stub_re() {
+    local stubs
+    case "$1" in
+        auth) stubs="extensions" ;;
+        extensions) stubs="auth" ;;
+        *) stubs="auth|extensions" ;;
+    esac
+    printf '%s' "^(    ADD CONSTRAINT [^ ]+ FOREIGN KEY \\([^)]*\\) REFERENCES ($stubs)\\.[^;]*);\$"
+}
 
 FAILED=()
 OK=()
@@ -209,7 +232,7 @@ STATUS_LINES=()
 restore_project() {
     local name="$1" url_var="$2" schema="$3" table="$4"
     local dir="$BACKUP_ROOT/$name" archive age reason rows db errfile fkfile
-    local t0 ms found ntables fks got
+    local t0 ms found ntables fks got fk_re
 
     if [ -z "${!url_var:-}" ]; then
         log "SKIP: $name — $url_var not set (populate $SECRETS_FILE)"
@@ -244,12 +267,15 @@ restore_project() {
         fail "$archive uses extensions.vector but pgvector is not installed in $PG_BIN/.. (see ops/cron/README.md)"; return 1
     fi
 
-    db="restore_$name"
+    # Project names may carry a '-' (kindred-auth); database names here are
+    # unquoted identifiers.
+    db="restore_${name//-/_}"
     t0=$(date +%s%N)
     if ! q -c "CREATE DATABASE $db TEMPLATE template0" 2>"$errfile"; then
         fail "cannot create database $db: $(head -1 "$errfile")"; return 1
     fi
-    if ! { supabase_shim "$archive"; zcat "$archive" | sed -E "s/$FK_STUB_RE/\1 NOT VALID;/w $fkfile"; } \
+    fk_re=$(fk_stub_re "$schema")
+    if ! { supabase_shim "$archive" "$schema"; zcat "$archive" | sed -E "s/$fk_re/\1 NOT VALID;/w $fkfile"; } \
             | q -d "$db" > /dev/null 2>"$errfile"; then
         fail "psql -v ON_ERROR_STOP=1 aborted: $(grep -m2 'ERROR' "$errfile" | tr '\n' ' ')"; return 1
     fi
