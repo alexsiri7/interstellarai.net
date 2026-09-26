@@ -48,7 +48,7 @@ case "$q" in
     *server_version*) echo "${STUB_SERVER_VERSION:-17.6}" ;;
     *information_schema.schemata*) printf '%s\n' "${STUB_SCHEMA_FOUND-1}" ;;
     *"count(*)"*)
-        if [ "${STUB_ROWS:-224}" = "ERR" ]; then echo 'ERROR: relation "public.things" does not exist' >&2; exit 1; fi
+        if [ "${STUB_ROWS:-224}" = "ERR" ]; then echo 'ERROR: relation "reli.things" does not exist' >&2; exit 1; fi
         echo "${STUB_ROWS:-224}" ;;
     *) exit 1 ;;
 esac
@@ -58,7 +58,7 @@ STUB
     # A plausible dump: > 1 KB compressed, sanity table near the top, and
     # larger than the 64 KiB pipe buffer (a grep -q that closes the pipe early
     # used to SIGPIPE zcat and fail validation on every real-sized dump).
-    { echo "-- PostgreSQL database dump"; echo "CREATE TABLE public.things ("; echo "    id integer"; echo ");";
+    { echo "-- PostgreSQL database dump"; echo "CREATE SCHEMA reli;"; echo "CREATE TABLE reli.things ("; echo "    id integer"; echo ");";
       head -c 300000 /dev/urandom | base64; } > "$T/good.sql"
     export STUB_DUMP_FILE="$T/good.sql"
 }
@@ -69,16 +69,16 @@ teardown() {
 
 archives() { find "$T/backups/reli" -name '*.sql.gz' 2>/dev/null; }
 
-@test "verified backup: dumps --schema=public, keeps the archive, exits 0, records last_ok" {
+@test "verified backup: dumps --schema=reli, keeps the archive, exits 0, records last_ok" {
     run "$SCRIPT"
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK: reli backed up"* ]]
-    [[ "$output" == *"224 rows in public.things"* ]]
+    [[ "$output" == *"224 rows in reli.things"* ]]
     [[ "$output" == *"pg_dump v17 from $T/bin/pg_dump, server v17"* ]]
     [[ "$output" == *"SKIP: annie"* ]]
     [ "$(archives | wc -l)" -eq 1 ]
-    grep -q -- '--schema=public' "$STUB_ARGV"
-    ! grep -q -- '--schema=reli' "$STUB_ARGV"
+    grep -q -- '--schema=reli' "$STUB_ARGV"
+    ! grep -q -- '--schema=public' "$STUB_ARGV"
     grep -q '^last_run_status=ok$' "$T/state/db-backup-status"
     grep -q '^last_ok=[1-9]' "$T/state/db-backup-status"
     [ ! -f "$T/ntfy-called" ]
@@ -129,7 +129,7 @@ archives() { find "$T/backups/reli" -name '*.sql.gz' 2>/dev/null; }
     export STUB_DUMP_FILE="$T/wrong.sql"
     run "$SCRIPT"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"does not contain public.things"* ]]
+    [[ "$output" == *"does not contain reli.things"* ]]
     [ "$(archives | wc -l)" -eq 0 ]
 }
 
@@ -137,7 +137,7 @@ archives() { find "$T/backups/reli" -name '*.sql.gz' 2>/dev/null; }
     export STUB_SCHEMA_FOUND=""
     run "$SCRIPT"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"schema 'public' not found"* ]]
+    [[ "$output" == *"schema 'reli' not found"* ]]
     [ ! -f "$STUB_ARGV" ]
     [ "$(archives | wc -l)" -eq 0 ]
 }
@@ -175,7 +175,7 @@ archives() { find "$T/backups/reli" -name '*.sql.gz' 2>/dev/null; }
     export STUB_ROWS=ERR
     run "$SCRIPT"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"row-count query on public.things failed"* ]]
+    [[ "$output" == *"row-count query on reli.things failed"* ]]
     [ "$(archives | wc -l)" -eq 0 ]
 }
 
@@ -201,7 +201,7 @@ archives() { find "$T/backups/reli" -name '*.sql.gz' 2>/dev/null; }
     meta=$(archives | head -1).meta
     [ -f "$meta" ]
     grep -q '^rows=224$' "$meta"
-    grep -q '^table=public.things$' "$meta"
+    grep -q '^table=reli.things$' "$meta"
 }
 
 @test "a FAILED backup leaves no .meta sidecar behind" {
@@ -214,7 +214,7 @@ archives() { find "$T/backups/reli" -name '*.sql.gz' 2>/dev/null; }
 @test "rotation removes the .meta sidecar together with its archive" {
     mkdir -p "$T/backups/reli"
     printf 'old' > "$T/backups/reli/reli-20260901-001701.sql.gz"
-    printf 'rows=1\ntable=public.things\n' > "$T/backups/reli/reli-20260901-001701.sql.gz.meta"
+    printf 'rows=1\ntable=reli.things\n' > "$T/backups/reli/reli-20260901-001701.sql.gz.meta"
     touch -d '10 days ago' "$T/backups/reli/reli-20260901-001701.sql.gz" "$T/backups/reli/reli-20260901-001701.sql.gz.meta"
     run "$SCRIPT"
     [ "$status" -eq 0 ]

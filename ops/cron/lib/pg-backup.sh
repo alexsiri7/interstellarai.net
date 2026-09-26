@@ -31,14 +31,15 @@
 # and secrets.env's <APP>_DB_URL is switched to the new role's URL, in the
 # same step. Lachesis moved (2026-09-26) into schema `lachesis`, reached
 # through role `lachesis`; FilmDuel moved the same day into schema `filmduel`
-# (role `filmduel`), and Word Coach Annie into schema `annie` (role `annie`).
-# Thaleia was born there (schema `events`).
+# (role `filmduel`), Word Coach Annie into schema `annie` (role `annie`), and
+# Reli into schema `reli` (role `reli`). Thaleia was born there (schema
+# `events`).
 # `kindred-auth` backs up the Supabase Auth users of that project (schema
 # `auth`), which a `--schema=public` dump never contains.
 # shellcheck disable=SC2034  # consumed by the sourcing scripts
 PG_BACKUP_PROJECTS=(
     'annie|ANNIE_DB_URL|annie|"Project"'
-    'reli|RELI_DB_URL|public|things'
+    'reli|RELI_DB_URL|reli|things'
     'filmduel|FILMDUEL_DB_URL|filmduel|users'
     'kindred|KINDRED_DB_URL|public|entries'
     'lachesis|LACHESIS_DB_URL|lachesis|lachesis_backlog'
