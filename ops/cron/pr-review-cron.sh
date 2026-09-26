@@ -32,12 +32,15 @@ for tool in gh jq archon; do
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/run-as.sh
+source "$SCRIPT_DIR/lib/run-as.sh"
 # shellcheck source=lib/archon-projects.sh
 source "$SCRIPT_DIR/lib/archon-projects.sh"
 load_archon_projects DEFAULT_PROJECTS
 # shellcheck source=lib/throttle.sh
 source "$SCRIPT_DIR/lib/throttle.sh"
 should_tick "pr-review" || exit 0
+runas_may_launch "pr-review" || exit 0
 # shellcheck source=lib/archon-active-runs.sh
 source "$SCRIPT_DIR/lib/archon-active-runs.sh"
 archon_runs_snapshot

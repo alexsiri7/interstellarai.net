@@ -18,12 +18,15 @@ export PATH="$HOME/.bun/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
 
 # --- Configuration ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/run-as.sh
+source "$SCRIPT_DIR/lib/run-as.sh"
 # shellcheck source=lib/archon-projects.sh
 source "$SCRIPT_DIR/lib/archon-projects.sh"
 load_archon_projects DEFAULT_PROJECTS
 # shellcheck source=lib/throttle.sh
 source "$SCRIPT_DIR/lib/throttle.sh"
 should_tick "pr-maintenance" || exit 0
+runas_may_launch "pr-maintenance" || exit 0
 # shellcheck source=lib/ci-skip.sh
 source "$SCRIPT_DIR/lib/ci-skip.sh"
 # shellcheck source=lib/archon-active-runs.sh
@@ -196,6 +199,10 @@ for PROJECT in "${PROJECTS[@]}"; do
     pr_on_hold "$PR" "$HOLD" && continue
     if pr_owned_by_live_run "$PR" "$HEAD" "$BODY"; then
       log "$PROJECT: PR #$PR ($HEAD) is owned by a live archon run — merging after it exits"
+      continue
+    fi
+    if MERGE_HOLD=$(runas_merge_blocked "$PROJECT" "$PR"); then
+      log "$PROJECT: PR #$PR is CLEAN but not auto-merged: $MERGE_HOLD"
       continue
     fi
     log "$PROJECT: PR #$PR is CLEAN — merging directly"

@@ -70,3 +70,22 @@ teardown() {
     grep -q '^gh pr list ' "$CALLS"
     [ "$(grep -c '^gh ' "$CALLS")" -eq 1 ]         # only the open-PR lookup
 }
+
+@test "ARCHON_RUN_AS=archon: the factory user's worktrees are listed through the wrapper, as archon" {
+    sudo() { echo "sudo $*" >> "$CALLS"; echo "autoclean: would remove /mnt/ext-fast/archon-home/.archon/workspaces/alexsiri7/reli/worktrees/archon/task-archon-ship-9 (7MB)"; }
+    export -f sudo
+    ARCHON_RUN_AS=archon run list_stale_worktrees
+    [ "$status" -eq 0 ]
+    grep -qx 'sudo -n -u archon /usr/local/bin/archon-as-archon worktree-trim --dry-run' "$CALLS"
+    [[ "$output" == *"[archon] autoclean: would remove /mnt/ext-fast/archon-home/"*"task-archon-ship-9 (7MB)"* ]]
+    [ -f "$STALE/blob" ]                                  # asiri's own layout still listed, not removed
+    [[ "$output" == *"autoclean: would remove $STALE ("* ]]
+}
+
+@test "flag off: the wrapper is never called" {
+    sudo() { echo "sudo $*" >> "$CALLS"; }
+    export -f sudo
+    run list_stale_worktrees
+    [ "$status" -eq 0 ]
+    ! grep -q '^sudo' "$CALLS"
+}

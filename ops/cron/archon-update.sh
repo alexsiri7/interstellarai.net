@@ -89,6 +89,8 @@ export CLAUDECODE=0 ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING=1
 
 LOG_TAG="[archon-update]"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/run-as.sh
+source "$SCRIPT_DIR/lib/run-as.sh"
 STATE_DIR="${ARCHON_UPDATE_STATE_DIR:-$HOME/.archon/pipeline-health-state}"
 LOG_DIR="${ARCHON_CRON_LOG_DIR:-$HOME/.local/state/archon-cron/logs}"
 STATUS_FILE="$STATE_DIR/archon-update-status"
@@ -260,8 +262,8 @@ swap_live() {
     local target="$1" expect="$2"
     if ! run_step "checkout-${expect}" "$LIVE_DIR" git checkout -q "$target"; then return 1; fi
     if ! run_step "install-live-${expect}" "$LIVE_DIR" bun install --frozen-lockfile; then return 1; fi
-    log "+ systemctl --user restart $SERVICE"
-    if ! systemctl --user restart "$SERVICE"; then log "  restart failed"; return 1; fi
+    if runas_archon; then log "+ sudo -n systemctl restart $SERVICE (runs as archon)"; else log "+ systemctl --user restart $SERVICE"; fi
+    if ! runas_serve_restart "$SERVICE"; then log "  restart failed"; return 1; fi
     if wait_healthy "$expect"; then
         log "  healthy: $HEALTH_URL → 200, $(archon --version 2>/dev/null | head -n 1)"
         return 0
@@ -421,10 +423,16 @@ else
 fi
 
 new_cli=(bun "$WORKTREE/packages/cli/src/cli.ts")
+# The baseline is the live engine's static check. Under ARCHON_RUN_AS=archon
+# plain `archon` is the factory user's wrapper, which only knows project roots
+# (and maps them to its own clones), so read the live checkout directly here —
+# as asiri, exactly what `archon` resolved to before the cutover.
+live_cli=(archon)
+runas_archon && live_cli=(bun "$LIVE_DIR/packages/cli/src/cli.ts")
 regressions=""
 while IFS= read -r dir; do
     [ -n "$dir" ] || continue
-    before=$(validate_errors archon -- "$dir" 2>/dev/null)
+    before=$(validate_errors "${live_cli[@]}" -- "$dir" 2>/dev/null)
     after=$(validate_errors "${new_cli[@]}" -- "$dir")
     newly=$(comm -13 <(printf '%s\n' "$before" | sort -u) <(printf '%s\n' "$after" | sort -u) | grep -v '^$' || true)
     log "validate $dir: errors before [$(printf '%s' "$before" | tr '\n' ' ')] after [$(printf '%s' "$after" | tr '\n' ' ')]"

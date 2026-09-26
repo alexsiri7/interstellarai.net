@@ -31,10 +31,18 @@ CLAUDE_AUTH_ISSUE_REPO="alexsiri7/interstellarai.net"
 CLAUDE_AUTH_PROBE_TIMEOUT="${CLAUDE_AUTH_PROBE_TIMEOUT:-90}"
 
 # Echoes the probe's last output line (the API error on failure).
+# The account "archon" (lib/run-as.sh, ARCHON_RUN_AS=archon) is the factory
+# user's own credential, probed as that user through the wrapper.
 claude_auth_probe() {
   local dir="$1" out rc
-  out=$(CLAUDE_CONFIG_DIR="$dir" CLAUDECODE=0 \
-    timeout "$CLAUDE_AUTH_PROBE_TIMEOUT" claude -p --model haiku "ok" </dev/null 2>&1)
+  if [ "$dir" = archon ]; then
+    out=$(timeout "$((CLAUDE_AUTH_PROBE_TIMEOUT + 15))" \
+      sudo -n -u "${ARCHON_AS_USER:-archon}" "${ARCHON_AS_WRAPPER:-/usr/local/bin/archon-as-archon}" \
+      claude-probe "$CLAUDE_AUTH_PROBE_TIMEOUT" </dev/null 2>&1)
+  else
+    out=$(CLAUDE_CONFIG_DIR="$dir" CLAUDECODE=0 \
+      timeout "$CLAUDE_AUTH_PROBE_TIMEOUT" claude -p --model haiku "ok" </dev/null 2>&1)
+  fi
   rc=$?
   [ "$rc" -eq 124 ] && out="probe timed out after ${CLAUDE_AUTH_PROBE_TIMEOUT}s"
   printf '%s\n' "$out" | tail -1
@@ -42,6 +50,15 @@ claude_auth_probe() {
 }
 
 claude_auth_issue_title() { echo "Claude account auth failing: $1"; }
+
+# The command that fixes a failing account.
+claude_auth_login_cmd() {
+  if [ "$1" = archon ]; then
+    echo "claude setup-token   # then: sudo /mnt/ext-fast/interstellarai.net/ops/host/archon-user/install.sh --set-claude-token"
+  else
+    echo "CLAUDE_CONFIG_DIR=$1 claude auth login"
+  fi
+}
 
 # Echoes the open tracking issue number for $1 (empty if none); non-zero when
 # gh itself failed, so a flaky listing never reads as "no issue yet".
@@ -80,7 +97,7 @@ $detail
 Log in again:
 
 \`\`\`
-CLAUDE_CONFIG_DIR=$dir claude auth login
+$(claude_auth_login_cmd "$dir")
 \`\`\`
 
 Auto-filed by \`ops/cron/lib/claude-auth.sh\`; \`sweep-audits.sh\` falls back to another account in \`CLAUDE_ACCOUNTS\` meanwhile. This issue is closed automatically once the probe passes again.
@@ -101,7 +118,7 @@ EOF
   [ "$first_today" -eq 1 ] || return 0
   notify "Claude account auth failing: ${dir##*/}" \
     "$dir: $detail
-Re-login: CLAUDE_CONFIG_DIR=$dir claude auth login" \
+Re-login: $(claude_auth_login_cmd "$dir")" \
     high key
   echo "$today" > "$alerted"
 }

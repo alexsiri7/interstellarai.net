@@ -325,3 +325,16 @@ status_file() { cat "$SANDBOX/state/tool-freshness"; }
     grep -qx '(could not check: uv)' "$NTFY_OUT"
     grep -qx 'unknown_count=1' "$SANDBOX/state/tool-freshness"
 }
+
+@test "ARCHON_RUN_AS=archon: bun upgraded for asiri and archon, the system unit restarted through sudo" {
+    export STUB_BUN=1.4.1; install_fake_tools
+    sudo() { echo "sudo $*" >> "$CALLS"; }
+    export -f sudo
+    ARCHON_RUN_AS=archon run "$SCRIPT" --apply
+    [ "$status" -eq 0 ]
+    grep -qx 'bun upgrade' "$CALLS"
+    grep -qx 'sudo -n -u archon /usr/local/bin/archon-as-archon bun-upgrade' "$CALLS"
+    grep -qx 'sudo -n /usr/bin/systemctl restart archon-serve.service' "$CALLS"
+    ! grep -q 'systemctl --user' "$CALLS"
+    grep -q 'apply: bun upgraded 1.4.1 → 1.4.2' "$SANDBOX/state/tool-freshness"
+}

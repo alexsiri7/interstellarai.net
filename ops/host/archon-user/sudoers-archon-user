@@ -1,0 +1,23 @@
+# /etc/sudoers.d/archon-user — installed by ops/host/archon-user/install.sh (mode 0440).
+#
+# The owner's cron jobs (user asiri) reach the factory user through exactly one
+# door: the root-owned wrapper, run AS archon (never as root). The wrapper
+# validates every argument, maps the owner's clone paths to archon's own
+# clones and execs the archon CLI with a fresh environment (env -i + allowlist)
+# and no_new_privs. sudo's env_reset (the default) drops the caller's
+# environment on the way in as well.
+#
+# Plus the one systemctl shape the cron jobs need to restart the server that
+# now runs as archon (archon-update.sh, tool-freshness.sh). No ALL, no shell.
+#
+# Revoke: sudo rm /etc/sudoers.d/archon-user   (or: install.sh --rollback,
+# which leaves this in place but stops using it).
+
+Cmnd_Alias ARCHON_AS    = /usr/local/bin/archon-as-archon
+Cmnd_Alias ARCHON_SERVE = /usr/bin/systemctl restart archon-serve.service
+
+# Cron has no terminal, and the runs are backgrounded with nohup: no pty.
+Defaults!ARCHON_AS !use_pty
+
+asiri ALL=(archon) NOPASSWD: ARCHON_AS
+asiri ALL=(root)   NOPASSWD: ARCHON_SERVE

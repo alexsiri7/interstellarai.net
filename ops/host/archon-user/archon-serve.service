@@ -1,0 +1,56 @@
+# /etc/systemd/system/archon-serve.service — installed by ops/host/archon-user/install.sh.
+# The Archon server (web UI + durable-wait continuation scheduler) as the
+# unprivileged factory user. Replaces the owner's user unit
+# (~/.config/systemd/user/archon-serve.service) at `install.sh --cutover`;
+# `install.sh --rollback` swaps back. Both bind 127.0.0.1:3090, so only one
+# may run at a time.
+[Unit]
+Description=Archon workflow server as the factory user (web UI + durable-wait continuation scheduler)
+Documentation=file:/mnt/ext-fast/interstellarai.net/ops/host/archon-user/README.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=archon
+Group=archon
+UMask=0027
+WorkingDirectory=/mnt/ext-fast/archon
+Environment=HOME=/mnt/ext-fast/archon-home
+Environment=USER=archon
+Environment=LANG=C.UTF-8
+Environment=TMPDIR=/mnt/ext-fast/archon-home/tmp
+Environment=CLAUDECODE=0
+Environment=ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING=1
+Environment=ENABLE_CLAUDEAI_MCP_SERVERS=false
+Environment=PATH=/mnt/ext-fast/archon-home/.bun/bin:/mnt/ext-fast/archon-home/.local/bin:/mnt/ext-fast/archon-home/.cargo/bin:/mnt/ext-fast/archon-home/.local/opt/flutter/bin:/mnt/ext-fast/archon-home/.local/opt/jdk/bin:/usr/local/bin:/usr/bin:/bin
+Environment=JAVA_HOME=/mnt/ext-fast/archon-home/.local/opt/jdk
+Environment=ANDROID_HOME=/mnt/ext-fast/archon-home/Android/Sdk
+Environment=ANDROID_SDK_ROOT=/mnt/ext-fast/archon-home/Android/Sdk
+# The factory's Claude credential (CLAUDE_CODE_OAUTH_TOKEN=..., written by
+# install.sh --set-claude-token). Optional: a `claude auth login` as archon works too.
+EnvironmentFile=-/mnt/ext-fast/archon-home/.config/archon-user/claude.env
+Environment=PORT=3090
+Environment=HOST=127.0.0.1
+ExecStart=/mnt/ext-fast/archon-home/.bun/bin/bun /mnt/ext-fast/archon/packages/server/src/index.ts
+Restart=on-failure
+RestartSec=10
+
+# Defence in depth for everything the server starts (resumed runs, web-UI
+# runs). File permissions already keep archon out of these; this keeps them
+# out even if a mode is loosened by mistake.
+NoNewPrivileges=yes
+ProtectHome=yes
+InaccessiblePaths=-/mnt/nas -/mnt/steam-slow -/mnt/steam-fast -/mnt/ext-fast/nas -/mnt/ext-fast/personal-ops -/mnt/ext-fast/archon-playground
+ProtectSystem=full
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

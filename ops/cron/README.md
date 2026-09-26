@@ -178,6 +178,19 @@ Three layers are designed to work together, and none is sufficient alone:
 
 An agent that is actively injected still holds the owner's admin token until the sandbox exists. It could remove labels or merge by hand, and no check on GitHub stops that.
 
+## Factory user: `ARCHON_RUN_AS`
+
+Which Unix user the agent sessions run as. `asiri` (default) is today's behaviour, byte for byte. `archon` sends every `archon` call in these scripts through `lib/archon-shim/archon` → `sudo -n -u archon /usr/local/bin/archon-as-archon`: the agents run as an unprivileged user with its own Claude and GitHub credentials, its own `~/.archon` and its own clones, and cannot read `secrets.env` or anything else of the owner's. `drain` makes the launching scripts skip their ticks during the switch. The flag is `ARCHON_RUN_AS=…` in `~/.config/archon-cron/run-as` (outside the repo, so no PR flips it and archon cannot), read by `lib/run-as.sh`; the environment variable wins, and bats ignores the file.
+
+With `archon`:
+- the server restart in `archon-update.sh` and `tool-freshness.sh` goes to the system unit through `sudo -n /usr/bin/systemctl restart archon-serve.service`, and bun is upgraded for archon too;
+- the Claude probes (`check_claude_auth`, the sweep's account choice) use the factory's own credential ("archon");
+- the stale-worktree trim also runs as archon over its own layout;
+- `pr-maintenance-cron.sh` never auto-merges an interstellarai.net PR that touches `ops/**` or `.github/**`;
+- `ops-self-update.sh` holds any update touching `ops/**` for `ops-self-update.sh --approve`.
+
+Setup, cutover, verification and the one-step rollback: [`../host/archon-user/README.md`](../host/archon-user/README.md).
+
 ## Parking a PR: the `hold` label
 
 Add the `hold` label to any open PR that must stay open and unmerged (for example an asset-upload PR whose head branch another workflow fetches from). `pr-maintenance-cron.sh` skips held PRs in every phase — no draft-to-ready flip, no auto-merge, no `archon-pr-maintenance` — and `pr-review-cron.sh` fires no review at them; each tick logs `<project>: PR #N is on hold — skipping`. Remove the label to hand the PR back to the automation. `pr-maintenance-cron.sh` creates the label (`#5319E7`, "Do not auto-merge, auto-review or auto-maintain") on every repo in `archon-projects.txt` each tick, so it is always available.
@@ -218,7 +231,7 @@ crontab ops/cron/crontab
 
 It installs with absolute paths pointing at `/mnt/ext-fast/interstellarai.net/ops/cron/...`. Adjust paths there if this repo lives elsewhere on your machine.
 
-The crontab also keeps that checkout current: every 10 minutes it runs `git -C /mnt/ext-fast/interstellarai.net pull --ff-only -q origin main >> ~/.local/state/archon-cron/logs/ops-self-update.log`. Cron runs the scripts straight out of this checkout, so before this line a merged fix to any cron script did nothing until someone pulled by hand. `--ff-only` means a dirty or diverged checkout (a session left mid-edit on `main`, say) makes the pull fail harmlessly — nothing is overwritten — and the failure shows in that log; `-q` keeps a successful fast-forward silent, so it only ever holds problems.
+The crontab also keeps that checkout current: every 10 minutes it runs `ops/cron/ops-self-update.sh >> ~/.local/state/archon-cron/logs/ops-self-update.log`, which is `git -C /mnt/ext-fast/interstellarai.net pull --ff-only -q origin main` unless `ARCHON_RUN_AS=archon` (then `ops/**` changes wait for approval, see "Factory user"). Cron runs the scripts straight out of this checkout, so before this line a merged fix to any cron script did nothing until someone pulled by hand. `--ff-only` means a dirty or diverged checkout (a session left mid-edit on `main`, say) makes the pull fail harmlessly — nothing is overwritten — and the failure shows in that log; `-q` keeps a successful fast-forward silent, so it only ever holds problems.
 
 ## Logs and logrotate
 
@@ -294,6 +307,8 @@ Status lives in `~/.archon/pipeline-health-state/archon-update-status` (`last_ru
 | `lib/ci-skip.sh` | sourced by `pr-maintenance-cron.sh`, `pipeline-health-cron.sh` | the CI-skip tokens GitHub honours: detect one, strip them from a subject or a body |
 | `lib/pg-backup.sh` | sourced by `backup-dbs.sh`, `restore-test.sh` | the project list (`PG_BACKUP_PROJECTS`), URL → `PG*` env, pg client/server version selection, archive validation |
 | `archon-projects.txt` | data | canonical list of managed project slugs under `alexsiri7/` |
+| `ops-self-update.sh` | every 10 min | keeps this checkout on origin/main (`git pull --ff-only`); under `ARCHON_RUN_AS=archon` an update touching `ops/**` waits for the owner's `ops-self-update.sh --approve` at the console (one ntfy per held commit) |
+| `lib/run-as.sh`, `lib/archon-shim/archon` | sourced by the archon-calling scripts | the `ARCHON_RUN_AS` flag (see "Factory user") and the owner-side `archon` that forwards to the factory user |
 
 ## Tests
 

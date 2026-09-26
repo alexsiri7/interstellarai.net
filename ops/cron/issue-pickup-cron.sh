@@ -12,12 +12,15 @@ set -uo pipefail
 export PATH="$HOME/.bun/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/run-as.sh
+source "$SCRIPT_DIR/lib/run-as.sh"
 # shellcheck source=lib/archon-projects.sh
 source "$SCRIPT_DIR/lib/archon-projects.sh"
 load_archon_projects DEFAULT_PROJECTS
 # shellcheck source=lib/throttle.sh
 source "$SCRIPT_DIR/lib/throttle.sh"
 should_tick "issue-pickup" || exit 0
+runas_may_launch "issue-pickup" || exit 0
 # shellcheck source=lib/archon-active-runs.sh
 source "$SCRIPT_DIR/lib/archon-active-runs.sh"
 archon_runs_snapshot
