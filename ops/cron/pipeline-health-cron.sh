@@ -21,6 +21,9 @@
 #      while work is pending (queued/in-progress issues or actionable PRs):
 #        - If token-limit markers in recent logs → wait, retry next tick
 #        - Else → fire archon-assist diagnostic (dedup: 2h cooldown)
+#  5b. Open archon PRs (non-draft, not CLEAN or BLOCKED) idle >2h → fire
+#      archon-pr-maintenance, trusted authors/comments only; after 3 attempts
+#      on one head SHA, ntfy + file a "factory stuck" issue (dedup by PR + SHA)
 #   6. Open archon PRs with failed CI → fire archon-assist to diagnose + fix
 #      (dedup by PR number, reset when PR merges/closes)
 #  6b. Staging deploy HTTP health → ntfy operator if staging URL returns non-2xx/3xx
