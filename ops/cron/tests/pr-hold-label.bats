@@ -71,8 +71,8 @@ teardown() {
     rm -rf "$T"
 }
 
-pr() { # pr <number> <draft> <mergeState> <labels-json>
-    printf '{"number": %s, "isDraft": %s, "mergeStateStatus": "%s", "headRefName": "feat/x-%s", "headRefOid": "abc%s", "updatedAt": "2026-09-10T00:00:00Z", "body": "asset upload", "labels": %s}' \
+pr() { # pr <number> <draft> <mergeState> <labels-json> — an owner, same-repo PR
+    printf '{"number": %s, "isDraft": %s, "mergeStateStatus": "%s", "headRefName": "feat/x-%s", "headRefOid": "abc%s", "updatedAt": "2026-09-10T00:00:00Z", "body": "asset upload", "labels": %s, "author": {"login": "alexsiri7"}, "isCrossRepository": false}' \
         "$1" "$2" "$3" "$1" "$1" "$4"
 }
 

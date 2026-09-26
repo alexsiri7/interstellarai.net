@@ -79,6 +79,10 @@ source "$SCRIPT_DIR/lib/archon-active-runs.sh"
 source "$SCRIPT_DIR/lib/ci-skip.sh"
 # shellcheck source=lib/claude-auth.sh
 source "$SCRIPT_DIR/lib/claude-auth.sh"
+# The PR checks that start archon (check_pr_ci_retry, check_stuck_prs) only see
+# PRs lib/trust.sh rates `full`; a fork can name its branch `archon/…` too.
+# shellcheck source=lib/trust.sh
+source "$SCRIPT_DIR/lib/trust.sh"
 BASE_DIR="${BASE_DIR:-/mnt/ext-fast}"
 STATE_DIR="$HOME/.archon/pipeline-health-state"
 # Where the crontab sends every script's stdout/stderr (see ops/cron/crontab).
@@ -1409,12 +1413,16 @@ check_progress() {
   local pending=0
   for project in "${REPOS[@]}"; do
     local n
+    # Trusted items only: the factory never works an untrusted one, so counting
+    # it would read as a permanent stall and fire the diagnostic every 2h at it.
     n=$(gh issue list --repo "alexsiri7/$project" --state open --limit 100 \
-          --json labels,createdAt 2>/dev/null \
+          --json number,labels,createdAt,author,title,body 2>/dev/null \
+        | TRUST_QUIET=1 trust_filter_issues "$project" \
         | jq --arg since "$since_iso" '[.[] | select(.createdAt < $since) | select(.labels | map(.name) | any(. == "archon:queued" or . == "archon:in-progress" or . == "archon:triage-in-progress"))] | length' \
           2>/dev/null || echo 0)
     pending=$((pending + ${n:-0}))
-    n=$(gh pr list --repo "alexsiri7/$project" --state open --json isDraft,mergeStateStatus,createdAt 2>/dev/null \
+    n=$(gh pr list --repo "alexsiri7/$project" --state open --json number,isDraft,mergeStateStatus,createdAt,author,isCrossRepository 2>/dev/null \
+        | trust_filter_prs "$project" full \
         | jq --arg since "$since_iso" '[.[] | select(.createdAt < $since) | select(.isDraft == false and (.mergeStateStatus == "CLEAN" or .mergeStateStatus == "BEHIND" or .mergeStateStatus == "DIRTY" or .mergeStateStatus == "UNSTABLE" or .mergeStateStatus == "UNKNOWN"))] | length' \
           2>/dev/null || echo 0)
     pending=$((pending + ${n:-0}))
@@ -1482,8 +1490,9 @@ check_pr_ci_retry() {
   # Includes headRefOid so we can scope attempts to the PR's current head SHA.
   local failed_prs
   failed_prs=$(gh pr list --repo "alexsiri7/$project" --state open \
-    --json number,title,headRefName,headRefOid,statusCheckRollup \
-    --jq '.[] | select(.headRefName | startswith("archon/")) | select(.statusCheckRollup | length > 0) | select(.statusCheckRollup | map(.conclusion // "PENDING") | any(. == "FAILURE")) | [(.number|tostring), .headRefOid, .title] | @tsv' \
+    --json number,title,headRefName,headRefOid,statusCheckRollup,author,isCrossRepository 2>/dev/null \
+    | trust_filter_prs "$project" full \
+    | jq -r '.[] | select(.headRefName | startswith("archon/")) | select(.statusCheckRollup | length > 0) | select(.statusCheckRollup | map(.conclusion // "PENDING") | any(. == "FAILURE")) | [(.number|tostring), .headRefOid, .title] | @tsv' \
     2>/dev/null || echo "")
 
   # Clear markers for PRs no longer failing (merged, closed, or recovered).
@@ -1522,6 +1531,11 @@ check_pr_ci_retry() {
     [ -n "$pr_num" ] || continue
     [ -n "$pr_sha" ] || continue
 
+    # Before sha_attempt_decide, so a PR held back here spends no attempt.
+    if ! trust_comments_ok "$project" pr "$pr_num"; then
+      log "$project: PR #$pr_num CI red but has untrusted comments or reviews — not firing archon-assist"
+      continue
+    fi
     local marker="$STATE_DIR/prciretry/$project-pr$pr_num"
     local decision action attempts
     decision=$(sha_attempt_decide "$marker" "$STATE_DIR/escalated" \
@@ -1587,6 +1601,10 @@ check_stuck_prs() {
   #   - are not BLOCKED (CI failing, caught by check_pr_ci_retry)
   #   - haven't been updated in >2h
   local stuck_prs
+  # NOTE: gh rejects `--jq --arg …` ("unknown arguments"), so this listing is
+  # empty and the check has never fired. Left as is here (reviving it would
+  # start archon-pr-maintenance runs); the trust gate below still applies if
+  # it is ever fixed.
   stuck_prs=$(gh pr list --repo "alexsiri7/$project" --state open \
     --json number,title,headRefName,headRefOid,isDraft,updatedAt,mergeStateStatus \
     --jq --arg cutoff "$cutoff_iso" \
@@ -1607,6 +1625,18 @@ check_stuck_prs() {
     [ -n "$pr_num" ] || continue
     [ -n "$pr_sha" ] || continue
 
+    # Before sha_attempt_decide, so a PR held back here spends no attempt.
+    local pr_who
+    pr_who=$(gh pr view "$pr_num" --repo "alexsiri7/$project" --json number,author,isCrossRepository 2>/dev/null \
+      | jq -c '[.]' 2>/dev/null | trust_filter_prs "$project" full | jq 'length' 2>/dev/null || echo 0)
+    if [ "${pr_who:-0}" != "1" ]; then
+      log "$project: PR #$pr_num stuck but its author is not trusted for archon — skipping"
+      continue
+    fi
+    if ! trust_comments_ok "$project" pr "$pr_num"; then
+      log "$project: PR #$pr_num stuck but has untrusted comments or reviews — not firing archon-pr-maintenance"
+      continue
+    fi
     local marker="$STATE_DIR/stuck-pr/$project-pr$pr_num"
     local decision action attempts
     decision=$(sha_attempt_decide "$marker" "$STATE_DIR/escalated" \

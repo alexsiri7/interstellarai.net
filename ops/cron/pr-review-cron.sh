@@ -41,6 +41,8 @@ should_tick "pr-review" || exit 0
 # shellcheck source=lib/archon-active-runs.sh
 source "$SCRIPT_DIR/lib/archon-active-runs.sh"
 archon_runs_snapshot
+# shellcheck source=lib/trust.sh
+source "$SCRIPT_DIR/lib/trust.sh"
 
 BASE_DIR="${BASE_DIR:-/mnt/ext-fast}"
 STATE_DIR="$HOME/.archon/state/pr-review"
@@ -96,15 +98,21 @@ process_project() {
     return
   fi
 
-  local prs_json
-  prs_json=$(gh pr list --repo "alexsiri7/$project" --state open \
-    --json number,headRefOid,isDraft,labels,updatedAt --limit 50 2>/dev/null || echo "[]")
+  local prs_json all_json
+  all_json=$(gh pr list --repo "alexsiri7/$project" --state open \
+    --json number,headRefOid,isDraft,labels,updatedAt,author,isCrossRepository --limit 50 2>/dev/null || echo "[]")
 
-  local n_open n_nondraft
-  n_open=$(echo "$prs_json" | jq 'length' 2>/dev/null || echo 0)
-  n_nondraft=$(echo "$prs_json" | jq '[.[] | select(.isDraft == false)] | length' 2>/dev/null || echo 0)
+  local n_open n_nondraft n_trusted
+  n_open=$(echo "$all_json" | jq 'length' 2>/dev/null || echo 0)
+  n_nondraft=$(echo "$all_json" | jq '[.[] | select(.isDraft == false)] | length' 2>/dev/null || echo 0)
+  # Only PRs archon may read (lib/trust.sh `full`): the review is a Claude
+  # session that reads the PR's title, body, diff and comments. Fork PRs and
+  # strangers' PRs are dropped (owner ntfy'd once); merge-only bots' PRs
+  # (dependabot) are dropped silently — pr-maintenance merges them on green CI.
+  prs_json=$(trust_filter_prs "$project" full <<<"$all_json")
+  n_trusted=$(echo "$prs_json" | jq '[.[] | select(.isDraft == false)] | length' 2>/dev/null || echo 0)
 
-  local reviewed=0 skipped_running=0 fired=0 in_flight=0 held=0
+  local reviewed=0 skipped_running=0 fired=0 in_flight=0 held=0 untrusted_comments=0
 
   # Third column: "true" when the PR carries the `hold` label (see
   # pr-maintenance-cron.sh) — a held PR gets no automated review either.
@@ -150,6 +158,13 @@ process_project() {
       continue
     fi
 
+    # Last gate before archon reads the thread: every comment and review on
+    # it must be by a trusted author (a stranger may comment on a trusted PR).
+    if ! trust_comments_ok "$project" pr "$pr_num"; then
+      untrusted_comments=$((untrusted_comments + 1))
+      continue
+    fi
+
     # Fire archon.
     (
       cd "$repo_dir" || exit 1
@@ -173,7 +188,7 @@ process_project() {
     fi
   done <<< "$rows"
 
-  log "$project: $n_open open, $n_nondraft non-draft, $reviewed reviewed-at-this-SHA, $in_flight in-flight, $skipped_running skipped-running, $held on-hold, $fired fired"
+  log "$project: $n_open open, $n_nondraft non-draft, $((n_nondraft - n_trusted)) not-for-archon (untrusted or merge-only author), $untrusted_comments untrusted-comments, $reviewed reviewed-at-this-SHA, $in_flight in-flight, $skipped_running skipped-running, $held on-hold, $fired fired"
 }
 
 for PROJECT in "${PROJECTS[@]}"; do

@@ -38,6 +38,12 @@ ARCHON_LABELS=("archon:queued" "archon:in-progress" "archon:triage-in-progress" 
 
 # shellcheck source=lib/human-labels.sh
 source "$SCRIPT_DIR/lib/human-labels.sh"
+# Every issue list below is passed through trust_filter_issues: an issue whose
+# author is not trusted is never triaged, labelled, queued, re-queued, deduped
+# or handed to archon, and the owner gets one ntfy about it. Before any archon
+# run the thread's comments must be trusted too (trust_comments_ok).
+# shellcheck source=lib/trust.sh
+source "$SCRIPT_DIR/lib/trust.sh"
 
 PROJECTS=("${DEFAULT_PROJECTS[@]}")
 [ $# -gt 0 ] && PROJECTS=("$@")
@@ -67,6 +73,8 @@ ensure_labels() {
     gh label create "$label" --repo "alexsiri7/$repo" \
       --color "c2e0c6" --description "Archon pipeline state" 2>/dev/null || true
   done
+  gh label create "$TRUST_APPROVED_LABEL" --repo "alexsiri7/$repo" \
+    --color "0e8a16" --description "Owner vetted: the factory may work this bridge-filed issue" 2>/dev/null || true
 }
 
 # Returns 0 (blocked) if the issue has at least one open "blocker" — defined
@@ -140,7 +148,8 @@ auto_triage() {
 
   local issues
   issues=$(gh issue list --repo "alexsiri7/$project" --state open --limit 100 \
-    --json number,labels,createdAt 2>/dev/null || echo "[]")
+    --json number,labels,createdAt,author,title,body 2>/dev/null || echo "[]")
+  issues=$(trust_filter_issues "$project" <<<"$issues")
 
   local now_sec; now_sec=$(date +%s)
   local triage_issue=""
@@ -206,6 +215,10 @@ auto_triage() {
       continue
     fi
 
+    # archon-triage-issue reads the thread; a stranger's comment on a trusted
+    # issue is untrusted input all the same. Skip it (owner ntfy'd once).
+    trust_comments_ok "$project" issue "$num" || continue
+
     triage_issue="$num"
     break
   done < <(echo "$issues" | jq -c 'sort_by(.createdAt)[]' 2>/dev/null)
@@ -245,10 +258,17 @@ auto_triage() {
 dedupe_sentry() {
   local project="$1"
   local open_json closed_json
+  # Trusted authors only, open and closed: a stranger can file a Sentry-shaped
+  # body and close it as completed, which would make it the survivor the real
+  # Sentry issues get closed against.
   open_json=$(gh issue list --repo "alexsiri7/$project" --state open --limit 100 \
-    --json number,body,labels 2>/dev/null || echo "[]")
+    --json number,body,labels,author 2>/dev/null || echo "[]")
+  # Author only: this phase starts no archon run, and the issues it dedupes
+  # are the Sentry bridges' own, which the bridge check would drop.
+  open_json=$(TRUST_AUTHOR_ONLY=1 trust_filter_issues "$project" <<<"$open_json")
   closed_json=$(gh issue list --repo "alexsiri7/$project" --state closed --limit 100 \
-    --json number,body,stateReason 2>/dev/null || echo "[]")
+    --json number,body,stateReason,author 2>/dev/null || echo "[]")
+  closed_json=$(TRUST_AUTHOR_ONLY=1 TRUST_QUIET=1 trust_filter_issues "$project" <<<"$closed_json")
 
   local num survivor sentry_id labels_json
   while IFS=$'\t' read -r num survivor sentry_id labels_json; do
@@ -300,7 +320,9 @@ settle_parked() {
   local project="$1"
   local issues nums num verdict_file
   issues=$(gh issue list --repo "alexsiri7/$project" --state open --label "archon:skipped" \
-    --limit 100 --json number,comments 2>/dev/null || echo "[]")
+    --limit 100 --json number,comments,author 2>/dev/null || echo "[]")
+  # Author only: a re-check starts no archon run; it closes or leaves the issue.
+  issues=$(TRUST_AUTHOR_ONLY=1 trust_filter_issues "$project" <<<"$issues")
   # issue list returns at most the oldest 100 comments of each issue, so on a
   # longer thread [-1] is not the last comment and could hide a human's reply.
   nums=$(echo "$issues" | jq -r '.[]
@@ -313,6 +335,11 @@ settle_parked() {
 
   verdict_file=$(mktemp)
   for num in $nums; do
+    # The verdict is posted under the owner's token. Anyone can post a comment
+    # that reads like one, so only a trusted author's verdict is re-checked.
+    local by
+    by=$(echo "$issues" | jq -r --argjson n "$num" '.[] | select(.number == $n) | .comments[-1].author.login // ""')
+    trust_commenter_ok "$by" || continue
     echo "$issues" | jq -r --argjson n "$num" '.[] | select(.number == $n)
       | .comments[-1].body | sub("^archon-ship finished without a PR: "; "")' > "$verdict_file"
     if "$SCRIPT_DIR/lib/settle-ship-outcome.sh" --recheck "$project" "$num" "$verdict_file"; then
@@ -332,7 +359,8 @@ unstick_stale() {
   local repo_dir="$BASE_DIR/$project"
   local issues
   issues=$(gh issue list --repo "alexsiri7/$project" --state open \
-    --label "archon:in-progress" --limit 50 --json number 2>/dev/null || echo "[]")
+    --label "archon:in-progress" --limit 50 --json number,author,labels,title,body 2>/dev/null || echo "[]")
+  issues=$(trust_filter_issues "$project" <<<"$issues")
 
   local nums
   nums=$(echo "$issues" | jq -r '.[].number' 2>/dev/null)
@@ -437,7 +465,8 @@ auto_queue() {
   local project="$1"
   local issues
   issues=$(gh issue list --repo "alexsiri7/$project" --state open --limit 100 \
-    --json number,labels,createdAt 2>/dev/null || echo "[]")
+    --json number,labels,createdAt,author,title,body 2>/dev/null || echo "[]")
+  issues=$(trust_filter_issues "$project" <<<"$issues")
 
   local now_sec; now_sec=$(date +%s)
   QUEUED_ISSUES=()
@@ -502,7 +531,8 @@ promote_unblocked() {
   PROMOTED_ISSUES=()
   local blocked_json
   blocked_json=$(gh issue list --repo "alexsiri7/$project" --state open \
-    --label "archon:blocked" --limit 100 --json number 2>/dev/null || echo "[]")
+    --label "archon:blocked" --limit 100 --json number,author,labels,title,body 2>/dev/null || echo "[]")
+  blocked_json=$(trust_filter_issues "$project" <<<"$blocked_json")
   SUMMARY_BLOCKED=$(echo "$blocked_json" | jq 'length' 2>/dev/null || echo 0)
 
   local nums
@@ -537,7 +567,8 @@ pick_and_fire() {
   # issue number, or gh's list sort.
   local queued_json
   queued_json=$(gh issue list --repo "alexsiri7/$project" --state open \
-    --label "archon:queued" --limit 50 --json number 2>/dev/null || echo "[]")
+    --label "archon:queued" --limit 50 --json number,author,labels,title,body 2>/dev/null || echo "[]")
+  queued_json=$(trust_filter_issues "$project" <<<"$queued_json")
 
   local -a candidates=()
   local num
@@ -594,7 +625,17 @@ pick_and_fire() {
     return
   fi
 
-  local issue="${candidates[0]:-}"
+  # First candidate whose thread is trusted end to end. Skip, never stop: an
+  # issue a stranger commented on stays queued (owner ntfy'd once) without
+  # wedging the rest of the queue behind it.
+  local issue="" cand
+  for cand in "${candidates[@]}"; do
+    if trust_comments_ok "$project" issue "$cand"; then
+      issue="$cand"
+      break
+    fi
+    log "$project: #$cand has comments by untrusted authors (or they could not be read) — not starting archon on it"
+  done
 
   if [ -z "$issue" ]; then
     return  # nothing queued; SUMMARY_ACTION stays "none"

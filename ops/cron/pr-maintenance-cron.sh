@@ -29,6 +29,8 @@ source "$SCRIPT_DIR/lib/ci-skip.sh"
 # shellcheck source=lib/archon-active-runs.sh
 source "$SCRIPT_DIR/lib/archon-active-runs.sh"
 archon_runs_snapshot
+# shellcheck source=lib/trust.sh
+source "$SCRIPT_DIR/lib/trust.sh"
 BASE_DIR="${BASE_DIR:-/mnt/ext-fast}"
 LOG_PREFIX="[pr-maintenance]"
 # Same directory the crontab sends this script's own log to; survives a reboot
@@ -102,6 +104,18 @@ pr_owned_by_live_run() {
   fi
 }
 
+# list_prs full|merge <jq select expression> — open PRs of the current repo
+# whose author the trust gate admits at that level (lib/trust.sh: `full` =
+# archon may work it, `merge` = may also be a merge-only bot's PR), one
+# "<number>\t<headRefName>\t<hold>\t<body>" row each. Untrusted PRs are
+# dropped here, before any phase sees them, and the owner is told once.
+list_prs() {
+  local level="$1" select="$2" json
+  json=$(gh pr list --state open --json number,mergeStateStatus,isDraft,headRefName,labels,body,author,isCrossRepository,title,createdAt 2>/dev/null || echo "[]")
+  trust_filter_prs "$PROJECT" "$level" <<<"$json" \
+    | jq -r ".[] | select($select)"' | [.number, .headRefName, (((.labels // []) | map(.name) | index("hold")) != null), ((.body // "") | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null || true
+}
+
 for PROJECT in "${PROJECTS[@]}"; do
   REPO_DIR="$BASE_DIR/$PROJECT"
 
@@ -118,8 +132,7 @@ for PROJECT in "${PROJECTS[@]}"; do
   # draft has nothing left to gate on, but the Phase 1 merge filter skips
   # drafts — so left alone a green draft sits forever. Flip it to ready so
   # Phase 1 can merge it on this same tick.
-  GREEN_DRAFTS=$(gh pr list --state open --json number,mergeStateStatus,isDraft,headRefName,labels,body \
-    --jq '.[] | select(.isDraft == true and .mergeStateStatus == "CLEAN") | [.number, .headRefName, (((.labels // []) | map(.name) | index("hold")) != null), ((.body // "") | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null || true)
+  GREEN_DRAFTS=$(list_prs merge '.isDraft == true and .mergeStateStatus == "CLEAN"')
 
   while IFS=$'\t' read -r PR HEAD HOLD BODY; do
     [ -n "$PR" ] || continue
@@ -135,8 +148,7 @@ for PROJECT in "${PROJECTS[@]}"; do
   done <<< "$GREEN_DRAFTS"
 
   # --- Phase 1: Merge CLEAN PRs directly (bash only, zero AI cost) ---
-  CLEAN_PRS=$(gh pr list --state open --json number,mergeStateStatus,isDraft,headRefName,labels,body \
-    --jq '.[] | select(.isDraft == false and .mergeStateStatus == "CLEAN") | [.number, .headRefName, (((.labels // []) | map(.name) | index("hold")) != null), ((.body // "") | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null || true)
+  CLEAN_PRS=$(list_prs merge '.isDraft == false and .mergeStateStatus == "CLEAN"')
 
   while IFS=$'\t' read -r PR HEAD HOLD BODY; do
     [ -n "$PR" ] || continue
@@ -184,8 +196,9 @@ for PROJECT in "${PROJECTS[@]}"; do
   # archon:in-progress behind a linked PR nobody touches (2026-09-09:
   # word-coach-annie #1121 sat conflicted for 2.5h after #1122 merged the same
   # file). Other draft states are still the opening run's to finish.
-  CANDIDATES=$(gh pr list --state open --json number,mergeStateStatus,isDraft,headRefName,labels,body \
-    --jq '.[] | select((.isDraft == false and (.mergeStateStatus == "BEHIND" or .mergeStateStatus == "DIRTY" or .mergeStateStatus == "UNSTABLE" or .mergeStateStatus == "UNKNOWN")) or (.isDraft == true and .mergeStateStatus == "DIRTY")) | [.number, .headRefName, (((.labels // []) | map(.name) | index("hold")) != null), ((.body // "") | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null || true)
+  # Only `full` trust: archon-pr-maintenance reads the PR, so a merge-only
+  # bot's PR (dependabot: upstream release notes in the body) never gets here.
+  CANDIDATES=$(list_prs full '(.isDraft == false and (.mergeStateStatus == "BEHIND" or .mergeStateStatus == "DIRTY" or .mergeStateStatus == "UNSTABLE" or .mergeStateStatus == "UNKNOWN")) or (.isDraft == true and .mergeStateStatus == "DIRTY")')
 
   ACTIONABLE=""
   while IFS=$'\t' read -r PR HEAD HOLD BODY; do
@@ -193,6 +206,10 @@ for PROJECT in "${PROJECTS[@]}"; do
     pr_on_hold "$PR" "$HOLD" && continue
     if pr_owned_by_live_run "$PR" "$HEAD" "$BODY"; then
       log "$PROJECT: PR #$PR ($HEAD) needs maintenance but is owned by a live archon run — leaving it to the run"
+      continue
+    fi
+    if ! trust_comments_ok "$PROJECT" pr "$PR"; then
+      log "$PROJECT: PR #$PR has untrusted comments or reviews — not handing it to archon"
       continue
     fi
     ACTIONABLE="$PR"
