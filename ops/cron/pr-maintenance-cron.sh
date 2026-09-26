@@ -130,30 +130,53 @@ SAFE_CHANGE_POLICY="${SAFE_CHANGE_POLICY:-.github/safe-change.json}"
 # pr_scope_decision <number> <view-json> — prints ok, wait or hold <why>.
 # ok: the PR closes no screened-only issue, or its safe-change check passed.
 # wait: the check is still running. hold: the check failed, or the repo has no
-# safe-change policy (fail closed), or a linked issue could not be read.
+# safe-change policy, or anything here could not be read or parsed. Every
+# step fails closed: this decision is what keeps a PR built from a screened
+# public issue from merging outside its allowlist. JSON goes to jq through
+# printf pipes, never here-strings, which need a temp file on a full disk.
 pr_scope_decision() {
-  local pr="$1" view="$2" issues n labels screened="" state policy
-  issues=$( { jq -r '.closingIssuesReferences[]?.number' <<<"$view"
-              jq -r '.body // ""' <<<"$view" | grep -oiE '(close[sd]?|fix(e[sd])?|resolve[sd]?) #[0-9]+' | grep -oE '[0-9]+$'
-            } 2>/dev/null | sort -un || true)
+  local pr="$1" view="$2" refs body issues n flag screened="" state
+  if ! refs=$(printf '%s' "$view" | jq -er '[.closingIssuesReferences[]?.number] | map(tostring) | join(" ")' 2>/dev/null); then
+    echo "hold could not parse PR #$pr"; return
+  fi
+  if ! body=$(printf '%s' "$view" | jq -er '.body // ""' 2>/dev/null); then
+    echo "hold could not parse PR #$pr"; return
+  fi
+  issues=$(printf '%s\n%s\n' "$refs" \
+             "$(printf '%s' "$body" | grep -oiE '(close[sd]?|fix(e[sd])?|resolve[sd]?) #[0-9]+' | grep -oE '[0-9]+$' | tr '\n' ' ')" \
+           | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -un || true)
   for n in $issues; do
-    if ! labels=$(gh issue view "$n" --json labels --jq '[.labels[].name]' 2>/dev/null); then
+    if ! flag=$(gh issue view "$n" --json labels 2>/dev/null \
+         | jq -r --arg s "$TRUST_SCREENED_LABEL" --arg o "$TRUST_APPROVED_LABEL" \
+             '[.labels[].name] | (index($s) != null and index($o) == null)' 2>/dev/null); then
       echo "hold could not read linked issue #$n"; return
     fi
-    if jq -e --arg s "$TRUST_SCREENED_LABEL" --arg o "$TRUST_APPROVED_LABEL" 'index($s) and (index($o) | not)' <<<"$labels" >/dev/null; then
-      screened="$screened #$n"
-    fi
+    case "$flag" in   # jq -e would fail on a literal false; validate here
+      true) screened="$screened #$n" ;;
+      false) ;;
+      *) echo "hold could not read linked issue #$n"; return ;;
+    esac
   done
   [ -n "$screened" ] || { echo ok; return; }
-  state=$(jq -r --arg c "$SAFE_CHANGE_CHECK" '[.statusCheckRollup[]? | select((.name // .context) == $c)] | last | (.conclusion // .state // "PENDING") | ascii_upcase' <<<"$view")
+  # Every rollup entry of that name must pass: another workflow can publish a
+  # job called safe-change too.
+  if ! state=$(printf '%s' "$view" | jq -er --arg c "$SAFE_CHANGE_CHECK" '
+        [.statusCheckRollup[]? | select((.name // .context) == $c) | ((.conclusion // .state // "") | ascii_upcase)]
+        | if length == 0 then "MISSING"
+          elif all(. == "SUCCESS") then "SUCCESS"
+          elif any(IN("FAILURE","ERROR","CANCELLED","TIMED_OUT","ACTION_REQUIRED","STARTUP_FAILURE","STALE","SKIPPED","NEUTRAL")) then "FAILURE"
+          else "PENDING" end' 2>/dev/null); then
+    echo "hold could not parse the checks of PR #$pr"; return
+  fi
   case "$state" in
     SUCCESS) echo ok ;;
-    FAILURE|ERROR|CANCELLED|TIMED_OUT|ACTION_REQUIRED) echo "hold $SAFE_CHANGE_CHECK check $state (closes screened issue${screened})" ;;
+    FAILURE) echo "hold $SAFE_CHANGE_CHECK check failed (closes screened issue${screened})" ;;
+    PENDING) echo wait ;;
     *)
-      if ! policy=$(gh api "repos/alexsiri7/$PROJECT/contents/$SAFE_CHANGE_POLICY" --jq .path 2>/dev/null) || [ -z "$policy" ]; then
-        echo "hold no $SAFE_CHANGE_POLICY in this repo (closes screened issue${screened})"
-      else
+      if gh api "repos/alexsiri7/$PROJECT/contents/$SAFE_CHANGE_POLICY" --jq .path >/dev/null 2>&1; then
         echo wait
+      else
+        echo "hold no $SAFE_CHANGE_POLICY in this repo (closes screened issue${screened})"
       fi ;;
   esac
 }

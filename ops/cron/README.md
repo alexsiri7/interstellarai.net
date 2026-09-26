@@ -156,7 +156,7 @@ To see what screening would decide, without writing to GitHub: `ops/cron/screen-
 **Scope check on PRs from screened issues.** Some PRs close an issue that only screening vetted: it carries `archon:auto-approved` without the owner's `archon:approved`. `pr-maintenance-cron.sh` merges such a PR only once its `safe-change` check (`SAFE_CHANGE_CHECK`) is `SUCCESS`:
 
 - Check pending: the PR waits.
-- Check failed, or the repo has no `.github/safe-change.json` (`SAFE_CHANGE_POLICY`): the PR gets `needs-owner-review` and the owner gets one ntfy. `pr-maintenance` then leaves the PR alone in every phase, just like `hold`. This is fail-closed, so screened Sentry fixes in a repo without a policy wait for the owner at merge.
+- Check failed, or the repo has no `.github/safe-change.json` (`SAFE_CHANGE_POLICY`): the PR gets `needs-owner-review` and the owner gets one ntfy. From then on the PR is treated like `hold`: `pr-maintenance` leaves it alone in every phase, `pr-review` does not review it, and `pipeline-health` does not start archon-assist on its CI. The `safe-change` check never counts as red CI for that retry. Every step of this decision fails closed, and a rollup with several entries named `safe-change` passes only if all of them pass. This is fail-closed, so screened Sentry fixes in a repo without a policy wait for the owner at merge.
 
 The check lives in each product repo as a `pull_request_target` workflow, so it runs base-branch code and policy and never checks out the PR. It fails when the PR touches anything outside the allowlist for its issue's `type:` label.
 

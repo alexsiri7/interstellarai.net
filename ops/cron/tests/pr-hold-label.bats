@@ -55,6 +55,8 @@ if [ "$1 $2" = "pr list" ]; then
   if [ -n "$jqf" ]; then printf '%s' "$GH_PR_LIST" | jq -r "$jqf"; else printf '%s' "$GH_PR_LIST"; fi
 fi
 [ "$1 $2" = "pr view" ] && printf '%s' "$GH_PR_VIEW"
+# Linked issues (pr-maintenance's scope gate): owner issues, no labels.
+[ "$1 $2" = "issue view" ] && printf '{"labels":[]}'
 exit 0
 STUB
     cat > "$STUB_BIN/archon" <<'STUB'

@@ -1510,9 +1510,13 @@ check_pr_ci_retry() {
   # Includes headRefOid so we can scope attempts to the PR's current head SHA.
   local failed_prs
   failed_prs=$(gh pr list --repo "alexsiri7/$project" --state open \
-    --json number,title,headRefName,headRefOid,statusCheckRollup,author,isCrossRepository 2>/dev/null \
+    --json number,title,headRefName,headRefOid,statusCheckRollup,author,isCrossRepository,labels 2>/dev/null \
     | trust_filter_prs "$project" full \
-    | jq -r '.[] | select(.headRefName | startswith("archon/")) | select(.statusCheckRollup | length > 0) | select(.statusCheckRollup | map(.conclusion // "PENDING") | any(. == "FAILURE")) | [(.number|tostring), .headRefOid, .title] | @tsv' \
+    | jq -r --arg held "$TRUST_HELD_LABEL" '.[] | select(.headRefName | startswith("archon/"))
+        | select((.labels // []) | map(.name) | (index("hold") or index($held)) | not)
+        | select(.statusCheckRollup | length > 0)
+        | select(.statusCheckRollup | map(select((.name // .context) != "safe-change") | .conclusion // "PENDING") | any(. == "FAILURE"))
+        | [(.number|tostring), .headRefOid, .title] | @tsv' \
     2>/dev/null || echo "")
 
   # Clear markers for PRs no longer failing (merged, closed, or recovered).

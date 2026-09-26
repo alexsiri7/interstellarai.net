@@ -118,9 +118,10 @@ process_project() {
   local reviewed=0 skipped_running=0 fired=0 in_flight=0 held=0 untrusted_comments=0
 
   # Third column: "true" when the PR carries the `hold` label (see
-  # pr-maintenance-cron.sh) — a held PR gets no automated review either.
+  # pr-maintenance-cron.sh) or needs-owner-review (the trust gate parked it)
+  # — a held PR gets no automated review either.
   local rows
-  rows=$(echo "$prs_json" | jq -r '.[] | select(.isDraft == false) | "\(.number) \(.headRefOid) \(((.labels // []) | map(.name) | index("hold")) != null)"' 2>/dev/null || true)
+  rows=$(echo "$prs_json" | jq -r --arg held "$TRUST_HELD_LABEL" '.[] | select(.isDraft == false) | "\(.number) \(.headRefOid) \((.labels // []) | map(.name) | (index("hold") or index($held)))"' 2>/dev/null || true)
 
   while IFS=' ' read -r pr_num sha on_hold; do
     [ -z "${pr_num:-}" ] && continue
