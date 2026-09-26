@@ -106,6 +106,13 @@ trust_notify_once() {
   local marker="$TRUST_STATE_DIR/$project-$kind-$num"
   [ -f "$marker" ] && return 0
   mkdir -p "$TRUST_STATE_DIR" 2>/dev/null || true
+  # No marker can be written (full disk): notifying now would repeat every
+  # tick. The item stays blocked either way; say so in the log only.
+  if ! touch "$marker.probe" 2>/dev/null; then
+    _trust_log "$project: $msg (state dir not writable: ntfy skipped)"
+    return 0
+  fi
+  rm -f "$marker.probe"
   _trust_log "$project: $msg"
   if [ -z "${NTFY_TOPIC:-}" ]; then
     _trust_log "$project: NTFY_TOPIC not set — logged only"
@@ -180,11 +187,11 @@ _trust_rows() {
                                  elif index($screened) then "screened" else "no" end),
             (.createdAt // ""),
             ((.title // "") | gsub("[[:cntrl:]]"; " ") | .[0:80])]
-    | join("\u001f")' <<<"$1" 2>/dev/null
+    | join("\u001f")' < <(printf '%s' "$1") 2>/dev/null
 }
 
 _trust_keep() {
-  jq -c --arg keep "$1" '[.[]? | select(.number|tostring|IN($keep|split(" ")[]))]' <<<"$2" 2>/dev/null || echo '[]'
+  printf '%s' "$2" | jq -c --arg keep "$1" '[.[]? | select(.number|tostring|IN($keep|split(" ")[]))]' 2>/dev/null || echo '[]'
 }
 
 # trust_filter_issues <project> — stdin: a `gh issue list --json` array that
@@ -295,10 +302,19 @@ trust_comments_ok() {
       return 1
     fi
     [ -n "$logins" ] || continue
+    # Count what the loop actually judged: a loop that could not read its
+    # input (full disk, broken pipe) must not read as "no strangers".
+    local want got=0
+    want=$(printf '%s\n' "$logins" | grep -c '')
     while IFS= read -r l; do
+      got=$((got + 1))
       [ -n "$l" ] || { bad="$bad unknown"; continue; }
       trust_commenter_ok "$l" || bad="$bad $l"
-    done <<<"$logins"
+    done < <(printf '%s\n' "$logins")
+    if [ "$got" != "$want" ] || [ "$want" = 0 ]; then
+      _trust_log "$project: $kind #$num — comment check incomplete, not starting archon this tick"
+      return 1
+    fi
   done
   [ -z "$bad" ] && return 0
   local path=issues; [ "$kind" = "pr" ] && path=pull

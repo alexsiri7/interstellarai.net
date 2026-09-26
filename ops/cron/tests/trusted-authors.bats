@@ -45,9 +45,9 @@ if [ "$1 $2" = "pr list" ]; then
   if [ -n "$jqf" ]; then printf '%s' "$GH_PR_LIST" | jq -r "$jqf"; else printf '%s' "$GH_PR_LIST"; fi
 fi
 [ "$1 $2" = "pr view" ] && printf '%s' "$GH_PR_VIEW"
-# issue view <n> --json labels --jq …: the linked issue's label names.
+# issue view <n> --json labels: the linked issue's labels (fixture: names).
 if [ "$1 $2" = "issue view" ]; then
-  cat "$GH_COMMENTS_DIR/issue-labels-$3" 2>/dev/null || { echo '[]'; }
+  { cat "$GH_COMMENTS_DIR/issue-labels-$3" 2>/dev/null || echo '[]'; } | jq -c '{labels: map({name: .})}'
 fi
 # The safe-change policy file on the base branch: present when GH_POLICY is set.
 case "$1 $2" in "api repos/"*"/contents/"*) [ -n "${GH_POLICY:-}" ] && echo ".github/safe-change.json" || exit 1 ;; esac
@@ -334,7 +334,7 @@ scoped_pr() { # scoped_pr <check-state or none>
     ! gh_called '^pr merge'
     gh_called '^pr edit 700 --add-label needs-owner-review'
     [ "$(ntfys)" -eq 1 ]
-    grep -q 'PR #700 on proj not auto-merged: safe-change check FAILURE' "$STUB_CURL_ARGV"
+    grep -q 'PR #700 on proj not auto-merged: safe-change check failed' "$STUB_CURL_ARGV"
 }
 
 @test "scope: a pending check waits; a repo with no policy holds (fail closed)" {
@@ -364,4 +364,71 @@ scoped_pr() { # scoped_pr <check-state or none>
     run "$CRON_DIR/pr-maintenance-cron.sh"
     ! gh_called '^pr merge'
     ! grep -q 'archon-pr-maintenance' "$STUB_ARCHON_ARGV"
+}
+
+# ── fail-closed edges (a full disk, a broken tool) ───────────────────────────
+
+@test "scope: jq failing while reading the linked issue holds the PR instead of merging" {
+    scoped_pr none
+    echo '["archon:auto-approved"]' > "$GH_COMMENTS_DIR/issue-labels-44"
+    # A jq that fails only on the linked-issue label test, as on a full disk.
+    cat > "$STUB_BIN/jq" <<STUB
+#!/usr/bin/env bash
+case "\$*" in *'index(\$s)'*) exit 5 ;; esac
+exec $(command -v jq) "\$@"
+STUB
+    chmod +x "$STUB_BIN/jq"
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    ! gh_called '^pr merge'
+    [[ "$output" == *"not merging: could not read linked issue #44"* ]]
+}
+
+@test "scope: an unparseable PR view holds the PR" {
+    scoped_pr SUCCESS
+    export GH_PR_VIEW='{"title":"x","body":"Closes #44","closingIssuesReferences":'
+    echo '["archon:auto-approved"]' > "$GH_COMMENTS_DIR/issue-labels-44"
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    ! gh_called '^pr merge'
+}
+
+@test "scope: a second, passing check named safe-change does not mask a failing one" {
+    scoped_pr FAILURE
+    export GH_PR_VIEW='{"title":"Add scraper","body":"Closes #44","closingIssuesReferences":[{"number":44}],"statusCheckRollup":[{"name":"safe-change","conclusion":"FAILURE"},{"name":"safe-change","conclusion":"SUCCESS"}]}'
+    echo '["archon:auto-approved"]' > "$GH_COMMENTS_DIR/issue-labels-44"
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    ! gh_called '^pr merge'
+    gh_called '^pr edit 700 --add-label needs-owner-review'
+}
+
+@test "lib: a comment listing the loop could not judge is untrusted" {
+    # A read loop that sees nothing (its input could not be delivered) must
+    # not read as "no strangers".
+    run bash -c 'source "$0"; gh() { printf "a\nb\n"; }; read() { return 1; }; trust_comments_ok proj issue 9' "$CRON_DIR/lib/trust.sh"
+    [ "$status" -ne 0 ]
+}
+
+@test "lib: with no writable state dir the owner is not re-notified every tick" {
+    export TRUST_STATE_DIR="/proc/self/untrusted-state"
+    load_trust
+    trust_filter_issues proj <<<'[{"number":5,"author":{"login":"stranger"}}]' >/dev/null 2>&1
+    trust_filter_issues proj <<<'[{"number":5,"author":{"login":"stranger"}}]' >/dev/null 2>&1
+    [ "$(ntfys)" -eq 0 ]
+}
+
+@test "health: a held PR and a red safe-change check start no archon-assist" {
+    SCRIPT_FILE="$CRON_DIR/pipeline-health-cron.sh"
+    # shellcheck disable=SC1090
+    source <(awk '/^(check_pr_ci_retry|sha_attempt_decide)\(\)/{p=1} p{print} p && /^}$/{p=0}' "$SCRIPT_FILE")
+    load_trust
+    STATE_DIR="$T/state"; mkdir -p "$STATE_DIR/prciretry" "$STATE_DIR/escalated"
+    MAX_ATTEMPTS=3
+    log() { echo "$*"; }
+    ASSIST="$T/assist"; : > "$ASSIST"
+    nohup() { printf '%s\n' "$*" >> "$ASSIST"; }
+    disown() { :; }
+    export GH_PR_LIST="[$(pr 610 false BLOCKED alexsiri7 false archon/a | jq -c '.labels=[{"name":"needs-owner-review"}] | .statusCheckRollup=[{"conclusion":"FAILURE","name":"CI"}]'), $(pr 611 false BLOCKED alexsiri7 false archon/b | jq -c '.statusCheckRollup=[{"conclusion":"FAILURE","name":"safe-change"},{"conclusion":"SUCCESS","name":"CI"}]')]"
+
+    check_pr_ci_retry proj || true
+
+    [ ! -s "$ASSIST" ]
 }
