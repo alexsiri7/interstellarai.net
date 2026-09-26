@@ -18,7 +18,9 @@
 # The backed-up projects, shared by backup-dbs.sh (dump + verify) and
 # restore-test.sh (restore the archive somewhere else and re-verify):
 #   project | URL variable | schema | sanity table (quoted as SQL needs it)
-# All five live on Supabase with their tables in `public`; backup-dbs.sh
+# All live on Supabase. Lachesis moved (2026-09-26) into schema `lachesis` of
+# Kindred's project, reached through role `lachesis`; the others keep their
+# tables in `public` of their own projects. backup-dbs.sh
 # still verifies the schema on the server at runtime so a migration to a
 # per-project schema fails loudly there instead of silently producing an
 # empty dump.
@@ -28,7 +30,7 @@ PG_BACKUP_PROJECTS=(
     'reli|RELI_DB_URL|public|things'
     'filmduel|FILMDUEL_DB_URL|public|users'
     'kindred|KINDRED_DB_URL|public|entries'
-    'lachesis|LACHESIS_DB_URL|public|lachesis_backlog'
+    'lachesis|LACHESIS_DB_URL|lachesis|lachesis_backlog'
 )
 
 # pg_url_percent_decode STRING → prints STRING with %XX sequences decoded.
