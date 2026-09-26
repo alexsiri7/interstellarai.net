@@ -321,32 +321,44 @@ verb_claude_probe() {
     run_in "$ARCHON_HOME_DIR" timeout "$t" claude -p --model haiku "ok"
 }
 
+# write_status <owner/repo> — HTTP status of a write the token can never
+# complete: creating a ref at the all-zero sha. 422 = the token may write here
+# (GitHub got as far as validating the object); 403/404 = it may not. Unlike
+# .permissions.push (the owner's role on the repo), this measures the token.
+write_status() {
+    # gh exits 1 on any 4xx, which is the expected answer here.
+    { sub_in "$ARCHON_HOME_DIR" gh api -i -X POST "repos/$1/git/refs" \
+        -f ref=refs/heads/archon-write-probe -f sha=0000000000000000000000000000000000000000 2>/dev/null || true; } \
+        | sed -nE '1s#^HTTP/[0-9.]+ ([0-9]{3}).*#\1#p'
+}
+
 verb_gh_probe() {
     [ "$#" -eq 0 ] || refuse "gh-probe takes no arguments"
-    local rc=0 p push scopes
+    local rc=0 p st tok
     if sub_in "$ARCHON_HOME_DIR" gh auth status >/dev/null 2>&1; then
         echo "PASS gh: authenticated as $(sub_in "$ARCHON_HOME_DIR" gh api user --jq .login 2>/dev/null || echo '?')"
     else
         echo "FAIL gh: not authenticated (sudo ops/host/archon-user/install.sh --set-gh-token)"; return 1
     fi
-    # A classic token answers with X-OAuth-Scopes (repo, workflow, ...); a
-    # fine-grained one sends none.
-    scopes=$(sub_in "$ARCHON_HOME_DIR" gh api -i user 2>/dev/null | tr -d '\r' | sed -n 's/^[Xx]-[Oo][Aa]uth-[Ss]copes: *//p' | head -n1)
-    if [ -n "$scopes" ]; then
-        echo "FAIL gh: classic token with scopes '$scopes' — use a fine-grained PAT limited to the factory repos"; rc=1
-    else
-        echo "PASS gh: fine-grained token (no OAuth scopes header)"
-    fi
+    tok=$(sub_in "$ARCHON_HOME_DIR" gh auth token 2>/dev/null || true)
+    case "$tok" in
+        github_pat_*) echo "PASS gh: fine-grained token (github_pat_...)" ;;
+        *) echo "FAIL gh: not a fine-grained PAT (${tok:0:4}...) — use one limited to the factory repos"; rc=1 ;;
+    esac
+    unset tok
     for p in "${PROJECTS[@]}"; do
-        push=$(sub_in "$ARCHON_HOME_DIR" gh api "repos/$GH_OWNER/$p" --jq .permissions.push 2>/dev/null || echo error)
-        if [ "$push" = true ]; then echo "PASS gh: push access to $GH_OWNER/$p"
-        else echo "FAIL gh: no push access to $GH_OWNER/$p ($push)"; rc=1; fi
+        st=$(write_status "$GH_OWNER/$p")
+        if [ "$st" = 422 ]; then echo "PASS gh: token can write $GH_OWNER/$p"
+        else echo "FAIL gh: token cannot write $GH_OWNER/$p (write probe answered ${st:-nothing}; want 422)"; rc=1; fi
     done
     # Repos outside the factory must stay out of the token (Archon: the fork
     # archon-update.sh builds and tests as asiri).
-    push=$(sub_in "$ARCHON_HOME_DIR" gh api "repos/$GH_OWNER/Archon" --jq .permissions.push 2>/dev/null || echo none)
-    if [ "$push" = true ]; then echo "FAIL gh: token can push to $GH_OWNER/Archon — remove it from the PAT"; rc=1
-    else echo "PASS gh: no push access to $GH_OWNER/Archon"; fi
+    st=$(write_status "$GH_OWNER/Archon")
+    case "$st" in
+        403|404) echo "PASS gh: token cannot write $GH_OWNER/Archon ($st)" ;;
+        422) echo "FAIL gh: token can write $GH_OWNER/Archon — remove it from the PAT"; rc=1 ;;
+        *) echo "WARN gh: write probe on $GH_OWNER/Archon answered ${st:-nothing}" ;;
+    esac
     return "$rc"
 }
 
@@ -371,7 +383,7 @@ verb_worktree_trim() {
                 grep -qxF "archon/$name" <<<"$open" && continue
                 find "$wt_path" -maxdepth 0 -mmin -240 2>/dev/null | grep -q . && continue
                 if [ "$dry" = 1 ]; then
-                    size=$(du -sm "$wt_path" 2>/dev/null | cut -f1); size=${size:-0}
+                    size=$(du -sm "$wt_path" 2>/dev/null | cut -f1 || true); size=${size:-0}
                     echo "autoclean: would remove $wt_path (${size}MB)"
                     candidates=$((candidates + 1)); total=$((total + size)); continue
                 fi

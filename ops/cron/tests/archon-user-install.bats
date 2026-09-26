@@ -63,6 +63,8 @@ STUB
 
 @test "--dry-run as a normal user changes nothing and walks every prepare step" {
     [ "$(id -u)" -ne 0 ] || skip "running as root"
+    [ -d /mnt/ext-fast ] && getent passwd asiri >/dev/null && command -v setfacl >/dev/null \
+        || skip "not the factory host (needs /mnt/ext-fast, user asiri, setfacl)"
     run "$D/install.sh" --dry-run
     [ "$status" -eq 0 ]
     for s in "1. user archon" "2. owner secrets" "3. ACL" "4. NTFS" "5. archon's home" "6. toolchains" "7. wrapper"; do

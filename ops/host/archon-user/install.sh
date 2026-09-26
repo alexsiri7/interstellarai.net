@@ -83,6 +83,28 @@ if [ "$DRY" -eq 0 ] && [ "$MODE" != status ] && [ -z "$SANDBOX" ] && [ "$(id -u)
     exit 1
 fi
 
+# Disk: useradd, fstab, sudoers and the crontab spool all live on /, and a
+# write that hits ENOSPC half-way leaves a broken system file behind. The
+# toolchain copy needs ~12 GB on the factory disk. (/ had 121 MB free on
+# 2026-09-26.)
+MIN_ROOT_MB="${ARCHON_USER_MIN_ROOT_MB:-500}"
+MIN_BASE_MB="${ARCHON_USER_MIN_BASE_MB:-20000}"
+free_mb() { df -Pm "$1" 2>/dev/null | awk 'NR == 2 { print $4 }'; }
+if [ "$DRY" -eq 0 ] && [ "$MODE" != status ] && [ -z "$SANDBOX" ]; then
+    r=$(free_mb /); r=${r:-0}
+    if [ "$r" -lt "$MIN_ROOT_MB" ]; then
+        echo "refusing: only ${r} MB free on / (need ${MIN_ROOT_MB}) — this writes /etc/passwd, /etc/fstab, sudoers and the crontab there. Free space first (ops/cron/pipeline-health-cron.sh --trim, old dirs in /tmp)." >&2
+        exit 1
+    fi
+    if [ "$MODE" = prepare ]; then
+        b=$(free_mb "$BASE"); b=${b:-0}
+        if [ "$b" -lt "$MIN_BASE_MB" ]; then
+            echo "refusing: only ${b} MB free on $BASE (need ${MIN_BASE_MB} for archon's toolchains)" >&2
+            exit 1
+        fi
+    fi
+fi
+
 # ---------------------------------------------------------------- helpers ---
 say()   { printf '==> %s\n' "$*"; }
 done_() { printf '    %s\n' "$*"; }
@@ -298,6 +320,23 @@ if [ "$MODE" = cutover ]; then
 
     say "factory clones"
     as_archon "$WRAPPER_DST" ensure-clones || { fail clones "ensure-clones failed (see above)"; finish; }
+
+    # The one check that exercises the real agent path (Agent SDK,
+    # bypassPermissions, archon's first-run Claude state): a dry run and a bare
+    # `claude -p` do not. Done before anything is switched.
+    say "live factory smoke (one real run as $ARCHON_USER, before switching anything)"
+    first=$(sed -e 's/#.*//' -e 's/[[:space:]]//g' -e '/^$/d' "$ETC/projects" 2>/dev/null | head -n 1)
+    if [ "$DRY" -eq 1 ]; then
+        done_ "DRY-RUN: would run archon-assist --no-worktree in $BASE/$first as $ARCHON_USER and expect FACTORY-OK"
+    elif out=$(cd / && timeout 600 runuser -u "$ARCHON_USER" -- "$WRAPPER_DST" workflow run archon-assist --no-worktree \
+            --cwd "$BASE/$first" "install.sh cutover smoke: reply with exactly the word FACTORY-OK and do nothing else. Do not use any tools." 2>&1) \
+            && grep -q FACTORY-OK <<<"$out"; then
+        done_ "archon-assist as $ARCHON_USER in $first: FACTORY-OK"
+    else
+        printf '%s\n' "$out" | tail -n 15 | sed 's/^/        | /'
+        fail smoke "a real factory run as $ARCHON_USER did not complete — nothing was switched"
+        finish
+    fi
 
     say "switch the server to $ARCHON_USER"
     owner_systemctl disable --now "$UNIT" && done_ "stopped and disabled $OWNER's user $UNIT"

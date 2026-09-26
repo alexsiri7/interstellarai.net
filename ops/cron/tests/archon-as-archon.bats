@@ -231,3 +231,39 @@ STUB
     grep -qE "archon workflow run.*--cwd.*$repo_dir" <<<"$pm_parent"                        # issue-pickup triage guard
     grep -qE "archon workflow run archon-(review|smart-pr-review)" <<<"$review_parent"     # pr-review
 }
+
+# gh-probe judges the token by a write it can never complete (a ref at the
+# all-zero sha): 422 = may write, 403/404 = may not.
+stub_gh() {  # stub_gh <token> <archon-fork-status>
+    cat > "$T/home/.local/bin/gh" <<STUB
+#!/usr/bin/env bash
+case "\$*" in
+  "auth status") exit 0 ;;
+  "api user --jq .login") echo alexsiri7 ;;
+  "auth token") echo "$1" ;;
+  *"repos/alexsiri7/Archon/git/refs"*) echo "HTTP/2.0 $2 X"; exit 1 ;;
+  *"/git/refs"*) echo "HTTP/2.0 422 Unprocessable Entity"; exit 1 ;;
+esac
+STUB
+    chmod +x "$T/home/.local/bin/gh"
+}
+
+@test "gh-probe: a fine-grained token that can write the factory repos and not the fork passes" {
+    stub_gh github_pat_abc 404
+    run "$W" gh-probe
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"PASS gh: token can write alexsiri7/reli"* ]]
+    [[ "$output" == *"PASS gh: token can write alexsiri7/filmduel"* ]]
+    [[ "$output" == *"PASS gh: token cannot write alexsiri7/Archon (404)"* ]]
+}
+
+@test "gh-probe: a classic token or one that reaches the fork fails" {
+    stub_gh gho_classic 404
+    run "$W" gh-probe
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"FAIL gh: not a fine-grained PAT"* ]]
+    stub_gh github_pat_abc 422
+    run "$W" gh-probe
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"FAIL gh: token can write alexsiri7/Archon"* ]]
+}
