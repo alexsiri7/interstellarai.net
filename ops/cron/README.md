@@ -91,7 +91,7 @@ The cron cannot do it. `pr-maintenance-cron.sh` strips every CI-skip token GitHu
 
 ## Throttle and manual nudges
 
-`throttle.conf` sets `TICK_INTERVAL_MINUTES` (15, matching the 15-minute cron cadence; raise it to slow the factory during low-token periods). Each script calls `should_tick <name>` from `lib/throttle.sh`, which skips the run unless that many minutes have passed since the stamp in `~/.config/archon-cron/state/<name>.last_run`, then rewrites the stamp. To run a script by hand for one project without disturbing the schedule, set `ARCHON_CRON_FORCE_TICK=1`:
+`throttle.conf` sets `TICK_INTERVAL_MINUTES` (14: one minute under the 15-minute cron cadence, because the check is strict (`elapsed < interval` skips) and cron start times jitter by seconds, so 15 would randomly skip every other tick; raise it to slow the factory during low-token periods). Each script calls `should_tick <name>` from `lib/throttle.sh`, which skips the run unless that many minutes have passed since the stamp in `~/.config/archon-cron/state/<name>.last_run`, then rewrites the stamp. To run a script by hand for one project without disturbing the schedule, set `ARCHON_CRON_FORCE_TICK=1`:
 
 ```
 ARCHON_CRON_FORCE_TICK=1 ops/cron/pr-maintenance-cron.sh reli
