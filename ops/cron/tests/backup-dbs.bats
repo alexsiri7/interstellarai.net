@@ -223,9 +223,9 @@ archives() { find "$T/backups/reli" -name '*.sql.gz' 2>/dev/null; }
     [ "$(archives | wc -l)" -eq 1 ]
 }
 
-@test "kindred-auth dumps --schema=auth and thaleia --schema=events through their own URLs, each verified on its sanity table" {
+@test "kindred-auth dumps --schema=auth and musenmingle --schema=events through their own URLs, each verified on its sanity table" {
     printf '%s\n' 'KINDRED_DB_URL=postgresql://kindred:k@kindred.example.com:5432/postgres' \
-        'THALEIA_DB_URL=postgresql://thaleia:t@shared.example.com:5432/postgres' > "$T/secrets.env"
+        'MUSENMINGLE_DB_URL=postgresql://musenmingle:t@shared.example.com:5432/postgres' > "$T/secrets.env"
     mkdir -p "$T/dumps"
     pad() { head -c 300000 /dev/urandom | base64; }
     { echo "CREATE TABLE public.entries ("; echo ");"; pad; } > "$T/dumps/public.sql"
@@ -236,11 +236,11 @@ archives() { find "$T/backups/reli" -name '*.sql.gz' 2>/dev/null; }
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK: kindred backed up"*"4 rows in public.entries"* ]]
     [[ "$output" == *"OK: kindred-auth backed up: $T/backups/kindred-auth/kindred-auth-"*"4 rows in auth.users"* ]]
-    [[ "$output" == *"OK: thaleia backed up: $T/backups/thaleia/thaleia-"*"4 rows in events.sources"* ]]
-    [[ "$output" == *"Backup complete (ok: kindred thaleia kindred-auth; skipped: annie reli filmduel lachesis)"* ]]
+    [[ "$output" == *"OK: musenmingle backed up: $T/backups/musenmingle/musenmingle-"*"4 rows in events.sources"* ]]
+    [[ "$output" == *"Backup complete (ok: kindred musenmingle kindred-auth; skipped: annie reli filmduel lachesis)"* ]]
     grep -q -- '--no-owner --no-acl --schema=auth' "$STUB_ARGV"
     grep -q -- '--no-owner --no-acl --schema=events' "$STUB_ARGV"
     grep -q '^table=auth.users$' "$T"/backups/kindred-auth/*.meta
-    grep -q '^table=events.sources$' "$T"/backups/thaleia/*.meta
-    ! grep -q 'kindred:k\|thaleia:t\|postgresql://' "$STUB_ARGV"
+    grep -q '^table=events.sources$' "$T"/backups/musenmingle/*.meta
+    ! grep -q 'kindred:k\|musenmingle:t\|postgresql://' "$STUB_ARGV"
 }

@@ -133,7 +133,7 @@ ALTER TABLE ONLY auth.identities
 SQL
 }
 
-# A pg_dump --schema=events (Thaleia on the consolidated project).
+# A pg_dump --schema=events (Muse & Mingle on the consolidated project).
 events_dump_sql() {
     cat <<'SQL'
 CREATE SCHEMA events;
@@ -163,7 +163,7 @@ cluster_dirs() { find "$T" -maxdepth 1 -name 'restore-test.*' 2>/dev/null; }
     [[ "$output" == *"Throwaway cluster up: $T/restore-test."* ]]
     [[ "$output" == *"OK: reli restored: $T/backups/reli/reli-20260919-091701.sql.gz (224 rows in reli.things = backup count, 9 tables in reli,"* ]]
     [[ "$output" == *"SKIP: annie"* ]]
-    [[ "$output" == *"Restore test complete (ok: reli; skipped: annie filmduel kindred lachesis thaleia kindred-auth)"* ]]
+    [[ "$output" == *"Restore test complete (ok: reli; skipped: annie filmduel kindred lachesis musenmingle kindred-auth)"* ]]
     grep -q -- '-A trust' "$T/initdb.argv"
     grep -q -- "-k $T/restore-test\." "$T/pg_ctl.argv"
     grep -q -- "listen_addresses=''" "$T/pg_ctl.argv"
@@ -199,7 +199,7 @@ cluster_dirs() { find "$T" -maxdepth 1 -name 'restore-test.*' 2>/dev/null; }
     run "$SCRIPT"
     [ "$status" -eq 1 ]
     [[ "$output" == *"ERROR: reli restore FAILED — reli.things has 200 rows after restore, backup recorded 224"* ]]
-    [[ "$output" == *"ERROR: restore test FAILED for: reli (ok: none; skipped: annie filmduel kindred lachesis thaleia kindred-auth)"* ]]
+    [[ "$output" == *"ERROR: restore test FAILED for: reli (ok: none; skipped: annie filmduel kindred lachesis musenmingle kindred-auth)"* ]]
     grep -q '^last_run_status=failed$' "$T/state/restore-test-status"
     grep -q '^last_run_failed=reli$' "$T/state/restore-test-status"
     grep -q '^last_ok=0$' "$T/state/restore-test-status"
@@ -338,16 +338,16 @@ SQL
     grep -q '^CREATE TABLE auth.users (id uuid PRIMARY KEY);$' "$T/restored-restore_kindred.sql"
 }
 
-@test "a non-public schema archive (thaleia/events) keeps public and gets the auth stub" {
-    only_configured 'THALEIA_DB_URL=postgresql://u:p@h/d'
+@test "a non-public schema archive (musenmingle/events) keeps public and gets the auth stub" {
+    only_configured 'MUSENMINGLE_DB_URL=postgresql://u:p@h/d'
     events_dump_sql > "$T/events.sql"
-    make_schema_archive thaleia thaleia-20260919-091701 2 events.sources "$T/events.sql" > /dev/null
+    make_schema_archive musenmingle musenmingle-20260919-091701 2 events.sources "$T/events.sql" > /dev/null
     export STUB_ROWS=2
     run "$SCRIPT"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"OK: thaleia restored: $T/backups/thaleia/thaleia-20260919-091701.sql.gz (2 rows in events.sources = backup count, 9 tables in events,"* ]]
-    [[ "$output" == *"Restore test complete (ok: thaleia; skipped: annie reli filmduel kindred lachesis kindred-auth)"* ]]
-    f="$T/restored-restore_thaleia.sql"
+    [[ "$output" == *"OK: musenmingle restored: $T/backups/musenmingle/musenmingle-20260919-091701.sql.gz (2 rows in events.sources = backup count, 9 tables in events,"* ]]
+    [[ "$output" == *"Restore test complete (ok: musenmingle; skipped: annie reli filmduel kindred lachesis kindred-auth)"* ]]
+    f="$T/restored-restore_musenmingle.sql"
     ! grep -q 'DROP SCHEMA public' "$f"
     grep -q '^CREATE FUNCTION auth.uid()' "$f"
     grep -q '^CREATE TABLE events.sources ($' "$f"
@@ -358,7 +358,7 @@ SQL
     run "$SCRIPT"
     [ "$status" -eq 1 ]
     [[ "$output" == *"ERROR: $T/bin/initdb missing"* ]]
-    [[ "$output" == *"ERROR: restore test FAILED for: annie,reli,filmduel,kindred,lachesis,thaleia,kindred-auth"* ]]
+    [[ "$output" == *"ERROR: restore test FAILED for: annie,reli,filmduel,kindred,lachesis,musenmingle,kindred-auth"* ]]
     grep -q '^reli=failed cluster-not-started$' "$T/state/restore-test-status"
     grep -q '^last_run_status=failed$' "$T/state/restore-test-status"
 }
@@ -427,14 +427,14 @@ SQL
     [ -z "$(cluster_dirs)" ]
 }
 
-@test "real cluster: a non-public schema archive (thaleia/events) restores" {
+@test "real cluster: a non-public schema archive (musenmingle/events) restores" {
     real_setup
-    only_configured 'THALEIA_DB_URL=postgresql://u:p@h/d'
+    only_configured 'MUSENMINGLE_DB_URL=postgresql://u:p@h/d'
     events_dump_sql > "$T/events.sql"
-    make_schema_archive thaleia thaleia-20260919-091701 2 events.sources "$T/events.sql" > /dev/null
+    make_schema_archive musenmingle musenmingle-20260919-091701 2 events.sources "$T/events.sql" > /dev/null
     run "$SCRIPT"
     echo "$output"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"OK: thaleia restored: "*"(2 rows in events.sources = backup count, 2 tables in events, "*"ms)"* ]]
+    [[ "$output" == *"OK: musenmingle restored: "*"(2 rows in events.sources = backup count, 2 tables in events, "*"ms)"* ]]
     [ -z "$(cluster_dirs)" ]
 }
