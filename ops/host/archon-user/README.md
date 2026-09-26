@@ -82,10 +82,13 @@ connectors are then still switched off by `ENABLE_CLAUDEAI_MCP_SERVERS=false` (w
 unit) and `disableClaudeAiConnectors` (archon's `~/.claude/settings.json`), and
 `verify.sh` checks that `claude mcp list` shows none.
 
-Readiness check (as asiri). It should show 0 FAIL, plus WARNs saying "not cut over yet":
+Readiness check (as asiri). It should show 0 FAIL, plus WARNs saying "not cut over yet".
+`--live` runs one real one-line Claude run through the factory path. It is the only check
+of the Agent SDK path as archon, so do not skip it. `--cutover` runs the same smoke again
+before it switches anything:
 
 ```bash
-ops/host/archon-user/verify.sh
+ops/host/archon-user/verify.sh --live
 ```
 
 ### (d) Cut over
@@ -99,8 +102,16 @@ sudo ops/host/archon-user/install.sh --cutover
 
 `--cutover` does the following, in order:
 
-1. Refuses if anything is not ready: no user or wrapper; missing sudoers or unit; no Claude credential; a failing gh probe; NTFS still world-readable; the flag not on `drain`; runs still `running`/`paused` in asiri's DB or `archon workflow run` processes alive. `--force` skips the drain check only. Paused runs left behind then never resume; issue-pickup re-queues their issues after its stuck timeout.
-2. Clones every factory repo into `/mnt/ext-fast/archon-home/repos/` as archon.
+1. Refuses if anything is not ready:
+   - less than 500 MB free on `/` (prepare also needs 20 GB on `/mnt/ext-fast`);
+   - no user or wrapper, or missing sudoers or unit;
+   - no Claude credential, or a failing gh probe;
+   - NTFS still world-readable;
+   - the flag not on `drain`;
+   - runs still `running`/`paused` in asiri's DB, or `archon workflow run` processes alive.
+
+   `--force` skips the drain check only. Paused runs left behind then never resume; issue-pickup re-queues their issues after its stuck timeout.
+2. Clones every factory repo into `/mnt/ext-fast/archon-home/repos/` as archon. Then runs one real `archon-assist` run as archon (`FACTORY-OK`). If that fails, nothing is switched.
 3. Stops and disables asiri's user `archon-serve.service`, then enables the system unit (`User=archon`) and waits for `127.0.0.1:3090` to answer 200. If it does not, it puts the old server back and stops.
 4. Points `~/.bun/bin/archon` at `ops/cron/lib/archon-shim/archon`, so a manual `archon …` by the owner also goes to the factory user and never starts a second, stale factory as asiri.
 5. Switches the crontab's self-update line to `ops/cron/ops-self-update.sh` (see "The ops repo" below).
@@ -135,7 +146,7 @@ tail -f ~/.local/state/archon-cron/logs/issue-pickup.log
   - The environment of every archon process is free of secret-looking variables.
   - All toolchains are present.
   - There are no claude.ai connectors.
-- **Credentials.** A real Claude request as archon. The gh token is fine-grained, can push to every factory repo and cannot push to the Archon fork.
+- **Credentials.** A real Claude request as archon. The gh token is a fine-grained PAT (`github_pat_`). A write probe, creating a ref at the all-zero sha, which can never succeed, answers 422 on every factory repo and 403/404 on the Archon fork. That measures the token's grant; `.permissions.push` would only show the owner's role.
 - **Factory path.** `archon doctor`. The cron's own `archon` (shim → wrapper) lists runs from archon's DB. A `--dry-run` of `archon-assist` through the wrapper works (no provider call). With `--live`, one real run.
 
 ### (f) Roll back (one step)
@@ -201,6 +212,7 @@ gates apply:
 - **GitHub: no Workflows permission.** Without it the factory cannot push changes under `.github/workflows/`, so an injected agent cannot add a workflow that dumps the repos' Actions secrets (Railway and deploy tokens). The cost: CI-file fixes fail to push and land on the owner. Grant "Workflows: Read and write" if that happens too often; it reopens that path. Likewise, "Actions: Read and write" would let `archon-assist` re-run jobs itself. pipeline-health already re-runs failed CI as asiri.
 - **Merging stays with asiri's gh** (`pr-maintenance-cron.sh`). The factory's PAT could merge as well, since contents and pull-requests write allow it; the ops-repo gates above are local for that reason.
 - **Home on `/mnt/ext-fast`.** `/` is small and was 100% full on 2026-09-26. Toolchains are non-snap copies (uv binary, Flutter SDK checkout): snaps refuse homes outside `/home` without `snap set system homedirs`, and fail under `no_new_privs`.
+- **NTFS `umask=077`.** Checked on 2026-09-26: no service user reads `/mnt/steam-*`. Ollama's models are in `/usr/share/ollama`, no dolt server is running, and the mounts hold the DB backups plus personal files. `uid=1000`, i.e. asiri, keeps full access.
 - **ACL deny (`u:archon:---`) rather than `chmod o-rwx`** on the mount entries. It shuts out exactly one user, changes nothing for asiri or anything else that reads those paths, and `setfacl -x u:archon` undoes it. `/mnt/ext-fast` itself becomes traverse-only for archon, so it cannot list names it was not told. The NTFS mounts (`fuseblk`, no ACLs) get `umask=077` in fstab instead.
 
 ## What the workflows needed secrets for (audit)
