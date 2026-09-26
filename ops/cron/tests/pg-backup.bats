@@ -163,7 +163,7 @@ STUB
 
 # ── PG_BACKUP_PROJECTS ───────────────────────────────────────────────────────
 
-@test "PG_BACKUP_PROJECTS: four fields per entry, unique names, thaleia and kindred-auth present" {
+@test "PG_BACKUP_PROJECTS: four fields per entry, unique names, musenmingle and kindred-auth present" {
     local e name url_var schema table extra names=()
     for e in "${PG_BACKUP_PROJECTS[@]}"; do
         IFS='|' read -r name url_var schema table extra <<< "$e"
@@ -172,6 +172,6 @@ STUB
         names+=("$name")
     done
     [ "$(printf '%s\n' "${names[@]}" | sort | uniq -d)" = "" ]
-    [[ " ${PG_BACKUP_PROJECTS[*]} " == *" thaleia|THALEIA_DB_URL|events|sources "* ]]
+    [[ " ${PG_BACKUP_PROJECTS[*]} " == *" musenmingle|MUSENMINGLE_DB_URL|events|sources "* ]]
     [[ " ${PG_BACKUP_PROJECTS[*]} " == *" kindred-auth|KINDRED_DB_URL|auth|users "* ]]
 }

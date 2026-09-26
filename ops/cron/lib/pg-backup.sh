@@ -32,7 +32,8 @@
 # same step. Lachesis moved (2026-09-26) into schema `lachesis`, reached
 # through role `lachesis`; FilmDuel moved the same day into schema `filmduel`
 # (role `filmduel`), Word Coach Annie into schema `annie` (role `annie`), and
-# Reli into schema `reli` (role `reli`). Thaleia was born there (schema
+# Reli into schema `reli` (role `reli`). Muse & Mingle (formerly Thaleia; role
+# `musenmingle`) was born there (schema
 # `events`).
 # `kindred-auth` backs up the Supabase Auth users of that project (schema
 # `auth`), which a `--schema=public` dump never contains.
@@ -43,7 +44,7 @@ PG_BACKUP_PROJECTS=(
     'filmduel|FILMDUEL_DB_URL|filmduel|users'
     'kindred|KINDRED_DB_URL|public|entries'
     'lachesis|LACHESIS_DB_URL|lachesis|lachesis_backlog'
-    'thaleia|THALEIA_DB_URL|events|sources'
+    'musenmingle|MUSENMINGLE_DB_URL|events|sources'
     'kindred-auth|KINDRED_DB_URL|auth|users'
 )
 
