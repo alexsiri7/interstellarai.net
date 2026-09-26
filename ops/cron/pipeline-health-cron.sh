@@ -1630,19 +1630,23 @@ check_stuck_prs() {
   #   - are not CLEAN (would be merged by Phase 1)
   #   - are not BLOCKED (CI failing, caught by check_pr_ci_retry)
   #   - haven't been updated in >2h
-  local stuck_prs
-  # gh's --jq takes no --arg, so the cutoff goes to a standalone jq.
-  stuck_prs=$(gh pr list --repo "alexsiri7/$project" --state open \
-    --json number,title,headRefName,headRefOid,isDraft,updatedAt,mergeStateStatus 2>/dev/null \
-    | jq -r --arg cutoff "$cutoff_iso" \
+  # gh's --jq takes no --arg, so the cutoff goes to a standalone jq. A failed
+  # listing is logged, never read as "no stuck PRs": that would switch the
+  # check off silently, tick after tick.
+  local open_prs stuck_prs
+  if ! open_prs=$(gh pr list --repo "alexsiri7/$project" --state open \
+      --json number,title,headRefName,headRefOid,isDraft,updatedAt,mergeStateStatus 2>/dev/null) \
+    || ! stuck_prs=$(jq -r --arg cutoff "$cutoff_iso" \
     '[.[] | select(.headRefName | startswith("archon/"))
           | select(.isDraft == false)
           | select(.mergeStateStatus != "CLEAN")
           | select(.mergeStateStatus != "BLOCKED")
           | select(.updatedAt < $cutoff)
           | [(.number|tostring), .headRefOid, .mergeStateStatus, .title]
-          | @tsv] | .[]' \
-    2>/dev/null || echo "")
+          | @tsv] | .[]' <<< "$open_prs" 2>/dev/null); then
+    log "$project: stuck-PR listing failed — skipping"
+    return
+  fi
 
   [ -n "$stuck_prs" ] || return
 

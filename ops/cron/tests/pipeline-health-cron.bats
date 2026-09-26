@@ -693,6 +693,30 @@ ARGV
     [ ! -e "$STATE_DIR/nohup-argv" ]
 }
 
+@test "check_stuck_prs logs a failed PR listing instead of reading it as nothing stuck" {
+    setup_stuck_prs_env
+    stub_gh_for_stuck_prs
+    log() { printf '%s\n' "$*" >> "$STATE_DIR/log"; }
+    gh() { return 1; }
+
+    check_stuck_prs "test-project"
+
+    grep -qxF "test-project: stuck-PR listing failed — skipping" "$STATE_DIR/log"
+    [ ! -e "$STATE_DIR/stuck-pr" ]
+}
+
+@test "check_stuck_prs logs a PR listing jq cannot read" {
+    setup_stuck_prs_env
+    PR_LIST_FIXTURE='<html>502 Bad Gateway</html>'
+    stub_gh_for_stuck_prs
+    log() { printf '%s\n' "$*" >> "$STATE_DIR/log"; }
+
+    check_stuck_prs "test-project"
+
+    grep -qxF "test-project: stuck-PR listing failed — skipping" "$STATE_DIR/log"
+    [ ! -e "$STATE_DIR/stuck-pr" ]
+}
+
 # ── check_scheduled_workflows: operator ntfy only, never archon ──────────────
 
 setup_scheduled_env() {
