@@ -13,7 +13,7 @@
 #
 #   safe       → labels archon:auto-approved + type:<issue_type>; the normal
 #                triage/queue path picks it up. PRs built from it must pass the
-#                repo's `safe-change` scope check before pr-maintenance merges.
+#                repo's `unsafe-change` denylist check before pr-maintenance merges.
 #   suspicious → label needs-owner-review (a human label), one ntfy.
 #
 # Either way one neutral comment records the verdict with fixed reason codes
@@ -223,7 +223,7 @@ screen_bridge_issues() {
         local tl="type:${type//_/-}"
         gh label create "$tl" --repo "$repo" --color "bfd4f2" --description "Issue type set by automated screening" 2>/dev/null || true
         if gh issue edit "$num" --repo "$repo" --add-label "$SCREEN_AUTO_LABEL" --add-label "$tl" >/dev/null 2>&1; then
-          gh issue comment "$num" --repo "$repo" --body "Automated screening: passed (source: $source, type: $type). The factory may work this issue; a PR built from it is merged only when the repository's scope check passes." >/dev/null 2>&1 || true
+          gh issue comment "$num" --repo "$repo" --body "Automated screening: passed (source: $source, type: $type). The factory may work this issue; a PR built from it is merged only when the repository's unsafe-change check passes." >/dev/null 2>&1 || true
           _screen_log "$project: #$num ($source) screened safe as $type"
         fi
         ;;

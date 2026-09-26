@@ -1515,7 +1515,7 @@ check_pr_ci_retry() {
     | jq -r --arg held "$TRUST_HELD_LABEL" '.[] | select(.headRefName | startswith("archon/"))
         | select((.labels // []) | map(.name) | (index("hold") or index($held)) | not)
         | select(.statusCheckRollup | length > 0)
-        | select(.statusCheckRollup | map(select((.name // .context) != "safe-change") | .conclusion // "PENDING") | any(. == "FAILURE"))
+        | select(.statusCheckRollup | map(select((.name // .context) | IN("unsafe-change", "safe-change") | not) | .conclusion // "PENDING") | any(. == "FAILURE"))
         | [(.number|tostring), .headRefOid, .title] | @tsv' \
     2>/dev/null || echo "")
 
