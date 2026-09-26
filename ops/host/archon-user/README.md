@@ -45,7 +45,7 @@ archon gets its own GitHub token, not a copy of yours. To create it:
    | Token name | `archon-factory@interstellar` |
    | Expiration | 1 year. Put a reminder in your calendar; `verify.sh` fails once it expires. |
    | Resource owner | `alexsiri7` |
-   | Repository access | **Only select repositories**: `un-reminder`, `cosmic-match`, `word-coach-annie`, `filmduel`, `reli`, `kindred`, `lachesis`, `interstellarai.net`, `musenmingle`. This is the list in `ops/cron/archon-projects.txt`. **Not `Archon`**: `archon-update.sh` pushes its upstream-sync branches to that fork. Alternatively **All repositories**, so new projects need no token edit; then opt in, see "An all-repositories token" below. |
+   | Repository access | **Only select repositories**: `un-reminder`, `cosmic-match`, `word-coach-annie`, `filmduel`, `reli`, `kindred`, `lachesis`, `interstellarai.net`, `musenmingle`, `zoomies`. This is the list in `ops/cron/archon-projects.txt`. **Not `Archon`**: `archon-update.sh` pushes its upstream-sync branches to that fork. Alternatively **All repositories**, so new projects need no token edit; then opt in, see "An all-repositories token" below. |
    | Permissions → Repository permissions | **Contents: Read and write** · **Pull requests: Read and write** · **Issues: Read and write** · Actions: Read-only · Checks: Read-only · Commit statuses: Read-only · Metadata: Read-only (mandatory, preselected) · everything else: No access |
    | Workflows (a repository permission) | **No access** (see "Decisions" below) |
    | Permissions → Account permissions | none |
