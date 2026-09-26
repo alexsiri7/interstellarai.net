@@ -21,6 +21,8 @@ setup() {
     STUB_BIN="$HOME/.local/bin"
     mkdir -p "$STUB_BIN" "$T/base/proj/.git" "$HOME/.config/archon-cron"
     export BASE_DIR="$T/base"
+    # Several tests run a script twice; the throttle would skip the second.
+    export ARCHON_CRON_FORCE_TICK=1
     export ARCHON_RUNS_SNAPSHOT="$T/snapshot"
     export ARCHON_PROJECTS_FILE="$T/projects.txt"
     echo "proj" > "$ARCHON_PROJECTS_FILE"
@@ -43,6 +45,12 @@ if [ "$1 $2" = "pr list" ]; then
   if [ -n "$jqf" ]; then printf '%s' "$GH_PR_LIST" | jq -r "$jqf"; else printf '%s' "$GH_PR_LIST"; fi
 fi
 [ "$1 $2" = "pr view" ] && printf '%s' "$GH_PR_VIEW"
+# issue view <n> --json labels --jq …: the linked issue's label names.
+if [ "$1 $2" = "issue view" ]; then
+  cat "$GH_COMMENTS_DIR/issue-labels-$3" 2>/dev/null || { echo '[]'; }
+fi
+# The safe-change policy file on the base branch: present when GH_POLICY is set.
+case "$1 $2" in "api repos/"*"/contents/"*) [ -n "${GH_POLICY:-}" ] && echo ".github/safe-change.json" || exit 1 ;; esac
 if [ "$1 $2" = "api --paginate" ]; then
   # repos/alexsiri7/proj/{issues|pulls}/<n>/{comments|reviews}: one login per line
   key=$(sed -E 's#^repos/[^/]+/[^/]+/(issues|pulls)/([0-9]+)/(comments|reviews)$#\1-\2-\3#' <<<"$3")
@@ -297,4 +305,63 @@ load_trust() {
     # Held-back PRs spend no remediation attempt.
     [ ! -f "$STATE_DIR/prciretry/proj-pr600" ]
     [ ! -f "$STATE_DIR/prciretry/proj-pr601" ]
+}
+
+# ── pr-maintenance: the safe-change scope gate ───────────────────────────────
+# A PR that closes an issue only automated screening vetted (archon:auto-approved
+# without the owner's archon:approved) merges only once the repo's safe-change
+# check passed.
+
+scoped_pr() { # scoped_pr <check-state or none>
+    export GH_PR_LIST="[$(pr 700 false CLEAN alexsiri7 false archon/task-x 'Add scraper')]"
+    local rollup='[]'
+    [ "$1" != none ] && rollup='[{"name":"safe-change","conclusion":"'"$1"'"},{"name":"CI","conclusion":"SUCCESS"}]'
+    export GH_PR_VIEW='{"title":"Add scraper","body":"Closes #44","closingIssuesReferences":[{"number":44}],"statusCheckRollup":'"$rollup"'}'
+}
+
+@test "scope: a PR closing a screened issue merges once safe-change passed" {
+    scoped_pr SUCCESS
+    echo '["new-scraper","archon:auto-approved"]' > "$GH_COMMENTS_DIR/issue-labels-44"
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    gh_called '^pr merge 700 '
+}
+
+@test "scope: a failed safe-change check holds the PR, labels it and tells the owner once" {
+    scoped_pr FAILURE
+    echo '["new-scraper","archon:auto-approved"]' > "$GH_COMMENTS_DIR/issue-labels-44"
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    ! gh_called '^pr merge'
+    gh_called '^pr edit 700 --add-label needs-owner-review'
+    [ "$(ntfys)" -eq 1 ]
+    grep -q 'PR #700 on proj not auto-merged: safe-change check FAILURE' "$STUB_CURL_ARGV"
+}
+
+@test "scope: a pending check waits; a repo with no policy holds (fail closed)" {
+    scoped_pr none
+    echo '["archon:auto-approved"]' > "$GH_COMMENTS_DIR/issue-labels-44"
+    GH_POLICY=1 run "$CRON_DIR/pr-maintenance-cron.sh"
+    [[ "$output" == *"PR #700 — waiting for the safe-change check"* ]]
+    ! gh_called '^pr edit'
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    [[ "$output" == *"not merging: no .github/safe-change.json in this repo"* ]]
+    ! gh_called '^pr merge'
+}
+
+@test "scope: owner issues and owner-approved bridge issues need no scope check" {
+    scoped_pr none
+    echo '["bug"]' > "$GH_COMMENTS_DIR/issue-labels-44"
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    gh_called '^pr merge 700 '
+    : > "$STUB_GH_ARGV"
+    echo '["archon:auto-approved","archon:approved"]' > "$GH_COMMENTS_DIR/issue-labels-44"
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    gh_called '^pr merge 700 '
+}
+
+@test "scope: a PR labelled needs-owner-review is left alone in every phase" {
+    export GH_PR_LIST="[$(pr 701 false CLEAN alexsiri7 false | jq -c '.labels=[{"name":"needs-owner-review"}]'), $(pr 702 false DIRTY alexsiri7 false | jq -c '.labels=[{"name":"needs-owner-review"}]')]"
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    ! gh_called '^pr merge'
+    ! grep -q 'archon-pr-maintenance' "$STUB_ARCHON_ARGV"
 }

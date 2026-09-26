@@ -59,7 +59,8 @@ ensure_hold_label() {
 }
 
 # pr_on_hold <number> <hold-flag> — true (with a log line) when the PR list
-# row's hold column is "true", i.e. the PR carries $HOLD_LABEL.
+# row's hold column is "true", i.e. the PR carries $HOLD_LABEL or the trust
+# gate's $TRUST_HELD_LABEL (needs-owner-review: the scope check below failed).
 pr_on_hold() {
   [ "$2" = "true" ] || return 1
   log "$PROJECT: PR #$1 is on hold — skipping"
@@ -113,7 +114,45 @@ list_prs() {
   local level="$1" select="$2" json
   json=$(gh pr list --state open --json number,mergeStateStatus,isDraft,headRefName,labels,body,author,isCrossRepository,title,createdAt 2>/dev/null || echo "[]")
   trust_filter_prs "$PROJECT" "$level" <<<"$json" \
-    | jq -r ".[] | select($select)"' | [.number, .headRefName, (((.labels // []) | map(.name) | index("hold")) != null), ((.body // "") | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null || true
+    | jq -r --arg held "$TRUST_HELD_LABEL" ".[] | select($select)"' | [.number, .headRefName, ((.labels // []) | map(.name) | (index("hold") or index($held))), ((.body // "") | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null || true
+}
+
+# SAFE_CHANGE_CHECK: the repo-side check (pull_request_target, policy read
+# from the base branch) that fails a PR touching anything outside the
+# allowlist for its issue's type. Required before merging a PR that closes an
+# issue only automated screening vetted (lib/screen.sh: archon:auto-approved).
+SAFE_CHANGE_CHECK="${SAFE_CHANGE_CHECK:-safe-change}"
+SAFE_CHANGE_POLICY="${SAFE_CHANGE_POLICY:-.github/safe-change.json}"
+
+# pr_scope_decision <number> <view-json> — prints ok, wait or hold <why>.
+# ok: the PR closes no screened-only issue, or its safe-change check passed.
+# wait: the check is still running. hold: the check failed, or the repo has no
+# safe-change policy (fail closed), or a linked issue could not be read.
+pr_scope_decision() {
+  local pr="$1" view="$2" issues n labels screened="" state policy
+  issues=$( { jq -r '.closingIssuesReferences[]?.number' <<<"$view"
+              jq -r '.body // ""' <<<"$view" | grep -oiE '(close[sd]?|fix(e[sd])?|resolve[sd]?) #[0-9]+' | grep -oE '[0-9]+$'
+            } 2>/dev/null | sort -un || true)
+  for n in $issues; do
+    if ! labels=$(gh issue view "$n" --json labels --jq '[.labels[].name]' 2>/dev/null); then
+      echo "hold could not read linked issue #$n"; return
+    fi
+    if jq -e --arg s "$TRUST_SCREENED_LABEL" --arg o "$TRUST_APPROVED_LABEL" 'index($s) and (index($o) | not)' <<<"$labels" >/dev/null; then
+      screened="$screened #$n"
+    fi
+  done
+  [ -n "$screened" ] || { echo ok; return; }
+  state=$(jq -r --arg c "$SAFE_CHANGE_CHECK" '[.statusCheckRollup[]? | select((.name // .context) == $c)] | last | (.conclusion // .state // "PENDING") | ascii_upcase' <<<"$view")
+  case "$state" in
+    SUCCESS) echo ok ;;
+    FAILURE|ERROR|CANCELLED|TIMED_OUT|ACTION_REQUIRED) echo "hold $SAFE_CHANGE_CHECK check $state (closes screened issue${screened})" ;;
+    *)
+      if ! policy=$(gh api "repos/alexsiri7/$PROJECT/contents/$SAFE_CHANGE_POLICY" --jq .path 2>/dev/null) || [ -z "$policy" ]; then
+        echo "hold no $SAFE_CHANGE_POLICY in this repo (closes screened issue${screened})"
+      else
+        echo wait
+      fi ;;
+  esac
 }
 
 for PROJECT in "${PROJECTS[@]}"; do
@@ -126,6 +165,8 @@ for PROJECT in "${PROJECTS[@]}"; do
 
   cd "$REPO_DIR"
   ensure_hold_label "$PROJECT"
+  gh label create "$TRUST_HELD_LABEL" --repo "alexsiri7/$PROJECT" \
+    --color "d93f0b" --description "Held by the factory for the owner" 2>/dev/null || true
 
   # --- Phase 0: Promote CLEAN draft PRs to ready-for-review ---
   # Archon workflows create PRs as drafts by default. When CI is green the
@@ -166,11 +207,26 @@ for PROJECT in "${PROJECTS[@]}"; do
     # title and body instead, with every such token removed. Reading them fails
     # closed: a bare merge would reintroduce exactly this bug, and the PR is
     # still CLEAN on the next tick 15 minutes later.
-    MERGE_JSON=$(gh pr view "$PR" --json title,body 2>/dev/null || echo "")
+    MERGE_JSON=$(gh pr view "$PR" --json title,body,closingIssuesReferences,statusCheckRollup 2>/dev/null || echo "")
     if [ -z "$MERGE_JSON" ]; then
       log "$PROJECT: PR #$PR — could not read title/body for the merge message, retrying next tick"
       continue
     fi
+    # A PR built from an issue only automated screening vetted merges only
+    # once the repo's safe-change scope check passed.
+    SCOPE=$(pr_scope_decision "$PR" "$MERGE_JSON")
+    case "$SCOPE" in
+      ok) ;;
+      wait)
+        log "$PROJECT: PR #$PR — waiting for the $SAFE_CHANGE_CHECK check before merging"
+        continue ;;
+      *)
+        log "$PROJECT: PR #$PR — not merging: ${SCOPE#hold }"
+        gh pr edit "$PR" --add-label "$TRUST_HELD_LABEL" >/dev/null 2>&1 || true
+        trust_notify_once "$PROJECT" pr-scope "$PR" \
+          "PR #$PR on $PROJECT not auto-merged: ${SCOPE#hold }. Review it: https://github.com/alexsiri7/$PROJECT/pull/$PR"
+        continue ;;
+    esac
     MERGE_TITLE=$(ci_skip_clean_line "$(jq -r '.title // ""' <<<"$MERGE_JSON" || echo "")")
     if [ -n "$MERGE_TITLE" ]; then
       MERGE_SUBJECT="$MERGE_TITLE (#$PR)"

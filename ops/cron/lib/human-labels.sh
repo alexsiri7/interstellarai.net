@@ -10,7 +10,7 @@
 HUMAN_NEEDED_LABEL="human-needed"
 # shellcheck disable=SC2034  # consumed by the sourcing scripts
 # venue-request (musenmingle contact form) and content-report (annie report
-# route) are operational requests filed by public forms, never code work;
-# needs-owner-review is where the factory parks an item it will not act on
-# without the owner (lib/trust.sh).
-HUMAN_LABELS=("manual-review" "factory-gap" "$HUMAN_NEEDED_LABEL" "wontfix" "duplicate" "question" "requirements-gap" "venue-request" "content-report" "needs-owner-review")
+# route) are operational requests filed by public forms, never code work.
+# (needs-owner-review, where screening parks a bridge issue, is enforced by
+# lib/trust.sh instead, so the owner's archon:approved alone releases it.)
+HUMAN_LABELS=("manual-review" "factory-gap" "$HUMAN_NEEDED_LABEL" "wontfix" "duplicate" "question" "requirements-gap" "venue-request" "content-report")

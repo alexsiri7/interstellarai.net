@@ -128,8 +128,8 @@ trust_notify_once() {
 # bridge itself sets and the caller cannot remove: its labels, its title
 # prefix, its body marker, the Sentry App as author.
 #   sentry-app        author app/sentry (Sentry's GitHub integration)
-#   sentry-bridge     label `sentry`, title "[Sentry] …" or body "Automatically
-#                     created from Sentry" / "**Sentry issue ID:**"
+#   sentry-bridge     label `sentry`, title "[Sentry] …" or a body that
+#                     starts "Automatically created from Sentry"
 #                     (interstellarai.net workers/sentry-bridge; events can be
 #                     forged with the public DSN)
 #   feedback          label `feedback`, or title "Bug: …" / "Feature: …"
@@ -146,6 +146,9 @@ trust_notify_once() {
 # venue-request (musenmingle contact form) and content-report (annie) are
 # human-only (lib/human-labels.sh): operational requests, never built.
 TRUST_APPROVED_LABEL="${TRUST_APPROVED_LABEL:-archon:approved}"
+# Set by lib/screen.sh: passed automated screening / held for the owner.
+TRUST_SCREENED_LABEL="${TRUST_SCREENED_LABEL:-archon:auto-approved}"
+TRUST_HELD_LABEL="${TRUST_HELD_LABEL:-needs-owner-review}"
 # shellcheck disable=SC2016  # jq program, not shell
 _TRUST_SOURCE_JQ='
   def bridge_source:
@@ -153,7 +156,7 @@ _TRUST_SOURCE_JQ='
     | ((.author.login // "") | ascii_downcase) as $a
     | if $a == "app/sentry" or $a == "sentry[bot]" then "sentry-app"
       elif ($l | index("sentry")) or ($t | startswith("[Sentry] "))
-           or ($b | test("Automatically created from Sentry|\\*\\*Sentry issue ID:\\*\\*")) then "sentry-bridge"
+           or ($b | startswith("Automatically created from Sentry")) then "sentry-bridge"
       elif ($l | index("feedback")) or ($t | test("^(Bug|Feature): ")) then "feedback"
       elif ($l | index("content-report")) then "content-report"
       elif ($b | test("Suggested via `POST /v1/suggestions`|_Filed automatically by musenmingle-api\\._")) then "musenmingle-suggestion"
@@ -164,14 +167,17 @@ _TRUST_SOURCE_JQ='
 # _trust_rows <json> — one row per item, fields separated by US (0x1f, not a
 # tab: read collapses runs of whitespace IFS, which would shift an empty field
 # into the next): number, author, isCrossRepository ("missing" when absent),
-# bridge source ("" = none), approved (true/false), createdAt, title (one line,
-# 80 chars).
+# bridge source ("" = none), approval (owner = archon:approved, held =
+# needs-owner-review, screened = archon:auto-approved, else no), createdAt,
+# title (one line, 80 chars).
 _trust_rows() {
-  jq -r --arg approved "$TRUST_APPROVED_LABEL" "$_TRUST_SOURCE_JQ"'
+  jq -r --arg approved "$TRUST_APPROVED_LABEL" --arg screened "$TRUST_SCREENED_LABEL" --arg held "$TRUST_HELD_LABEL" "$_TRUST_SOURCE_JQ"'
     .[]? | [(.number|tostring), (.author.login // ""),
             (if .isCrossRepository == null then "missing" else (.isCrossRepository|tostring) end),
             bridge_source,
-            ([.labels[]?.name] | index($approved) != null | tostring),
+            ([.labels[]?.name] | if index($approved) then "owner"
+                                 elif index($held) then "held"
+                                 elif index($screened) then "screened" else "no" end),
             (.createdAt // ""),
             ((.title // "") | gsub("[[:cntrl:]]"; " ") | .[0:80])]
     | join("\u001f")' <<<"$1" 2>/dev/null
@@ -184,28 +190,28 @@ _trust_keep() {
 # trust_filter_issues <project> — stdin: a `gh issue list --json` array that
 # includes author, and labels,title,body for the bridge check; stdout: the
 # same array holding only issues the factory may act on. An issue passes when
-# the owner labelled it $TRUST_APPROVED_LABEL, or its author is trusted AND no
-# bridge filed it. Each rejected issue is notified once, unless TRUST_QUIET is
+# the owner labelled it $TRUST_APPROVED_LABEL, or its author is trusted AND
+# either no bridge filed it or automated screening passed it
+# ($TRUST_SCREENED_LABEL without $TRUST_HELD_LABEL). Each rejected issue is notified once, unless TRUST_QUIET is
 # set (closed-issue listings, counts). TRUST_AUTHOR_ONLY=1 skips the bridge
 # check, for paths that start no archon run and only act on the bridges' own
 # issues (dedupe_sentry). Unparseable input yields [].
 trust_filter_issues() {
-  local project="$1" json keep="" num author _cross source approved _created title
+  local project="$1" json keep="" num author _cross source approved _created _title
   json=$(cat)
-  while IFS=$'\x1f' read -r num author _cross source approved _created title; do
+  while IFS=$'\x1f' read -r num author _cross source approved _created _title; do
     [ -n "$num" ] || continue
     [ -n "${TRUST_AUTHOR_ONLY:-}" ] && source=""
-    if [ "$approved" = "true" ] || { trust_issue_ok "$author" && [ -z "$source" ]; }; then
+    if [ "$approved" = "owner" ] || { trust_issue_ok "$author" && { [ -z "$source" ] || [ "$approved" = "screened" ]; }; }; then
       keep="$keep $num"
     elif [ -n "${TRUST_QUIET:-}" ]; then
       :
     elif ! trust_issue_ok "$author"; then
       trust_notify_once "$project" issue "$num" \
         "External issue #$num on $project by ${author:-unknown} — not touched by the factory. https://github.com/$TRUST_OWNER/$project/issues/$num"
-    else
-      trust_notify_once "$project" issue-source "$num" \
-        "$project #$num from $source: \"$title\" — add label $TRUST_APPROVED_LABEL to let the factory work it. https://github.com/$TRUST_OWNER/$project/issues/$num"
     fi
+    # A bridge issue not yet screened (or held by screening) is silent here:
+    # lib/screen.sh screens it and tells the owner when it holds one.
   done < <(_trust_rows "$json")
   _trust_keep "$keep" "$json"
 }
