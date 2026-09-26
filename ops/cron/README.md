@@ -82,6 +82,57 @@ Each project logs `OK: <project> restored: <archive> (<n> rows in <schema.table>
 
 The weekly `system-maintenance.sh` needs root for apt, snap, journald and smartctl. It never asks: every privileged call is `sudo -n` against the exact command shapes in `ops/host/sudoers-archon-cron`, installed once (with the journald cap, unattended-upgrades, smartd and Node 24 changes) by `sudo ops/host/install.sh`. Preview with `ops/host/install.sh --dry-run`; revoke by deleting `/etc/sudoers.d/archon-cron`. Details in [`ops/host/README.md`](../host/README.md).
 
+## Trust model: what the factory acts on
+
+Several factory repos are public, and every archon run is a Claude session on this workstation, which holds every secret. So an issue, PR or comment is input the factory acts on only when it comes from someone trusted. `lib/trust.sh` is the single gate. `issue-pickup-cron.sh`, `pr-maintenance-cron.sh`, `pr-review-cron.sh` and the PR checks of `pipeline-health-cron.sh` all go through it.
+
+**Authors.** Lists are space-separated logins. GitHub Apps are written `<slug>[bot]`; gh's `app/<slug>` is the same identity. A bare `sentry` is a different, human account.
+
+| List | Default | Trusted for |
+|---|---|---|
+| `TRUSTED_AUTHORS` | `alexsiri7` | everything: issues, PRs, comments |
+| `TRUSTED_ISSUE_BOTS` | `sentry[bot] github-actions[bot]` | issues and comments (Sentry's integration, the repos' own workflows: Railway alerts, token-expiry issues) |
+| `TRUSTED_MERGE_ONLY_AUTHORS` | `dependabot[bot] github-actions[bot]` | PRs that `pr-maintenance` may merge when CLEAN, but that no archon run ever reads: dependabot bodies carry upstream release notes |
+
+The lists come from the ~500 newest issues and PRs of every repo in `archon-projects.txt` (2026-09-26). To override, set them in `~/.config/archon-cron/trust.env` (`ARCHON_CRON_TRUST_FILE`). That file is sourced when present, and its values win. An empty list trusts nobody.
+
+**PRs.** A PR is trusted only when its author is on a list **and** `isCrossRepository` is `false`, meaning its head branch lives in the same repo. A fork PR is never trusted, whatever login it carries.
+- `full` (the owner): may be flipped to ready, merged, maintained by archon and reviewed.
+- `merge` (merge-only bots): merged on CLEAN only. Dependabot has two further conditions. The PR must be at least `TRUST_DEPENDABOT_MIN_AGE_H` (72) hours old, because a hijacked upstream release is usually yanked within days. And its `from X to Y` must keep the major version. Major, grouped or unparseable bumps are never auto-merged: the owner gets one ntfy.
+- Everything else: never merged, reviewed or handed to archon.
+
+**Issues.** An issue is acted on only when its author is trusted **and** no bridge filed it, or when the owner has labelled it `archon:approved`. Otherwise it is not:
+- triaged, queued, promoted or re-queued;
+- picked for `archon-ship`;
+- counted as pending work by `check_progress`.
+
+`dedupe_sentry` and `settle_parked` start no archon run, so they check the author only.
+
+A *bridge* is a service that files issues under the owner's token with text chosen by whoever called it, so an author check passes them. `lib/trust.sh` (`bridge_source`) recognises them by what the bridge sets and the caller cannot remove:
+
+| Source | Detected by |
+|---|---|
+| `sentry-app` | author `app/sentry` |
+| `sentry-bridge` (interstellarai.net `workers/sentry-bridge`; events can be forged with the public DSN) | label `sentry`, title `[Sentry] …`, or body `Automatically created from Sentry` / `**Sentry issue ID:**` |
+| `feedback` (`workers/feedback`, which is unauthenticated, and word-coach-annie `/api/feedback`) | label `feedback`, or title `Bug: …` / `Feature: …` |
+| `musenmingle-suggestion` (public suggest form and API) | body ``Suggested via `POST /v1/suggestions` `` or `_Filed automatically by musenmingle-api._`. The label is not used, because the owner files `new-scraper` issues too. |
+| `musenmingle-health` (the body quotes scraper errors from third-party sites) | label `scraper-broken` or body `_Filed automatically by musenmingle-ingest._` |
+
+Two bridges are human-only and in `HUMAN_LABELS`: `venue-request` (the Muse & Mingle contact form) and `content-report` (annie). They are operational requests, never code work. `needs-owner-review` is in `HUMAN_LABELS` as well.
+
+Bridge issues are held until they carry `archon:approved` (`TRUST_APPROVED_LABEL`). `issue-pickup-cron.sh` creates that label on every repo, and only a collaborator can add it. This is the interim default. Automated screening of bridge issues, and a change-scope check on the PRs built from them, are to replace routine manual approval.
+
+**Comments.** Before any archon run that reads a thread, `trust_comments_ok` lists the comments via the REST API, and for PRs also the reviews and review comments. It requires every author to be in `TRUSTED_AUTHORS` or `TRUSTED_ISSUE_BOTS`. A stranger's comment keeps archon off that issue or PR (the rest of the queue moves on) until the owner **deletes** the comment. Hiding it is not enough, because the API still returns it. A listing that cannot be read holds the item for that tick.
+
+**Notification.** Each untrusted item gets one log line and one ntfy. Markers live in `~/.archon/state/untrusted/<project>-<kind>-<n>` (`TRUST_STATE_DIR`), shared by all scripts. A marker is written only once the ntfy went out. Only `NTFY_TOPIC` is read from `secrets.env`. The file is never sourced, so its DB URLs stay out of archon runs' environment.
+
+**Limits.** This gate decides what reaches archon. It does not confine archon. Every run still holds the owner's `gh` token and this machine's secrets, and some things arrive after the gate passes:
+- a comment posted mid-run;
+- a web page an approved scraper issue sends it to;
+- a malicious dependency.
+
+The gate, screening and a sandboxed archon user with a scoped token are designed as layers that work together. None is sufficient alone.
+
 ## Parking a PR: the `hold` label
 
 Add the `hold` label to any open PR that must stay open and unmerged (for example an asset-upload PR whose head branch another workflow fetches from). `pr-maintenance-cron.sh` skips held PRs in every phase — no draft-to-ready flip, no auto-merge, no `archon-pr-maintenance` — and `pr-review-cron.sh` fires no review at them; each tick logs `<project>: PR #N is on hold — skipping`. Remove the label to hand the PR back to the automation. `pr-maintenance-cron.sh` creates the label (`#5319E7`, "Do not auto-merge, auto-review or auto-maintain") on every repo in `archon-projects.txt` each tick, so it is always available.
@@ -192,6 +243,7 @@ Status lives in `~/.archon/pipeline-health-state/archon-update-status` (`last_ru
 | `lib/archon-projects.sh` | sourced by others | loads project list from `archon-projects.txt` |
 | `lib/claude-auth.sh` | sourced by `sweep-audits.sh`, `pipeline-health-cron.sh` | `claude_auth_check <dir>`: a real `claude -p --model haiku` request against a config dir (`claude auth status` says `loggedIn: true` for a token the API rejects with 401). A failing account gets one ntfy per day and one open `human-needed` issue on interstellarai.net (`Claude account auth failing: <dir>`, with the `claude auth login` command), commented on once a day while it keeps failing and closed by the first passing probe. State in `~/.archon/pipeline-health-state/claude-auth/` (`CLAUDE_AUTH_STATE_DIR`) |
 | `lib/human-labels.sh` | sourced by `issue-pickup-cron.sh`, `lib/claude-auth.sh` | `HUMAN_LABELS`, the human-intent labels issue-pickup never triages or ingests, and `HUMAN_NEEDED_LABEL`, the one of them the cron scripts file their own human-only issues under |
+| `lib/trust.sh` | sourced by `issue-pickup-cron.sh`, `pr-maintenance-cron.sh`, `pr-review-cron.sh`, `pipeline-health-cron.sh` | the trust gate: trusted authors, fork PRs, bridge-filed issues, untrusted comments, the dependabot merge policy, one ntfy per untrusted item (see "Trust model") |
 | `lib/ci-skip.sh` | sourced by `pr-maintenance-cron.sh`, `pipeline-health-cron.sh` | the CI-skip tokens GitHub honours: detect one, strip them from a subject or a body |
 | `lib/pg-backup.sh` | sourced by `backup-dbs.sh`, `restore-test.sh` | the project list (`PG_BACKUP_PROJECTS`), URL → `PG*` env, pg client/server version selection, archive validation |
 | `archon-projects.txt` | data | canonical list of managed project slugs under `alexsiri7/` |

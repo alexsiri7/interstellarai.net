@@ -775,6 +775,21 @@ setup_progress_env() {
     echo $(( $(date +%s) - 1800 )) > "$STATE_DIR/last-progress-ts"
     STALL_MARKER="$STATE_DIR/last-stall-diagnostic-ts"
     load_fn check_progress
+    load_trust
+}
+
+# The real lib/trust.sh, state and config kept under $STATE_DIR, ntfy recorded.
+load_trust() {
+    export TRUST_STATE_DIR="$STATE_DIR/trust"
+    export ARCHON_CRON_TRUST_FILE="$STATE_DIR/no-trust.env"
+    export ARCHON_CRON_SECRETS="$STATE_DIR/no-secrets.env"
+    export NTFY_TOPIC="test-topic"
+    CURL_ARGV="$STATE_DIR/curl-argv"
+    : > "$CURL_ARGV"
+    curl() { printf '%s\n' "$*" >> "$CURL_ARGV"; }
+    unset _ARCHON_TRUST_SH TRUSTED_AUTHORS TRUSTED_ISSUE_BOTS TRUSTED_MERGE_ONLY_AUTHORS
+    # shellcheck source=../lib/trust.sh
+    source "$(dirname "$SCRIPT_FILE")/lib/trust.sh"
 }
 
 @test "check_progress does not count an issue filed after the last tick as pending" {
@@ -790,12 +805,25 @@ setup_progress_env() {
 
 @test "check_progress fires the diagnostic for an issue queued before the last tick" {
     setup_progress_env
-    ISSUE_LIST_FIXTURE='[{"createdAt":"2026-01-01T00:00:00Z","labels":[{"name":"archon:queued"}]}]'
+    ISSUE_LIST_FIXTURE='[{"number":7,"author":{"login":"alexsiri7"},"createdAt":"2026-01-01T00:00:00Z","labels":[{"name":"archon:queued"}]}]'
     stub_gh_for_progress
 
     check_progress
 
     [ -f "$STALL_MARKER" ]
+}
+
+@test "check_progress does not count a stranger's queued issue or fork PR as pending" {
+    setup_progress_env
+    # The factory never works these, so counting them would fire the
+    # diagnostic every 2h — and point archon-assist at untrusted content.
+    ISSUE_LIST_FIXTURE='[{"number":7,"author":{"login":"stranger"},"createdAt":"2026-01-01T00:00:00Z","labels":[{"name":"archon:queued"}]}]'
+    PR_LIST_FIXTURE='[{"number":8,"author":{"login":"alexsiri7"},"isCrossRepository":true,"createdAt":"2026-01-01T00:00:00Z","isDraft":false,"mergeStateStatus":"DIRTY"}]'
+    stub_gh_for_progress
+
+    check_progress
+
+    [ ! -f "$STALL_MARKER" ]
 }
 
 @test "check_progress does not count a PR opened after the last tick as pending" {
