@@ -120,19 +120,21 @@ list_prs() {
     | jq -r --arg held "$TRUST_HELD_LABEL" ".[] | select($select)"' | [.number, .headRefName, ((.labels // []) | map(.name) | (index("hold") or index($held))), ((.body // "") | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null || true
 }
 
-# SAFE_CHANGE_CHECK: the repo-side check (pull_request_target, policy read
-# from the base branch) that fails a PR touching anything outside the
-# allowlist for its issue's type. Required before merging a PR that closes an
-# issue only automated screening vetted (lib/screen.sh: archon:auto-approved).
-SAFE_CHANGE_CHECK="${SAFE_CHANGE_CHECK:-safe-change}"
-SAFE_CHANGE_POLICY="${SAFE_CHANGE_POLICY:-.github/safe-change.json}"
+# UNSAFE_CHANGE_CHECK: the repo-side check (pull_request_target, policy read
+# from the base branch) that fails a PR doing anything on the repo's denylist
+# (.github/unsafe-change.yml: CI/deploy/infra paths, secrets/auth paths, new
+# dependencies, process/env/socket code, migrations beyond the app schema).
+# Required before merging a PR that closes an issue only automated screening
+# vetted (lib/screen.sh: archon:auto-approved).
+UNSAFE_CHANGE_CHECK="${UNSAFE_CHANGE_CHECK:-unsafe-change}"
+UNSAFE_CHANGE_POLICY="${UNSAFE_CHANGE_POLICY:-.github/unsafe-change.yml}"
 
 # pr_scope_decision <number> <view-json> — prints ok, wait or hold <why>.
-# ok: the PR closes no screened-only issue, or its safe-change check passed.
+# ok: the PR closes no screened-only issue, or its unsafe-change check passed.
 # wait: the check is still running. hold: the check failed, or the repo has no
-# safe-change policy, or anything here could not be read or parsed. Every
+# unsafe-change policy, or anything here could not be read or parsed. Every
 # step fails closed: this decision is what keeps a PR built from a screened
-# public issue from merging outside its allowlist. JSON goes to jq through
+# public issue from merging something on the denylist. JSON goes to jq through
 # printf pipes, never here-strings, which need a temp file on a full disk.
 pr_scope_decision() {
   local pr="$1" view="$2" refs body issues n flag screened="" state
@@ -159,8 +161,8 @@ pr_scope_decision() {
   done
   [ -n "$screened" ] || { echo ok; return; }
   # Every rollup entry of that name must pass: another workflow can publish a
-  # job called safe-change too.
-  if ! state=$(printf '%s' "$view" | jq -er --arg c "$SAFE_CHANGE_CHECK" '
+  # job called unsafe-change too.
+  if ! state=$(printf '%s' "$view" | jq -er --arg c "$UNSAFE_CHANGE_CHECK" '
         [.statusCheckRollup[]? | select((.name // .context) == $c) | ((.conclusion // .state // "") | ascii_upcase)]
         | if length == 0 then "MISSING"
           elif all(. == "SUCCESS") then "SUCCESS"
@@ -170,13 +172,13 @@ pr_scope_decision() {
   fi
   case "$state" in
     SUCCESS) echo ok ;;
-    FAILURE) echo "hold $SAFE_CHANGE_CHECK check failed (closes screened issue${screened})" ;;
+    FAILURE) echo "hold $UNSAFE_CHANGE_CHECK check failed (closes screened issue${screened})" ;;
     PENDING) echo wait ;;
     *)
-      if gh api "repos/alexsiri7/$PROJECT/contents/$SAFE_CHANGE_POLICY" --jq .path >/dev/null 2>&1; then
+      if gh api "repos/alexsiri7/$PROJECT/contents/$UNSAFE_CHANGE_POLICY" --jq .path >/dev/null 2>&1; then
         echo wait
       else
-        echo "hold no $SAFE_CHANGE_POLICY in this repo (closes screened issue${screened})"
+        echo "hold no $UNSAFE_CHANGE_POLICY in this repo (closes screened issue${screened})"
       fi ;;
   esac
 }
@@ -243,12 +245,12 @@ for PROJECT in "${PROJECTS[@]}"; do
       continue
     fi
     # A PR built from an issue only automated screening vetted merges only
-    # once the repo's safe-change scope check passed.
+    # once the repo's unsafe-change scope check passed.
     SCOPE=$(pr_scope_decision "$PR" "$MERGE_JSON")
     case "$SCOPE" in
       ok) ;;
       wait)
-        log "$PROJECT: PR #$PR — waiting for the $SAFE_CHANGE_CHECK check before merging"
+        log "$PROJECT: PR #$PR — waiting for the $UNSAFE_CHANGE_CHECK check before merging"
         continue ;;
       *)
         log "$PROJECT: PR #$PR — not merging: ${SCOPE#hold }"

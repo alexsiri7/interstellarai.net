@@ -153,12 +153,20 @@ Only the title and body are screened, since that is what the bridge wrote. Comme
 
 To see what screening would decide, without writing to GitHub: `ops/cron/screen-bridge-issues.sh [--days N] [project…]`.
 
-**Scope check on PRs from screened issues.** Some PRs close an issue that only screening vetted: it carries `archon:auto-approved` without the owner's `archon:approved`. `pr-maintenance-cron.sh` merges such a PR only once its `safe-change` check (`SAFE_CHANGE_CHECK`) is `SUCCESS`:
+**`unsafe-change` check on PRs from screened issues.** Some PRs close an issue that only screening vetted: it carries `archon:auto-approved` without the owner's `archon:approved`. `pr-maintenance-cron.sh` merges such a PR only once its `unsafe-change` check (`UNSAFE_CHANGE_CHECK`) is `SUCCESS`:
 
 - Check pending: the PR waits.
-- Check failed, or the repo has no `.github/safe-change.json` (`SAFE_CHANGE_POLICY`): the PR gets `needs-owner-review` and the owner gets one ntfy. From then on the PR is treated like `hold`: `pr-maintenance` leaves it alone in every phase, `pr-review` does not review it, and `pipeline-health` does not start archon-assist on its CI. The `safe-change` check never counts as red CI for that retry. Every step of this decision fails closed, and a rollup with several entries named `safe-change` passes only if all of them pass. This is fail-closed, so screened Sentry fixes in a repo without a policy wait for the owner at merge.
+- Check failed, or the repo has no `.github/unsafe-change.yml` (`UNSAFE_CHANGE_POLICY`): the PR gets `needs-owner-review` and the owner gets one ntfy. From then on the PR is treated like `hold`: `pr-maintenance` leaves it alone in every phase, `pr-review` does not review it, and `pipeline-health` does not start archon-assist on its CI. The `unsafe-change` check (and the legacy `safe-change` name) never counts as red CI for that retry. Every step of this decision fails closed, and a rollup with several entries named `unsafe-change` passes only if all of them pass. This is fail-closed, so screened Sentry fixes in a repo without a policy wait for the owner at merge.
 
-The check lives in each product repo as a `pull_request_target` workflow, so it runs base-branch code and policy and never checks out the PR. It fails when the PR touches anything outside the allowlist for its issue's `type:` label.
+The check lives in each product repo as a `pull_request_target` workflow, so it runs base-branch code and policy and never checks out the PR. It is deliberately lenient (owner decision 2026-09-26): a denylist, the same for every issue type, so the owner does not have to check everything. The PR fails only if it:
+
+- touches CI/deploy/infra or agent instructions: `.github/**`, `Dockerfile*`, `docker-compose*`, `.railway/**`, `railway.*`, `fly.toml`, `vercel.json`, `wrangler.toml`, `Procfile`, `ops/**`, `scripts/deploy*`, `.env*`, build scripts (`build.rs`, `.cargo/**`, Gradle files, `Makefile`), `CLAUDE.md`/`AGENTS.md`/`.claude/**`/`.archon/**`, plus the repo's `extra_deny_paths`;
+- touches a path containing `auth`, `token`, `secret`, `credential`, `session`, `security`, `crypto` or `permission` (fixtures, snapshots and Markdown exempt; per-repo overridable);
+- adds a new dependency name, or a git/path/URL source, to `Cargo.toml`, `package.json`, `pyproject.toml`, `requirements*.txt`, `go.mod` or `pubspec.yaml` (both sides parsed from the API), or changes `package.json` `scripts`/overrides or Cargo `[patch]`/`[replace]`/`build`. Version bumps and lockfile-only changes pass;
+- adds lines that run processes, read environment variables or open raw sockets (per-language regexes over added lines only: Rust, Python, JS/TS, Dart, Go, Kotlin/Java; any added line of a shell script);
+- adds migration SQL beyond ordinary changes in the app's own schema(s) (`app_schemas`): `GRANT`/`REVOKE`, roles, extensions, schemas, policies/RLS, `SECURITY DEFINER`, `search_path`, `EXECUTE`, `COPY`, server-file functions, or a table in another schema.
+
+Everything else passes: app code, tests, fixtures, docs, templates, CSS, ordinary migrations. The whole policy is `.github/unsafe-change.yml` in the repo; the reference implementation is musenmingle's (`.github/unsafe-change/check.py`, which also has `--dry-run <pr>...` to replay past PRs).
 
 `archon-pr-maintenance` no longer merges or enables auto-merge (Archon fork, `upstream-sync-0.10`, and `~/.archon/workflows`). The cron is the one place that merges.
 
@@ -173,7 +181,7 @@ The check lives in each product repo as a `pull_request_target` workflow, so it 
 
 Three layers are designed to work together, and none is sufficient alone:
 - screening, which keeps hostile text out;
-- the scope check, which stops a misled agent's change from merging;
+- the `unsafe-change` check, which stops a misled agent's riskiest changes (CI, secrets, dependencies, process/env code, privileged SQL) from merging;
 - a sandboxed archon user with a scoped token, which limits what a run can reach.
 
 An agent that is actively injected still holds the owner's admin token until the sandbox exists. It could remove labels or merge by hand, and no check on GitHub stops that.

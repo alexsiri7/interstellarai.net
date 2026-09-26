@@ -49,8 +49,8 @@ fi
 if [ "$1 $2" = "issue view" ]; then
   { cat "$GH_COMMENTS_DIR/issue-labels-$3" 2>/dev/null || echo '[]'; } | jq -c '{labels: map({name: .})}'
 fi
-# The safe-change policy file on the base branch: present when GH_POLICY is set.
-case "$1 $2" in "api repos/"*"/contents/"*) [ -n "${GH_POLICY:-}" ] && echo ".github/safe-change.json" || exit 1 ;; esac
+# The unsafe-change policy file on the base branch: present when GH_POLICY is set.
+case "$1 $2" in "api repos/"*"/contents/"*) [ -n "${GH_POLICY:-}" ] && echo ".github/unsafe-change.yml" || exit 1 ;; esac
 if [ "$1 $2" = "api --paginate" ]; then
   # repos/alexsiri7/proj/{issues|pulls}/<n>/{comments|reviews}: one login per line
   key=$(sed -E 's#^repos/[^/]+/[^/]+/(issues|pulls)/([0-9]+)/(comments|reviews)$#\1-\2-\3#' <<<"$3")
@@ -307,26 +307,26 @@ load_trust() {
     [ ! -f "$STATE_DIR/prciretry/proj-pr601" ]
 }
 
-# ── pr-maintenance: the safe-change scope gate ───────────────────────────────
+# ── pr-maintenance: the unsafe-change scope gate ───────────────────────────────
 # A PR that closes an issue only automated screening vetted (archon:auto-approved
-# without the owner's archon:approved) merges only once the repo's safe-change
+# without the owner's archon:approved) merges only once the repo's unsafe-change
 # check passed.
 
 scoped_pr() { # scoped_pr <check-state or none>
     export GH_PR_LIST="[$(pr 700 false CLEAN alexsiri7 false archon/task-x 'Add scraper')]"
     local rollup='[]'
-    [ "$1" != none ] && rollup='[{"name":"safe-change","conclusion":"'"$1"'"},{"name":"CI","conclusion":"SUCCESS"}]'
+    [ "$1" != none ] && rollup='[{"name":"unsafe-change","conclusion":"'"$1"'"},{"name":"CI","conclusion":"SUCCESS"}]'
     export GH_PR_VIEW='{"title":"Add scraper","body":"Closes #44","closingIssuesReferences":[{"number":44}],"statusCheckRollup":'"$rollup"'}'
 }
 
-@test "scope: a PR closing a screened issue merges once safe-change passed" {
+@test "scope: a PR closing a screened issue merges once unsafe-change passed" {
     scoped_pr SUCCESS
     echo '["new-scraper","archon:auto-approved"]' > "$GH_COMMENTS_DIR/issue-labels-44"
     run "$CRON_DIR/pr-maintenance-cron.sh"
     gh_called '^pr merge 700 '
 }
 
-@test "scope: a failed safe-change check holds the PR, labels it and tells the owner once" {
+@test "scope: a failed unsafe-change check holds the PR, labels it and tells the owner once" {
     scoped_pr FAILURE
     echo '["new-scraper","archon:auto-approved"]' > "$GH_COMMENTS_DIR/issue-labels-44"
     run "$CRON_DIR/pr-maintenance-cron.sh"
@@ -334,17 +334,17 @@ scoped_pr() { # scoped_pr <check-state or none>
     ! gh_called '^pr merge'
     gh_called '^pr edit 700 --add-label needs-owner-review'
     [ "$(ntfys)" -eq 1 ]
-    grep -q 'PR #700 on proj not auto-merged: safe-change check failed' "$STUB_CURL_ARGV"
+    grep -q 'PR #700 on proj not auto-merged: unsafe-change check failed' "$STUB_CURL_ARGV"
 }
 
 @test "scope: a pending check waits; a repo with no policy holds (fail closed)" {
     scoped_pr none
     echo '["archon:auto-approved"]' > "$GH_COMMENTS_DIR/issue-labels-44"
     GH_POLICY=1 run "$CRON_DIR/pr-maintenance-cron.sh"
-    [[ "$output" == *"PR #700 — waiting for the safe-change check"* ]]
+    [[ "$output" == *"PR #700 — waiting for the unsafe-change check"* ]]
     ! gh_called '^pr edit'
     run "$CRON_DIR/pr-maintenance-cron.sh"
-    [[ "$output" == *"not merging: no .github/safe-change.json in this repo"* ]]
+    [[ "$output" == *"not merging: no .github/unsafe-change.yml in this repo"* ]]
     ! gh_called '^pr merge'
 }
 
@@ -391,9 +391,9 @@ STUB
     ! gh_called '^pr merge'
 }
 
-@test "scope: a second, passing check named safe-change does not mask a failing one" {
+@test "scope: a second, passing check named unsafe-change does not mask a failing one" {
     scoped_pr FAILURE
-    export GH_PR_VIEW='{"title":"Add scraper","body":"Closes #44","closingIssuesReferences":[{"number":44}],"statusCheckRollup":[{"name":"safe-change","conclusion":"FAILURE"},{"name":"safe-change","conclusion":"SUCCESS"}]}'
+    export GH_PR_VIEW='{"title":"Add scraper","body":"Closes #44","closingIssuesReferences":[{"number":44}],"statusCheckRollup":[{"name":"unsafe-change","conclusion":"FAILURE"},{"name":"unsafe-change","conclusion":"SUCCESS"}]}'
     echo '["archon:auto-approved"]' > "$GH_COMMENTS_DIR/issue-labels-44"
     run "$CRON_DIR/pr-maintenance-cron.sh"
     ! gh_called '^pr merge'
@@ -415,7 +415,7 @@ STUB
     [ "$(ntfys)" -eq 0 ]
 }
 
-@test "health: a held PR and a red safe-change check start no archon-assist" {
+@test "health: a held PR and a red unsafe-change (or legacy safe-change) check start no archon-assist" {
     SCRIPT_FILE="$CRON_DIR/pipeline-health-cron.sh"
     # shellcheck disable=SC1090
     source <(awk '/^(check_pr_ci_retry|sha_attempt_decide)\(\)/{p=1} p{print} p && /^}$/{p=0}' "$SCRIPT_FILE")
@@ -426,7 +426,7 @@ STUB
     ASSIST="$T/assist"; : > "$ASSIST"
     nohup() { printf '%s\n' "$*" >> "$ASSIST"; }
     disown() { :; }
-    export GH_PR_LIST="[$(pr 610 false BLOCKED alexsiri7 false archon/a | jq -c '.labels=[{"name":"needs-owner-review"}] | .statusCheckRollup=[{"conclusion":"FAILURE","name":"CI"}]'), $(pr 611 false BLOCKED alexsiri7 false archon/b | jq -c '.statusCheckRollup=[{"conclusion":"FAILURE","name":"safe-change"},{"conclusion":"SUCCESS","name":"CI"}]')]"
+    export GH_PR_LIST="[$(pr 610 false BLOCKED alexsiri7 false archon/a | jq -c '.labels=[{"name":"needs-owner-review"}] | .statusCheckRollup=[{"conclusion":"FAILURE","name":"CI"}]'), $(pr 611 false BLOCKED alexsiri7 false archon/b | jq -c '.statusCheckRollup=[{"conclusion":"FAILURE","name":"unsafe-change"},{"conclusion":"SUCCESS","name":"CI"}]'), $(pr 612 false BLOCKED alexsiri7 false archon/c | jq -c '.statusCheckRollup=[{"conclusion":"FAILURE","name":"safe-change"},{"conclusion":"SUCCESS","name":"CI"}]')]"
 
     check_pr_ci_retry proj || true
 
