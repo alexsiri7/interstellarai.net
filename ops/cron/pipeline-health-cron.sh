@@ -1625,13 +1625,10 @@ check_stuck_prs() {
   #   - are not BLOCKED (CI failing, caught by check_pr_ci_retry)
   #   - haven't been updated in >2h
   local stuck_prs
-  # NOTE: gh rejects `--jq --arg …` ("unknown arguments"), so this listing is
-  # empty and the check has never fired. Left as is here (reviving it would
-  # start archon-pr-maintenance runs); the trust gate below still applies if
-  # it is ever fixed.
+  # gh's --jq takes no --arg, so the cutoff goes to a standalone jq.
   stuck_prs=$(gh pr list --repo "alexsiri7/$project" --state open \
-    --json number,title,headRefName,headRefOid,isDraft,updatedAt,mergeStateStatus \
-    --jq --arg cutoff "$cutoff_iso" \
+    --json number,title,headRefName,headRefOid,isDraft,updatedAt,mergeStateStatus 2>/dev/null \
+    | jq -r --arg cutoff "$cutoff_iso" \
     '[.[] | select(.headRefName | startswith("archon/"))
           | select(.isDraft == false)
           | select(.mergeStateStatus != "CLEAN")
