@@ -79,15 +79,18 @@ teardown() {
 }
 
 # make_archive PROJECT BASENAME ROWS [EXTRA_SQL_FILE] — a plausible plain dump
-# (> 1 KB compressed, sanity table present) plus its .meta sidecar.
+# (> 1 KB compressed, sanity table present) plus its .meta sidecar. The
+# schema is the project's: `reli` for reli, `public` otherwise.
 make_archive() {
-    local dir="$T/backups/$1" f="$T/backups/$1/$2.sql.gz"
+    local dir="$T/backups/$1" f="$T/backups/$1/$2.sql.gz" s=public
+    # reli lives in its own schema of the consolidated project (2026-09-26).
+    [ "$1" = reli ] && s=reli
     mkdir -p "$dir"
-    { echo "-- PostgreSQL database dump"; echo "CREATE SCHEMA public;"
-      echo "CREATE TABLE public.things ("; echo "    id integer"; echo ");"
+    { echo "-- PostgreSQL database dump"; echo "CREATE SCHEMA $s;"
+      echo "CREATE TABLE $s.things ("; echo "    id integer"; echo ");"
       [ -n "${4:-}" ] && cat "$4"
       head -c 3000 /dev/urandom | base64 | sed 's/^/-- /'; } | gzip > "$f"
-    printf 'rows=%s\ntable=public.things\n' "$3" > "$f.meta"
+    printf 'rows=%s\ntable=%s.things\n' "$3" "$s" > "$f.meta"
     echo "$f"
 }
 
@@ -158,7 +161,7 @@ cluster_dirs() { find "$T" -maxdepth 1 -name 'restore-test.*' 2>/dev/null; }
     run "$SCRIPT"
     [ "$status" -eq 0 ]
     [[ "$output" == *"Throwaway cluster up: $T/restore-test."* ]]
-    [[ "$output" == *"OK: reli restored: $T/backups/reli/reli-20260919-091701.sql.gz (224 rows in public.things = backup count, 9 tables in public,"* ]]
+    [[ "$output" == *"OK: reli restored: $T/backups/reli/reli-20260919-091701.sql.gz (224 rows in reli.things = backup count, 9 tables in reli,"* ]]
     [[ "$output" == *"SKIP: annie"* ]]
     [[ "$output" == *"Restore test complete (ok: reli; skipped: annie filmduel kindred lachesis thaleia kindred-auth)"* ]]
     grep -q -- '-A trust' "$T/initdb.argv"
@@ -166,9 +169,9 @@ cluster_dirs() { find "$T" -maxdepth 1 -name 'restore-test.*' 2>/dev/null; }
     grep -q -- "listen_addresses=''" "$T/pg_ctl.argv"
     grep -q -- '-w ' "$T/pg_ctl.argv"
     grep -q -- "-v ON_ERROR_STOP=1 -h $T/restore-test\..* -d restore_reli" "$T/psql.argv"
-    grep -q '^DROP SCHEMA public CASCADE;$' "$T/restored-restore_reli.sql"
+    ! grep -q 'DROP SCHEMA public' "$T/restored-restore_reli.sql"
     grep -q '^CREATE FUNCTION auth.uid()' "$T/restored-restore_reli.sql"
-    grep -q '^CREATE TABLE public.things ($' "$T/restored-restore_reli.sql"
+    grep -q '^CREATE TABLE reli.things ($' "$T/restored-restore_reli.sql"
     ! grep -q 'CREATE EXTENSION vector' "$T/restored-restore_reli.sql"
     grep -q '^last_run_status=ok$' "$T/state/restore-test-status"
     grep -q '^last_ok=[1-9]' "$T/state/restore-test-status"
@@ -195,7 +198,7 @@ cluster_dirs() { find "$T" -maxdepth 1 -name 'restore-test.*' 2>/dev/null; }
     export STUB_ROWS=200 NTFY_TOPIC=t
     run "$SCRIPT"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"ERROR: reli restore FAILED — public.things has 200 rows after restore, backup recorded 224"* ]]
+    [[ "$output" == *"ERROR: reli restore FAILED — reli.things has 200 rows after restore, backup recorded 224"* ]]
     [[ "$output" == *"ERROR: restore test FAILED for: reli (ok: none; skipped: annie filmduel kindred lachesis thaleia kindred-auth)"* ]]
     grep -q '^last_run_status=failed$' "$T/state/restore-test-status"
     grep -q '^last_run_failed=reli$' "$T/state/restore-test-status"
@@ -231,7 +234,7 @@ cluster_dirs() { find "$T" -maxdepth 1 -name 'restore-test.*' 2>/dev/null; }
 }
 
 @test "an archive that fails backup validation (too small) is not restored" {
-    printf 'CREATE TABLE public.things (\n' | gzip > "$T/backups/reli/reli-20260919-091701.sql.gz"
+    printf 'CREATE TABLE reli.things (\n' | gzip > "$T/backups/reli/reli-20260919-091701.sql.gz"
     run "$SCRIPT"
     [ "$status" -eq 1 ]
     [[ "$output" == *"below the 1024B minimum"* ]]
@@ -241,17 +244,17 @@ cluster_dirs() { find "$T" -maxdepth 1 -name 'restore-test.*' 2>/dev/null; }
 @test "without a .meta sidecar the count comes from the db-backup log line for that archive" {
     rm "$T/backups/reli/reli-20260919-091701.sql.gz.meta"
     {
-        echo "[db-backup] 2026-09-19 06:17:11 OK: reli backed up: $T/backups/reli/reli-20260919-061701.sql.gz (16K, 21 rows in public.things, pg_dump v17 from /x/pg_dump, server v17)"
-        echo "[db-backup] 2026-09-19 09:17:11 OK: reli backed up: $T/backups/reli/reli-20260919-091701.sql.gz (16K, 224 rows in public.things, pg_dump v17 from /x/pg_dump, server v17)"
+        echo "[db-backup] 2026-09-19 06:17:11 OK: reli backed up: $T/backups/reli/reli-20260919-061701.sql.gz (16K, 21 rows in reli.things, pg_dump v17 from /x/pg_dump, server v17)"
+        echo "[db-backup] 2026-09-19 09:17:11 OK: reli backed up: $T/backups/reli/reli-20260919-091701.sql.gz (16K, 224 rows in reli.things, pg_dump v17 from /x/pg_dump, server v17)"
     } > "$T/db-backup.log"
     run "$SCRIPT"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"224 rows in public.things = backup count"* ]]
+    [[ "$output" == *"224 rows in reli.things = backup count"* ]]
 }
 
 @test "no .meta and no log line for the archive fails (never guesses a count)" {
     rm "$T/backups/reli/reli-20260919-091701.sql.gz.meta"
-    echo "[db-backup] OK: reli backed up: $T/backups/reli/reli-20260919-061701.sql.gz (16K, 21 rows in public.things, x)" > "$T/db-backup.log"
+    echo "[db-backup] OK: reli backed up: $T/backups/reli/reli-20260919-061701.sql.gz (16K, 21 rows in reli.things, x)" > "$T/db-backup.log"
     run "$SCRIPT"
     [ "$status" -eq 1 ]
     [[ "$output" == *"no recorded row count: $T/backups/reli/reli-20260919-091701.sql.gz.meta missing and no OK line for the archive in $T/db-backup.log"* ]]
@@ -259,10 +262,10 @@ cluster_dirs() { find "$T" -maxdepth 1 -name 'restore-test.*' 2>/dev/null; }
 }
 
 @test ".meta naming a different table than the project's sanity table fails" {
-    printf 'rows=224\ntable=public.other\n' > "$T/backups/reli/reli-20260919-091701.sql.gz.meta"
+    printf 'rows=224\ntable=reli.other\n' > "$T/backups/reli/reli-20260919-091701.sql.gz.meta"
     run "$SCRIPT"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"records table public.other, expected public.things"* ]]
+    [[ "$output" == *"records table reli.other, expected reli.things"* ]]
 }
 
 @test "psql aborting on the archive (ON_ERROR_STOP) is a failure with the first error quoted" {
@@ -278,26 +281,26 @@ cluster_dirs() { find "$T" -maxdepth 1 -name 'restore-test.*' 2>/dev/null; }
     export STUB_TABLE_FOUND=f
     run "$SCRIPT"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"table public.things missing after restore"* ]]
+    [[ "$output" == *"table reli.things missing after restore"* ]]
 }
 
-@test "foreign keys into the stub auth schema are added NOT VALID and counted; public ones untouched" {
+@test "foreign keys into the stub auth schema are added NOT VALID and counted; in-schema ones untouched" {
     cat > "$T/extra.sql" <<'SQL'
-ALTER TABLE ONLY public.entries
+ALTER TABLE ONLY reli.entries
     ADD CONSTRAINT entries_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
-ALTER TABLE ONLY public.entries
-    ADD CONSTRAINT entries_thing_id_fkey FOREIGN KEY (thing_id) REFERENCES public.things(id);
+ALTER TABLE ONLY reli.entries
+    ADD CONSTRAINT entries_thing_id_fkey FOREIGN KEY (thing_id) REFERENCES reli.things(id);
 SQL
     make_archive reli reli-20260919-091701 224 "$T/extra.sql" > /dev/null
     run "$SCRIPT"
     [ "$status" -eq 0 ]
     [[ "$output" == *", 1 foreign keys into auth/extensions added NOT VALID)"* ]]
     grep -q '^    ADD CONSTRAINT entries_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE NOT VALID;$' "$T/restored-restore_reli.sql"
-    grep -q '^    ADD CONSTRAINT entries_thing_id_fkey FOREIGN KEY (thing_id) REFERENCES public.things(id);$' "$T/restored-restore_reli.sql"
+    grep -q '^    ADD CONSTRAINT entries_thing_id_fkey FOREIGN KEY (thing_id) REFERENCES reli.things(id);$' "$T/restored-restore_reli.sql"
 }
 
 @test "an archive using extensions.vector needs pgvector: fails when absent, creates the extension when present" {
-    echo "CREATE TABLE public.e (embedding extensions.vector(1536));" > "$T/extra.sql"
+    echo "CREATE TABLE reli.e (embedding extensions.vector(1536));" > "$T/extra.sql"
     make_archive reli reli-20260919-091701 224 "$T/extra.sql" > /dev/null
     run "$SCRIPT"
     [ "$status" -eq 1 ]
@@ -377,14 +380,14 @@ real_setup() {
     export PG_BIN="$REAL_PG_BIN"
     rm -f "$T/bin/initdb" "$T/bin/pg_ctl" "$T/bin/psql" "$T/bin/postgres"
     cat > "$T/real.sql" <<'SQL'
-CREATE TABLE public.owners (
+CREATE TABLE reli.owners (
     id uuid NOT NULL
 );
-INSERT INTO public.things VALUES (1), (2), (3);
-ALTER TABLE ONLY public.owners
+INSERT INTO reli.things VALUES (1), (2), (3);
+ALTER TABLE ONLY reli.owners
     ADD CONSTRAINT owners_id_fkey FOREIGN KEY (id) REFERENCES auth.users(id) ON DELETE CASCADE;
-ALTER TABLE public.owners ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "owners select" ON public.owners FOR SELECT USING ((auth.uid() = id));
+ALTER TABLE reli.owners ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "owners select" ON reli.owners FOR SELECT USING ((auth.uid() = id));
 SQL
     make_archive reli reli-20260919-091701 3 "$T/real.sql" > /dev/null
 }
@@ -395,7 +398,7 @@ SQL
     echo "$output"
     [ "$status" -eq 0 ]
     [[ "$output" == *"Throwaway cluster up: $T/restore-test."*"postgres (PostgreSQL) 17"* ]]
-    [[ "$output" == *"OK: reli restored: "*"(3 rows in public.things = backup count, 2 tables in public, "*"ms, 1 foreign keys into auth/extensions added NOT VALID)"* ]]
+    [[ "$output" == *"OK: reli restored: "*"(3 rows in reli.things = backup count, 2 tables in reli, "*"ms, 1 foreign keys into auth/extensions added NOT VALID)"* ]]
     grep -q '^last_run_status=ok$' "$T/state/restore-test-status"
     [ -z "$(cluster_dirs)" ]
     ! pgrep -f "postgres.*-k $T/restore-test" > /dev/null
@@ -403,10 +406,10 @@ SQL
 
 @test "real cluster: a recorded count the restore does not reproduce fails" {
     real_setup
-    printf 'rows=4\ntable=public.things\n' > "$T/backups/reli/reli-20260919-091701.sql.gz.meta"
+    printf 'rows=4\ntable=reli.things\n' > "$T/backups/reli/reli-20260919-091701.sql.gz.meta"
     run "$SCRIPT"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"public.things has 3 rows after restore, backup recorded 4"* ]]
+    [[ "$output" == *"reli.things has 3 rows after restore, backup recorded 4"* ]]
     [ -z "$(cluster_dirs)" ]
 }
 
