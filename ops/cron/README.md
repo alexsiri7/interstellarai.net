@@ -101,7 +101,11 @@ The lists come from the ~500 newest issues and PRs of every repo in `archon-proj
 - `merge` (merge-only bots): merged on CLEAN only. Dependabot has two further conditions. The PR must be at least `TRUST_DEPENDABOT_MIN_AGE_H` (72) hours old, because a hijacked upstream release is usually yanked within days. And its `from X to Y` must keep the major version. Major, grouped or unparseable bumps are never auto-merged: the owner gets one ntfy.
 - Everything else: never merged, reviewed or handed to archon.
 
-**Issues.** An issue is acted on only when its author is trusted **and** no bridge filed it, or when the owner has labelled it `archon:approved`. Otherwise it is not:
+**Issues.** An issue is acted on when either of these holds:
+- its author is trusted **and** it was not filed by a bridge;
+- it was filed by a bridge and has passed automated screening (`archon:auto-approved` without `needs-owner-review`), or the owner has labelled it `archon:approved`.
+
+Otherwise it is not:
 - triaged, queued, promoted or re-queued;
 - picked for `archon-ship`;
 - counted as pending work by `check_progress`.
@@ -118,9 +122,45 @@ A *bridge* is a service that files issues under the owner's token with text chos
 | `musenmingle-suggestion` (public suggest form and API) | body ``Suggested via `POST /v1/suggestions` `` or `_Filed automatically by musenmingle-api._`. The label is not used, because the owner files `new-scraper` issues too. |
 | `musenmingle-health` (the body quotes scraper errors from third-party sites) | label `scraper-broken` or body `_Filed automatically by musenmingle-ingest._` |
 
-Two bridges are human-only and in `HUMAN_LABELS`: `venue-request` (the Muse & Mingle contact form) and `content-report` (annie). They are operational requests, never code work. `needs-owner-review` is in `HUMAN_LABELS` as well.
+`venue-request` (the Muse & Mingle contact form) and `content-report` (annie) are human-only (`HUMAN_LABELS`): operational requests, never code work.
 
-Bridge issues are held until they carry `archon:approved` (`TRUST_APPROVED_LABEL`). `issue-pickup-cron.sh` creates that label on every repo, and only a collaborator can add it. This is the interim default. Automated screening of bridge issues, and a change-scope check on the PRs built from them, are to replace routine manual approval.
+**Screening bridge issues.** Before triage and queueing, `issue-pickup-cron.sh` screens open bridge issues (`screen_bridge_issues`, `lib/screen.sh`). It takes at most `SCREEN_MAX_PER_TICK` (3) per project per tick, oldest first, including Sentry issues the bridge filed straight into `archon:queued`. Screening has two stages:
+
+1. **Heuristics.** These can only deny. Each is a fixed pattern that never belongs in a crash report, a feedback note or a scraper suggestion:
+
+   | Code | Catches |
+   |---|---|
+   | `H-INJECT` | text addressed to an AI, or "ignore previous instructions" |
+   | `H-SECRETS` | `secrets.env`, keys, tokens, credentials, env vars |
+   | `H-SHELL` | `curl … \| sh`, `sudo`, `rm -rf`, shell code fences, `gh api`/`git push`/package installs |
+   | `H-CI` | `.github/`, workflows, Dockerfile, manifests, dependency changes |
+   | `H-BASE64` | long encoded blobs |
+   | `H-LENGTH` | more than `SCREEN_MAX_CHARS` |
+   | `H-URL` | for feedback and scraper issues, a link to any host other than the suggested site or the project's own domains |
+
+2. **Classifier.** It can only allow. It is one chat completion via Requesty (`SCREEN_MODEL`, default `anthropic/claude-haiku-4-5`) with no tools and no secrets. The issue text goes in as data between `BEGIN-ISSUE-<nonce>` and `END-ISSUE-<nonce>` lines, with a fresh random nonce each call. The model must answer `{verdict: safe|suspicious, issue_type, reasons}`. A reply that is not exactly one such JSON object (optionally wrapped in one `json` fence) is an error, never a pass. So is a failed request. On an error the issue stays unlabelled and is retried next tick.
+
+   The key is read from `~/.config/archon-cron/requesty.key` (`SCREEN_KEY_FILE`, chmod 600). It reaches curl through a file descriptor, never through argv.
+
+The outcomes:
+
+- **`safe`, and a type the source can produce** (Sentry: `bug_report`; feedback: `bug_report`/`feature`; suggestion: `new_scraper`). The issue gets `archon:auto-approved` and `type:<type>`, and triage/queue take it from there.
+- **Anything else** (a heuristic hit, `suspicious`, `TYPE-MISMATCH`). The issue gets `needs-owner-review` and the owner gets one ntfy. The gate keeps it out until the owner adds `archon:approved`, which releases it by itself.
+
+Either way the issue gets one comment with the verdict, the source and the reason *codes* (`H-*`, `MODEL`, `TYPE-MISMATCH`). The model's own words are never posted, because they could quote attacker text onto a public repo under the owner's name.
+
+Only the title and body are screened, since that is what the bridge wrote. Comments are vetted by author (below).
+
+To see what screening would decide, without writing to GitHub: `ops/cron/screen-bridge-issues.sh [--days N] [project…]`.
+
+**Scope check on PRs from screened issues.** Some PRs close an issue that only screening vetted: it carries `archon:auto-approved` without the owner's `archon:approved`. `pr-maintenance-cron.sh` merges such a PR only once its `safe-change` check (`SAFE_CHANGE_CHECK`) is `SUCCESS`:
+
+- Check pending: the PR waits.
+- Check failed, or the repo has no `.github/safe-change.json` (`SAFE_CHANGE_POLICY`): the PR gets `needs-owner-review` and the owner gets one ntfy. `pr-maintenance` then leaves the PR alone in every phase, just like `hold`. This is fail-closed, so screened Sentry fixes in a repo without a policy wait for the owner at merge.
+
+The check lives in each product repo as a `pull_request_target` workflow, so it runs base-branch code and policy and never checks out the PR. It fails when the PR touches anything outside the allowlist for its issue's `type:` label.
+
+`archon-pr-maintenance` no longer merges or enables auto-merge (Archon fork, `upstream-sync-0.10`, and `~/.archon/workflows`). The cron is the one place that merges.
 
 **Comments.** Before any archon run that reads a thread, `trust_comments_ok` lists the comments via the REST API, and for PRs also the reviews and review comments. It requires every author to be in `TRUSTED_AUTHORS` or `TRUSTED_ISSUE_BOTS`. A stranger's comment keeps archon off that issue or PR (the rest of the queue moves on) until the owner **deletes** the comment. Hiding it is not enough, because the API still returns it. A listing that cannot be read holds the item for that tick.
 
@@ -131,7 +171,12 @@ Bridge issues are held until they carry `archon:approved` (`TRUST_APPROVED_LABEL
 - a web page an approved scraper issue sends it to;
 - a malicious dependency.
 
-The gate, screening and a sandboxed archon user with a scoped token are designed as layers that work together. None is sufficient alone.
+Three layers are designed to work together, and none is sufficient alone:
+- screening, which keeps hostile text out;
+- the scope check, which stops a misled agent's change from merging;
+- a sandboxed archon user with a scoped token, which limits what a run can reach.
+
+An agent that is actively injected still holds the owner's admin token until the sandbox exists. It could remove labels or merge by hand, and no check on GitHub stops that.
 
 ## Parking a PR: the `hold` label
 
@@ -243,6 +288,8 @@ Status lives in `~/.archon/pipeline-health-state/archon-update-status` (`last_ru
 | `lib/archon-projects.sh` | sourced by others | loads project list from `archon-projects.txt` |
 | `lib/claude-auth.sh` | sourced by `sweep-audits.sh`, `pipeline-health-cron.sh` | `claude_auth_check <dir>`: a real `claude -p --model haiku` request against a config dir (`claude auth status` says `loggedIn: true` for a token the API rejects with 401). A failing account gets one ntfy per day and one open `human-needed` issue on interstellarai.net (`Claude account auth failing: <dir>`, with the `claude auth login` command), commented on once a day while it keeps failing and closed by the first passing probe. State in `~/.archon/pipeline-health-state/claude-auth/` (`CLAUDE_AUTH_STATE_DIR`) |
 | `lib/human-labels.sh` | sourced by `issue-pickup-cron.sh`, `lib/claude-auth.sh` | `HUMAN_LABELS`, the human-intent labels issue-pickup never triages or ingests, and `HUMAN_NEEDED_LABEL`, the one of them the cron scripts file their own human-only issues under |
+| `lib/screen.sh` | sourced by `issue-pickup-cron.sh`, `screen-bridge-issues.sh` | screening of bridge-filed issues: heuristics + classifier → `archon:auto-approved` / `needs-owner-review` (see "Trust model") |
+| `screen-bridge-issues.sh` | manual | dry run of the screening over past issues (`--days N`), no GitHub writes |
 | `lib/trust.sh` | sourced by `issue-pickup-cron.sh`, `pr-maintenance-cron.sh`, `pr-review-cron.sh`, `pipeline-health-cron.sh` | the trust gate: trusted authors, fork PRs, bridge-filed issues, untrusted comments, the dependabot merge policy, one ntfy per untrusted item (see "Trust model") |
 | `lib/ci-skip.sh` | sourced by `pr-maintenance-cron.sh`, `pipeline-health-cron.sh` | the CI-skip tokens GitHub honours: detect one, strip them from a subject or a body |
 | `lib/pg-backup.sh` | sourced by `backup-dbs.sh`, `restore-test.sh` | the project list (`PG_BACKUP_PROJECTS`), URL → `PG*` env, pg client/server version selection, archive validation |

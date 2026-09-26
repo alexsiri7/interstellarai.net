@@ -44,6 +44,10 @@ source "$SCRIPT_DIR/lib/human-labels.sh"
 # run the thread's comments must be trusted too (trust_comments_ok).
 # shellcheck source=lib/trust.sh
 source "$SCRIPT_DIR/lib/trust.sh"
+# Bridge-filed issues are screened (heuristics + classifier) before any of the
+# phases below may act on them; see lib/screen.sh.
+# shellcheck source=lib/screen.sh
+source "$SCRIPT_DIR/lib/screen.sh"
 
 PROJECTS=("${DEFAULT_PROJECTS[@]}")
 [ $# -gt 0 ] && PROJECTS=("$@")
@@ -75,6 +79,10 @@ ensure_labels() {
   done
   gh label create "$TRUST_APPROVED_LABEL" --repo "alexsiri7/$repo" \
     --color "0e8a16" --description "Owner vetted: the factory may work this bridge-filed issue" 2>/dev/null || true
+  gh label create "$SCREEN_AUTO_LABEL" --repo "alexsiri7/$repo" \
+    --color "c2e0c6" --description "Passed automated screening: the factory may work this bridge-filed issue" 2>/dev/null || true
+  gh label create "$SCREEN_HOLD_LABEL" --repo "alexsiri7/$repo" \
+    --color "d93f0b" --description "Held by the factory for the owner" 2>/dev/null || true
 }
 
 # Returns 0 (blocked) if the issue has at least one open "blocker" — defined
@@ -676,6 +684,7 @@ for PROJECT in "${PROJECTS[@]}"; do
   ensure_labels "$PROJECT"
   dedupe_sentry "$PROJECT"
   settle_parked "$PROJECT"
+  screen_bridge_issues "$PROJECT"
   unstick_stale "$PROJECT"
   auto_queue "$PROJECT"
   promote_unblocked "$PROJECT"
