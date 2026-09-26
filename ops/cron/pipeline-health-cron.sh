@@ -3,7 +3,7 @@
 # Detects and responds to pipeline-bottleneck states:
 #   1. Main CI red (newest push-triggered run of each workflow at main HEAD)
 #      → file issue tagged archon:in-progress + fire archon immediately
-#      (dedup by SHA, by any tracked open "Main CI" issue, and by a 2h per-project cooldown)
+#      (dedup by SHA, by a tracked open "Main CI red" issue it filed, and by a 2h per-project cooldown)
 #  1b. Main HEAD produced zero push workflow runs → ntfy; if its commit message
 #      carries a CI-skip token, also auto-open an empty-commit re-trigger PR
 #      (dedup per SHA, plus a 2h per-project cooldown on opening a PR)
@@ -21,6 +21,9 @@
 #      while work is pending (queued/in-progress issues or actionable PRs):
 #        - If token-limit markers in recent logs → wait, retry next tick
 #        - Else → fire archon-assist diagnostic (dedup: 2h cooldown)
+#  5b. Open archon PRs (non-draft, not CLEAN or BLOCKED) idle >2h → fire
+#      archon-pr-maintenance, trusted authors/comments only; after 3 attempts
+#      on one head SHA, ntfy + file a "factory stuck" issue (dedup by PR + SHA)
 #   6. Open archon PRs with failed CI → fire archon-assist to diagnose + fix
 #      (dedup by PR number, reset when PR merges/closes)
 #  6b. Staging deploy HTTP health → ntfy operator if staging URL returns non-2xx/3xx
@@ -320,17 +323,22 @@ TRACKED_ACTIVE_LABELS='["archon:queued","archon:in-progress","archon:triage-in-p
 
 # ----------------------------------------------------------------------------
 # find_tracked_issue: echo "<number> active|stalled" for the first open issue on
-# $1 whose title matches $2 and which carries a tracked label; nothing if none.
-# Callers split with ${v%% *} / ${v##* }, as check_main_ci already does for
-# sha_attempt_decide. jq runs as a pipeline stage rather than via `gh --jq` so
+# $1 that this script filed — title starting with $2, body carrying the
+# "Auto-filed by `pipeline-health-cron.sh`" line — and which carries a tracked
+# label; nothing if none. Any other archon:* issue that merely mentions the
+# title must not stop a real one being filed (#126). Callers split with
+# ${v%% *} / ${v##* }, as check_main_ci already does for sha_attempt_decide.
+# jq runs as a pipeline stage rather than via `gh --jq` so
 # the predicate stays exercisable against a stubbed gh.
 # ----------------------------------------------------------------------------
 find_tracked_issue() {
-  local repo="$1" title_search="$2"
+  local repo="$1" title="$2"
   gh issue list --repo "$repo" --state open \
-    --search "$title_search in:title" --json number,labels 2>/dev/null \
-    | jq -r --argjson human "$TRACKED_HUMAN_LABELS" --argjson active "$TRACKED_ACTIVE_LABELS" \
-        '[ .[] | select([.labels[].name] | any(startswith("archon:") or IN($human[]))) ]
+    --search "$title in:title" --json number,title,body,labels 2>/dev/null \
+    | jq -r --arg title "$title" --argjson human "$TRACKED_HUMAN_LABELS" --argjson active "$TRACKED_ACTIVE_LABELS" \
+        '[ .[] | select(.title | startswith($title))
+               | select((.body // "") | contains("Auto-filed by `pipeline-health-cron.sh`"))
+               | select([.labels[].name] | any(startswith("archon:") or IN($human[]))) ]
          | .[0] // empty
          | "\(.number) \(if ([.labels[].name] | any(IN($active[]) or IN($human[])))
                           then "active" else "stalled" end)"' \
@@ -410,14 +418,14 @@ check_main_ci() {
   run_id=$(echo "$failed" | jq -r '.databaseId')
   wf_name=$(echo "$failed" | jq -r '.workflowName')
 
-  # Dedup: any open "Main CI" issue with an archon:* state or a human-intent
-  # label means someone already owns this. Relabelling an auto-filed issue
+  # Dedup: an open "Main CI red" issue this script filed, with an archon:*
+  # state or a human-intent label, means someone already owns this. Relabelling an auto-filed issue
   # `human-needed` used to slip past this guard and refile every tick (#75).
   # A `stalled` match (terminal archon state, no human label) means nobody is
   # on it — still don't refile, but say so once, since this guard returns
   # before sha_attempt_decide and so before any "factory stuck" escalation.
   local tracked tracked_num tracked_state
-  tracked=$(find_tracked_issue "alexsiri7/$project" "Main CI")
+  tracked=$(find_tracked_issue "alexsiri7/$project" "Main CI red")
   if [ -n "$tracked" ]; then
     tracked_num="${tracked%% *}"
     tracked_state="${tracked##* }"
@@ -498,7 +506,8 @@ https://github.com/alexsiri7/$project/issues/$tracked_num" \
 
   local issue_body
   # lib/settle-ship-outcome.sh keys on the "Auto-filed by `pipeline-health-cron.sh`"
-  # line to never auto-close this issue; keep it verbatim.
+  # line to never auto-close this issue, and find_tracked_issue to dedup on it;
+  # keep it verbatim.
   issue_body=$(cat <<EOF
 ## Main CI red
 
@@ -1624,22 +1633,23 @@ check_stuck_prs() {
   #   - are not CLEAN (would be merged by Phase 1)
   #   - are not BLOCKED (CI failing, caught by check_pr_ci_retry)
   #   - haven't been updated in >2h
-  local stuck_prs
-  # NOTE: gh rejects `--jq --arg …` ("unknown arguments"), so this listing is
-  # empty and the check has never fired. Left as is here (reviving it would
-  # start archon-pr-maintenance runs); the trust gate below still applies if
-  # it is ever fixed.
-  stuck_prs=$(gh pr list --repo "alexsiri7/$project" --state open \
-    --json number,title,headRefName,headRefOid,isDraft,updatedAt,mergeStateStatus \
-    --jq --arg cutoff "$cutoff_iso" \
+  # gh's --jq takes no --arg, so the cutoff goes to a standalone jq. A failed
+  # listing is logged, never read as "no stuck PRs": that would switch the
+  # check off silently, tick after tick.
+  local open_prs stuck_prs
+  if ! open_prs=$(gh pr list --repo "alexsiri7/$project" --state open \
+      --json number,title,headRefName,headRefOid,isDraft,updatedAt,mergeStateStatus 2>/dev/null) \
+    || ! stuck_prs=$(jq -r --arg cutoff "$cutoff_iso" \
     '[.[] | select(.headRefName | startswith("archon/"))
           | select(.isDraft == false)
           | select(.mergeStateStatus != "CLEAN")
           | select(.mergeStateStatus != "BLOCKED")
           | select(.updatedAt < $cutoff)
           | [(.number|tostring), .headRefOid, .mergeStateStatus, .title]
-          | @tsv] | .[]' \
-    2>/dev/null || echo "")
+          | @tsv] | .[]' <<< "$open_prs" 2>/dev/null); then
+    log "$project: stuck-PR listing failed — skipping"
+    return
+  fi
 
   [ -n "$stuck_prs" ] || return
 
