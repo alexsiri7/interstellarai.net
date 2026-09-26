@@ -267,3 +267,35 @@ STUB
     [ "$status" -eq 1 ]
     [[ "$output" == *"FAIL gh: token can write alexsiri7/Archon"* ]]
 }
+
+@test "gh-probe: fork write access is a WARN only with the owner's ALLOW_ALL_REPOS_TOKEN=1 opt-in" {
+    stub_gh github_pat_abc 422
+    export ARCHON_AS_CONFIG_FILE="$T/config"
+    printf '# opt-ins\nALLOW_ALL_REPOS_TOKEN=1\n' > "$T/config"
+    run "$W" gh-probe
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARN gh: token can write alexsiri7/Archon — owner opted in to an all-repositories token"* ]]
+    [[ "$output" != *"FAIL"* ]]
+    for c in 'ALLOW_ALL_REPOS_TOKEN=0' 'ALLOW_ALL_REPOS_TOKEN=yes' '# ALLOW_ALL_REPOS_TOKEN=1' 'ALLOW_ALL_REPOS_TOKEN=1x'; do
+        printf '%s\n' "$c" > "$T/config"
+        run "$W" gh-probe
+        [ "$status" -eq 1 ] || { echo "accepted: $c"; return 1; }
+        [[ "$output" == *"FAIL gh: token can write alexsiri7/Archon"*"--allow-all-repos-token"* ]]
+    done
+    rm -f "$T/config"
+    run "$W" gh-probe
+    [ "$status" -eq 1 ]
+}
+
+@test "selftest sweep skips exactly Debian's dpkg/apt/alternatives backups in /var/backups" {
+    eval "$(grep -E '^SYSTEM_BACKUPS_RE=' "$W")"
+    for f in dpkg.status.0 dpkg.status.1.gz dpkg.arch.0 dpkg.arch.6.gz dpkg.diversions.0 dpkg.statoverride.3.gz \
+             apt.extended_states.0 apt.extended_states.2.gz alternatives.tar.0 alternatives.tar.1.gz dpkg.status; do
+        [[ "/var/backups/$f" =~ $SYSTEM_BACKUPS_RE ]] || { echo "not skipped: $f"; return 1; }
+    done
+    for f in passwd.bak shadow.bak group.bak gshadow.bak dpkg.status.0/x dpkg.statusx dpkg.status.0.gz.bak \
+             sub/dpkg.status.0 secrets.tar.gz; do
+        ! [[ "/var/backups/$f" =~ $SYSTEM_BACKUPS_RE ]] || { echo "wrongly skipped: $f"; return 1; }
+    done
+    ! [[ "/home/x/var/backups/dpkg.status.0" =~ $SYSTEM_BACKUPS_RE ]]
+}
