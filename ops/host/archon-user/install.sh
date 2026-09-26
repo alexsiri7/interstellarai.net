@@ -6,6 +6,8 @@
 #   ops/host/archon-user/install.sh --dry-run              #    preview step 1 as any user
 #   sudo ops/host/archon-user/install.sh --set-gh-token    # 2. fine-grained PAT for archon (stdin)
 #   sudo ops/host/archon-user/install.sh --set-claude-token# 3. `claude setup-token` output for archon (stdin)
+#   sudo ops/host/archon-user/install.sh --allow-all-repos-token     # owner opt-in: the PAT may reach
+#   sudo ops/host/archon-user/install.sh --no-allow-all-repos-token  #   every repo (Archon fork: WARN, not FAIL)
 #   sudo ops/host/archon-user/install.sh --drain           # 4. stop new launches, let runs finish
 #   sudo ops/host/archon-user/install.sh --cutover [--force]  # 5. switch (refuses while runs are live)
 #   sudo ops/host/archon-user/install.sh --rollback        #    one-step way back to running as asiri
@@ -29,8 +31,15 @@
 #      checked, rolled back on failure), /etc/systemd/system/archon-serve.service
 #      (installed, not enabled)
 #
+# Owner opt-ins live in /etc/archon-user/config (root 0644, KEY=VALUE, read as
+# data by the wrapper; archon can read it, not write it):
+#   ALLOW_ALL_REPOS_TOKEN=1   archon's PAT has "All repositories" on purpose, so
+#                             write access to the Archon fork is a WARN in
+#                             gh-probe (verify.sh, --set-gh-token, --cutover)
+#
 # Test hook (ops/cron/tests/archon-user-install.bats): ARCHON_USER_INSTALL_SANDBOX=<dir>
-# runs step 7's sudoers logic against <dir> with a stubbed visudo, as any user.
+# runs step 7's sudoers logic (or, with --[no-]allow-all-repos-token, the config
+# write to <dir>/etc-archon-user/config) against <dir> with a stubbed visudo, as any user.
 
 set -uo pipefail
 
@@ -46,8 +55,9 @@ UNIT=archon-serve.service
 UNIT_DST=/etc/systemd/system/$UNIT
 WRAPPER_DST=/usr/local/bin/archon-as-archon
 LIBDIR=/usr/local/lib/archon-user
-ETC=/etc/archon-user
 SANDBOX="${ARCHON_USER_INSTALL_SANDBOX:-}"
+ETC="${SANDBOX:+$SANDBOX/etc-archon-user}"; ETC="${ETC:-/etc/archon-user}"
+CONFIG="$ETC/config"
 SUDOERS_D="${SANDBOX:+$SANDBOX/sudoers.d}"; SUDOERS_D="${SUDOERS_D:-/etc/sudoers.d}"
 SUDOERS_DST="$SUDOERS_D/archon-user"
 HEALTH_URL=http://127.0.0.1:3090/
@@ -69,11 +79,13 @@ for a in "$@"; do
         --force) FORCE=1 ;;
         --set-gh-token) MODE=gh-token ;;
         --set-claude-token) MODE=claude-token ;;
+        --allow-all-repos-token) MODE=allow-all-repos ;;
+        --no-allow-all-repos-token) MODE=no-allow-all-repos ;;
         --drain) MODE=drain ;;
         --cutover) MODE=cutover ;;
         --rollback) MODE=rollback ;;
         --status) MODE=status ;;
-        -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
         *) echo "unknown argument: $a (see --help)" >&2; exit 2 ;;
     esac
 done
@@ -90,7 +102,9 @@ fi
 MIN_ROOT_MB="${ARCHON_USER_MIN_ROOT_MB:-500}"
 MIN_BASE_MB="${ARCHON_USER_MIN_BASE_MB:-20000}"
 free_mb() { df -Pm "$1" 2>/dev/null | awk 'NR == 2 { print $4 }'; }
-if [ "$DRY" -eq 0 ] && [ "$MODE" != status ] && [ -z "$SANDBOX" ]; then
+# (The opt-in modes write one small file with mktemp + mv: nothing to gate.)
+if [ "$DRY" -eq 0 ] && [ "$MODE" != status ] && [ "$MODE" != allow-all-repos ] && [ "$MODE" != no-allow-all-repos ] \
+        && [ -z "$SANDBOX" ]; then
     r=$(free_mb /); r=${r:-0}
     if [ "$r" -lt "$MIN_ROOT_MB" ]; then
         echo "refusing: only ${r} MB free on / (need ${MIN_ROOT_MB}) — this writes /etc/passwd, /etc/fstab, sudoers and the crontab there. Free space first (ops/cron/pipeline-health-cron.sh --trim, old dirs in /tmp)." >&2
@@ -180,6 +194,37 @@ install_sudoers() {
         fail sudoers "combined sudoers failed visudo -c after install — $SUDOERS_DST removed"
     fi
 }
+
+# ---------------------------------------------------------------- config ----
+# set_config <KEY> <VALUE|""> — set (or with "" remove) one KEY=VALUE line in
+# $CONFIG, keeping every other line. root:root 0644: the wrapper reads it as archon.
+set_config() {
+    local key="$1" val="$2" cur="" new own=root:root
+    [ -n "$SANDBOX" ] && own="$(id -un):$(id -gn)"
+    [ -r "$CONFIG" ] && cur=$(grep -vE "^[[:space:]]*$key=" "$CONFIG")
+    [ -n "$cur" ] || cur="# Owner opt-ins for the archon user — written by ops/host/archon-user/install.sh, read as data (never sourced).
+# See ops/host/archon-user/README.md."
+    new="$cur"$'\n'
+    [ -n "$val" ] && new="$new$key=$val"$'\n'
+    run install -d -m 0755 -o "${own%%:*}" -g "${own##*:}" "$ETC"
+    write_file "$CONFIG" 0644 "$own" "$new"
+}
+config_get() { sed -nE "s/^[[:space:]]*$1=([^[:space:]#]*).*/\1/p" "$CONFIG" 2>/dev/null | tail -n 1; }
+
+if [ "$MODE" = allow-all-repos ] || [ "$MODE" = no-allow-all-repos ]; then
+    if [ "$MODE" = allow-all-repos ]; then
+        say "owner opt-in: archon's GitHub token may have access to all repositories"
+        set_config ALLOW_ALL_REPOS_TOKEN 1 || { fail config "could not write $CONFIG"; finish; }
+        done_ "ALLOW_ALL_REPOS_TOKEN=1 in $CONFIG: write access to alexsiri7/Archon is now a WARN in verify.sh, --set-gh-token and --cutover"
+        done_ "risk accepted: a hijacked agent could push to the Archon fork (archon-update builds from upstream release tags, not the fork's branches)"
+    else
+        say "owner opt-out: archon's GitHub token must not reach the Archon fork"
+        set_config ALLOW_ALL_REPOS_TOKEN "" || { fail config "could not write $CONFIG"; finish; }
+        done_ "ALLOW_ALL_REPOS_TOKEN removed from $CONFIG: write access to the Archon fork FAILs again"
+    fi
+    finish
+fi
+
 if [ -n "$SANDBOX" ]; then   # test hook: the sudoers step only
     install_sudoers; finish
 fi
@@ -194,6 +239,7 @@ if [ "$MODE" = status ]; then
     echo "owner unit:    $(systemctl --user -M "$OWNER@" is-enabled "$UNIT" 2>/dev/null || true) / $(systemctl --user -M "$OWNER@" is-active "$UNIT" 2>/dev/null || true)"
     echo "server:        $(curl -s -o /dev/null --max-time 5 -w '%{http_code}' "$HEALTH_URL" 2>/dev/null || echo down) on $HEALTH_URL"
     echo "archon link:   $LINK -> $(readlink "$LINK" 2>/dev/null || echo '?')"
+    echo "opt-ins:       ALLOW_ALL_REPOS_TOKEN=$(config_get ALLOW_ALL_REPOS_TOKEN || true) ($CONFIG; empty = not opted in)"
     exit 0
 fi
 
@@ -291,8 +337,10 @@ if [ "$MODE" = cutover ]; then
     done
     [ "$ok" -eq 1 ] || finish
     if [ "$DRY" -eq 0 ]; then
-        if out=$(runuser -u "$ARCHON_USER" -- "$WRAPPER_DST" gh-probe 2>&1); then done_ "gh: $(grep -c '^PASS' <<<"$out") checks pass"
-        else printf '%s\n' "$out" | sed 's/^/        | /'; fail preflight "archon's GitHub token is not right — README step (b)"; finish; fi
+        if out=$(runuser -u "$ARCHON_USER" -- "$WRAPPER_DST" gh-probe 2>&1); then
+            done_ "gh: $(grep -c '^PASS' <<<"$out") checks pass"
+            grep '^WARN' <<<"$out" | sed 's/^/    /' || true
+        else printf '%s\n' "$out" | sed 's/^/        | /'; fail preflight "archon's GitHub token is not right — README steps (a) and (c)"; finish; fi
     fi
 
     say "drain check (runs as $OWNER must be finished: their records stay in $OWNER_HOME/.archon)"
@@ -579,7 +627,10 @@ fi
 
 # ------------------------------------------------------------ summary -------
 say "next"
-done_ "(a) GitHub: create the fine-grained PAT (README step a), then: sudo $0 --set-gh-token"
-done_ "(b) Claude: claude setup-token   then: sudo $0 --set-claude-token"
-done_ "(c) sudo $0 --drain   … wait for runs to finish …   sudo $0 --cutover"
+done_ "log out and in again (or: newgrp archon) so $OWNER's shell picks up group $ARCHON_USER"
+done_ "(a)+(c) GitHub: create the fine-grained PAT (README step a), then: sudo $0 --set-gh-token"
+done_ "        an all-repositories PAT on purpose? sudo $0 --allow-all-repos-token"
+done_ "(c) Claude: claude setup-token (a normal terminal, not inside Claude Code)   then: sudo $0 --set-claude-token"
+done_ "    ops/host/archon-user/verify.sh --live"
+done_ "(d) sudo $0 --drain   … wait for runs to finish …   sudo $0 --cutover"
 finish

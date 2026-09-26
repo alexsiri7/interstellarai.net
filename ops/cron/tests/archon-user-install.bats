@@ -98,3 +98,35 @@ STUB
     run shellcheck -x -P SCRIPTDIR "$D/archon-as-archon" "$D/install.sh" "$D/verify.sh"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
+
+@test "--allow-all-repos-token writes the opt-in (0644), idempotently; --no-allow-all-repos-token removes it" {
+    ARCHON_USER_INSTALL_SANDBOX="$T" run "$D/install.sh" --allow-all-repos-token
+    [ "$status" -eq 0 ]
+    grep -qx 'ALLOW_ALL_REPOS_TOKEN=1' "$T/etc-archon-user/config"
+    [ "$(stat -c %a "$T/etc-archon-user/config")" = 644 ]
+    ARCHON_USER_INSTALL_SANDBOX="$T" run "$D/install.sh" --allow-all-repos-token
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"already done"* ]]
+    [ "$(grep -c ALLOW_ALL_REPOS_TOKEN "$T/etc-archon-user/config")" -eq 1 ]
+    ARCHON_USER_INSTALL_SANDBOX="$T" run "$D/install.sh" --no-allow-all-repos-token
+    [ "$status" -eq 0 ]
+    ! grep -q '^ALLOW_ALL_REPOS_TOKEN' "$T/etc-archon-user/config"
+    [ ! -e "$T/sudoers.d/archon-user" ]    # the opt-in modes never touch sudoers
+}
+
+@test "--allow-all-repos-token needs root unless --dry-run, which prints the config" {
+    [ "$(id -u)" -ne 0 ] || skip "running as root"
+    run "$D/install.sh" --allow-all-repos-token
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"run as root"* ]]
+    run "$D/install.sh" --allow-all-repos-token --dry-run
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"would write /etc/archon-user/config"* ]]
+    [[ "$output" == *"| ALLOW_ALL_REPOS_TOKEN=1"* ]]
+}
+
+@test "verify.sh probes sudoers with cached credentials ignored (sudo -k)" {
+    grep -q 'sudo -k -n -u archon /bin/true' "$D/verify.sh"
+    grep -q 'sudo -k -n -u archon "$WRAPPER" --version' "$D/verify.sh"
+    ! grep -qE 'sudo -n -u archon /bin/true' "$D/verify.sh"
+}

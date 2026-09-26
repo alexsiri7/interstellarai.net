@@ -50,6 +50,9 @@ set -euo pipefail
 ARCHON_USER=archon
 ARCHON_HOME_DIR=/mnt/ext-fast/archon-home
 PROJECTS_FILE=/etc/archon-user/projects
+# Owner opt-ins (root-owned, written by install.sh, read here as data): archon
+# can read it, never write it, so an agent cannot opt itself in.
+CONFIG_FILE=/etc/archon-user/config
 OWNER_BASE=/mnt/ext-fast
 ARCHON_BIN=/usr/local/lib/archon-user/bin/archon     # symlink -> <archon checkout>/packages/cli/src/cli.ts
 GH_OWNER=alexsiri7
@@ -59,6 +62,7 @@ if [ "${ARCHON_AS_TEST:-}" = 1 ] && [ -z "${SUDO_USER:-}" ]; then
     ARCHON_USER="${ARCHON_AS_USER:-$(id -un)}"
     ARCHON_HOME_DIR="${ARCHON_AS_HOME:-$ARCHON_HOME_DIR}"
     PROJECTS_FILE="${ARCHON_AS_PROJECTS_FILE:-$PROJECTS_FILE}"
+    CONFIG_FILE="${ARCHON_AS_CONFIG_FILE:-$CONFIG_FILE}"
     OWNER_BASE="${ARCHON_AS_OWNER_BASE:-$OWNER_BASE}"
     ARCHON_BIN="${ARCHON_AS_ARCHON_BIN:-$ARCHON_BIN}"
     DRY_EXEC="${ARCHON_AS_DRY_EXEC:-0}"
@@ -66,6 +70,18 @@ fi
 
 REPOS_DIR="$ARCHON_HOME_DIR/repos"
 CLAUDE_TOKEN_ENV="$ARCHON_HOME_DIR/.config/archon-user/claude.env"
+
+# Debian's daily dpkg/apt/alternatives backups in /var/backups: world-readable
+# by design on every Ubuntu host and only package lists, so the selftest sweep
+# skips exactly these names (direct children, regular files). Anything else
+# there (passwd/group/shadow backups, ...) is still flagged.
+SYSTEM_BACKUPS_RE='^/var/backups/(dpkg\.(status|arch|diversions|statoverride)|apt\.extended_states|alternatives\.tar)(\.[0-9]+)?(\.gz)?$'
+
+# config_opt_in <NAME> — true when $CONFIG_FILE has exactly NAME=1.
+config_opt_in() {
+    [ -r "$CONFIG_FILE" ] || return 1
+    [ "$(sed -nE "s/^[[:space:]]*$1=([^[:space:]#]*)[[:space:]]*(#.*)?\$/\\1/p" "$CONFIG_FILE" | tail -n 1)" = 1 ]
+}
 
 die()  { printf 'archon-as-archon: %s\n' "$2" >&2; exit "$1"; }
 refuse() { die 64 "refused: $*"; }
@@ -351,12 +367,18 @@ verb_gh_probe() {
         if [ "$st" = 422 ]; then echo "PASS gh: token can write $GH_OWNER/$p"
         else echo "FAIL gh: token cannot write $GH_OWNER/$p (write probe answered ${st:-nothing}; want 422)"; rc=1; fi
     done
-    # Repos outside the factory must stay out of the token (Archon: the fork
-    # archon-update.sh builds and tests as asiri).
+    # Repos outside the factory should stay out of the token (Archon: the fork
+    # archon-update.sh pushes its upstream-sync branches to). The owner may opt
+    # in to an all-repositories token (install.sh --allow-all-repos-token):
+    # then this is a WARN, not a FAIL.
     st=$(write_status "$GH_OWNER/Archon")
     case "$st" in
         403|404) echo "PASS gh: token cannot write $GH_OWNER/Archon ($st)" ;;
-        422) echo "FAIL gh: token can write $GH_OWNER/Archon — remove it from the PAT"; rc=1 ;;
+        422) if config_opt_in ALLOW_ALL_REPOS_TOKEN; then
+                 echo "WARN gh: token can write $GH_OWNER/Archon — owner opted in to an all-repositories token (ALLOW_ALL_REPOS_TOKEN=1 in $CONFIG_FILE); a hijacked agent could push to the Archon fork — weekly archon-update builds from upstream release tags, not the fork's branches"
+             else
+                 echo "FAIL gh: token can write $GH_OWNER/Archon — remove it from the PAT, or opt in: sudo ops/host/archon-user/install.sh --allow-all-repos-token"; rc=1
+             fi ;;
         *) echo "WARN gh: write probe on $GH_OWNER/Archon answered ${st:-nothing}" ;;
     esac
     return "$rc"
@@ -457,12 +479,13 @@ verb_selftest() {
         while IFS= read -r entry; do
             [[ "$entry" =~ $allow_re ]] && continue
             [ "$entry" = "$top" ] && continue
+            [[ "$entry" =~ $SYSTEM_BACKUPS_RE ]] && [ -f "$entry" ] && [ ! -L "$entry" ] && continue
             case "$entry" in /mnt|"$OWNER_BASE") continue ;; esac   # parents of allowed trees
             fail "readable outside the allowlist: $entry"; n=$((n + 1))
             [ "$n" -ge 40 ] && { warn "sweep stopped after 40 hits"; break 2; }
         done < <(find "$top" -maxdepth 2 -mindepth 0 \( -type d -readable -o -type f -readable \) 2>/dev/null | sort)
     done
-    [ "$n" -eq 0 ] && pass "sweep: nothing readable under /home /mnt /media /srv /var/backups outside the allowlist"
+    [ "$n" -eq 0 ] && pass "sweep: nothing readable under /home /mnt /media /srv /var/backups outside the allowlist (Debian's dpkg/apt/alternatives backups excepted)"
     n=0
     while IFS= read -r entry; do
         warn "readable in /tmp (owned by $(stat -c %U "$entry" 2>/dev/null)): $entry"; n=$((n + 1))

@@ -18,7 +18,8 @@
 #      /tmp leftovers (WARN), write boundaries, process environments free of
 #      secrets, toolchains, no claude.ai connectors
 #   4. credentials: a real Claude request as archon; gh token fine-grained with
-#      push to every factory repo and none to the Archon fork
+#      push to every factory repo and none to the Archon fork (WARN instead of
+#      FAIL when the owner opted in: install.sh --allow-all-repos-token)
 #   5. factory path: archon doctor; the cron's own `archon` (lib/run-as.sh +
 #      shim) lists runs from archon's DB; a --dry-run of archon-assist through
 #      the wrapper (no provider call); with --live a real one-line run
@@ -30,22 +31,25 @@ WRAPPER=/usr/local/bin/archon-as-archon
 UNIT=archon-serve.service
 BASE=/mnt/ext-fast
 LIVE=0
-case "${1:-}" in --live) LIVE=1 ;; "") ;; -h|--help) sed -n '2,26p' "$0"; exit 0 ;; *) echo "usage: $0 [--live]" >&2; exit 2 ;; esac
+case "${1:-}" in --live) LIVE=1 ;; "") ;; -h|--help) sed -n '2,25p' "$0"; exit 0 ;; *) echo "usage: $0 [--live]" >&2; exit 2 ;; esac
 
 FAILS=0 WARNS=0
 pass() { echo "PASS $*"; }
 fail() { echo "FAIL $*"; FAILS=$((FAILS + 1)); }
 warn() { echo "WARN $*"; WARNS=$((WARNS + 1)); }
 wr()   { sudo -n -u archon "$WRAPPER" "$@"; }
+# The sudoers probes pass -k: with a command, sudo then ignores the caller's
+# cached credentials (a recent `sudo` in this terminal) for that one call,
+# without clearing them, so only a NOPASSWD rule can make them succeed.
 
 # shellcheck source=../../cron/lib/run-as.sh
 source "$REPO_DIR/ops/cron/lib/run-as.sh"
 MODE="$ARCHON_RUN_AS"
-cut() { [ "$MODE" = archon ]; }
-cutcheck() { if cut; then fail "$@"; else warn "$* (not cut over yet)"; fi; }
+is_cut() { [ "$MODE" = archon ]; }
+cutcheck() { if is_cut; then fail "$@"; else warn "$* (not cut over yet)"; fi; }
 
 echo "== 1. host (ARCHON_RUN_AS=$MODE)"
-if cut; then pass "flag: ARCHON_RUN_AS=archon"; else warn "flag: ARCHON_RUN_AS=$MODE (not cut over yet)"; fi
+if is_cut; then pass "flag: ARCHON_RUN_AS=archon"; else warn "flag: ARCHON_RUN_AS=$MODE (not cut over yet)"; fi
 if systemctl is-active -q "$UNIT"; then
     pid=$(systemctl show -p MainPID --value "$UNIT"); u=$(ps -o user= -p "$pid" 2>/dev/null | tr -d ' ')
     if [ "$u" = archon ]; then pass "system $UNIT active, main pid $pid runs as archon"; else fail "system $UNIT main pid $pid runs as '${u:-?}'"; fi
@@ -61,9 +65,11 @@ if [ "$link" = "$REPO_DIR/ops/cron/lib/archon-shim/archon" ]; then pass "$HOME/.
 else cutcheck "$HOME/.bun/bin/archon -> ${link:-?} (manual 'archon' runs would start a stale factory as asiri)"; fi
 if crontab -l 2>/dev/null | grep -q 'ops/cron/ops-self-update.sh'; then pass "crontab self-update goes through ops-self-update.sh"
 else cutcheck "crontab self-update is still a bare git pull (ops/** changes would reach cron unreviewed)"; fi
-if sudo -n -u archon "$WRAPPER" --version >/dev/null 2>&1; then pass "sudoers: asiri may run the wrapper as archon"
-else fail "sudo -n -u archon $WRAPPER --version failed (sudoers/wrapper not installed?)"; fi
-if sudo -n -u archon /bin/true 2>/dev/null; then fail "sudoers lets asiri run arbitrary commands as archon"; else pass "sudoers: nothing else as archon"; fi
+if sudo -k -n -u archon "$WRAPPER" --version >/dev/null 2>&1; then pass "sudoers: asiri may run the wrapper as archon"
+else fail "sudo -k -n -u archon $WRAPPER --version failed (sudoers/wrapper not installed?)"; fi
+if out=$(sudo -k -n -u archon /bin/true 2>&1); then fail "sudoers lets asiri run arbitrary commands as archon without a password"
+elif grep -qi 'password is required' <<<"$out"; then pass "sudoers: nothing else as archon without a password"
+else warn "sudo -k -n -u archon /bin/true: unexpected answer: ${out%%$'\n'*}"; fi
 
 echo "== 2. owner side"
 mode_ok() {  # mode_ok <path> <max-octal-mask-of-forbidden-bits> <label>
@@ -78,7 +84,7 @@ done
 for f in .config/archon-cron/secrets.env .config/archon-cron/consolidated-db.env .railway/config.json .claude/.credentials.json .archon/credential-key; do
     mode_ok "$HOME/$f" 077 "private file:"
 done
-if id -nG | tr ' ' '\n' | grep -qx archon; then pass "asiri is in group archon (reads factory logs)"; else warn "asiri not (yet) in group archon — log in again after install.sh"; fi
+if id -nG | tr ' ' '\n' | grep -qx archon; then pass "asiri is in group archon (reads factory logs)"; else warn "asiri not (yet) in group archon — log out and in again (or run: newgrp archon) after install.sh"; fi
 if git config --global --get-all safe.directory 2>/dev/null | grep -qx '\*'; then
     warn "$HOME/.gitconfig has safe.directory = * — git as asiri would honour a repo config archon wrote; remove it (git config --global --unset-all safe.directory '\\*') and never run git as asiri in $BASE/archon-home"
 else pass "no safe.directory = * for asiri"; fi
@@ -96,7 +102,8 @@ if out=$(wr claude-probe 90 2>&1); then pass "claude as archon: $(tail -n 1 <<<"
 else fail "claude as archon: $(tail -n 1 <<<"$out" | cut -c1-160) — install.sh --set-claude-token"; fi
 out=$(wr gh-probe 2>&1); rc=$?
 printf '%s\n' "$out" | sed 's/^/    /'
-if [ "$rc" -eq 0 ]; then pass "gh token for archon"; else fail "gh token for archon (see above) — README step (a)"; fi
+WARNS=$((WARNS + $(grep -c '^WARN' <<<"$out")))
+if [ "$rc" -eq 0 ]; then pass "gh token for archon"; else fail "gh token for archon (see above) — README steps (a) and (c)"; fi
 
 echo "== 5. factory path"
 if out=$(wr doctor 2>&1); then pass "archon doctor"; else warn "archon doctor: $(tail -n 3 <<<"$out" | tr '\n' ' ' | cut -c1-200)"; fi

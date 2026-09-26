@@ -32,20 +32,47 @@ can be done while the factory runs; they change nothing it uses.
 
 ### (a) Create the GitHub token for archon (fine-grained PAT)
 
-GitHub → Settings → Developer settings → Personal access tokens → **Fine-grained tokens**
-→ Generate new token:
+archon gets its own GitHub token, not a copy of yours. To create it:
 
-| Field | Value |
-|---|---|
-| Token name | `archon-factory@interstellar` |
-| Expiration | 1 year. Put a reminder in your calendar; `verify.sh` fails once it expires. |
-| Resource owner | `alexsiri7` |
-| Repository access | **Only select repositories**: `un-reminder`, `cosmic-match`, `word-coach-annie`, `filmduel`, `reli`, `kindred`, `lachesis`, `interstellarai.net`, `musenmingle`. This is the list in `ops/cron/archon-projects.txt`. **Not `Archon`**: `archon-update.sh` builds and tests that fork as asiri. |
-| Repository permissions | **Contents: Read and write** · **Pull requests: Read and write** · **Issues: Read and write** · Actions: Read-only · Checks: Read-only · Commit statuses: Read-only · Metadata: Read-only (mandatory) |
-| Workflows | **No access** (see "Decisions" below) |
-| Account permissions | none |
+1. Signed in to GitHub as `alexsiri7`, open
+   <https://github.com/settings/personal-access-tokens/new>. (The long way: your avatar →
+   Settings → Developer settings → Personal access tokens → **Fine-grained tokens** →
+   **Generate new token**.)
+2. Fill in the form:
 
-Copy the `github_pat_…` value; it is shown only once.
+   | Field | Value |
+   |---|---|
+   | Token name | `archon-factory@interstellar` |
+   | Expiration | 1 year. Put a reminder in your calendar; `verify.sh` fails once it expires. |
+   | Resource owner | `alexsiri7` |
+   | Repository access | **Only select repositories**: `un-reminder`, `cosmic-match`, `word-coach-annie`, `filmduel`, `reli`, `kindred`, `lachesis`, `interstellarai.net`, `musenmingle`. This is the list in `ops/cron/archon-projects.txt`. **Not `Archon`**: `archon-update.sh` pushes its upstream-sync branches to that fork. Alternatively **All repositories**, so new projects need no token edit; then opt in, see "An all-repositories token" below. |
+   | Permissions → Repository permissions | **Contents: Read and write** · **Pull requests: Read and write** · **Issues: Read and write** · Actions: Read-only · Checks: Read-only · Commit statuses: Read-only · Metadata: Read-only (mandatory, preselected) · everything else: No access |
+   | Workflows (a repository permission) | **No access** (see "Decisions" below) |
+   | Permissions → Account permissions | none |
+
+3. Click **Generate token**. The page shows the token once, starting `github_pat_`.
+   Copy it and keep the tab open until step (c) has accepted it. The token is not stored
+   anywhere else, and a lost one is simply regenerated (the token's page → **Regenerate token**).
+
+#### An all-repositories token (owner opt-in)
+
+With **All repositories** the token can also write `alexsiri7/Archon`, and `verify.sh`,
+`--set-gh-token` and `--cutover` then FAIL by default. If that is deliberate (so new
+repos need no token edit), record the decision once:
+
+```bash
+sudo ops/host/archon-user/install.sh --allow-all-repos-token      # writes ALLOW_ALL_REPOS_TOKEN=1 to /etc/archon-user/config
+sudo ops/host/archon-user/install.sh --no-allow-all-repos-token   # undo: the fork check FAILs again
+```
+
+The check then reports WARN: "owner opted in to an all-repositories token; a hijacked
+agent could push to the Archon fork". What that costs: `archon-update.sh` merges the
+upstream release tag into the live checkout locally and only *pushes* to the fork; it
+never builds or pulls the fork's branches. So a push there does not reach this host by
+itself. It could still vandalise the fork, or pre-create the next `upstream-sync-<version>`
+branch so that the weekly update refuses to push and stops. Do not pull or check out the
+fork's branches without reading them. The file is root-owned; archon can read it, not
+change it.
 
 ### (b) Prepare (idempotent, safe while the factory runs)
 
@@ -61,17 +88,42 @@ The unit is installed but not started. It prints `already done` for anything alr
 place. Re-run it after adding a project or a top-level directory under `/mnt/ext-fast`,
 or to resync the toolchains.
 
+It adds asiri to group `archon`, so asiri can read the factory's logs. Your running
+shells do not see the new group until you log out and back in, or run `newgrp archon` in
+the shell you run `verify.sh` from. Until then `verify.sh` warns "asiri not (yet) in
+group archon".
+
 If step 4 says `/mnt/steam-slow busy`, remount it when no backup is running
 (`sudo umount /mnt/steam-slow && sudo mount /mnt/steam-slow`) or reboot. `--cutover`
 refuses while the DB backups there are world-readable.
 
 ### (c) Credentials
 
+**GitHub.** Run the command below, then paste the `github_pat_…` from (a) at the `token:`
+prompt and press Enter. Nothing is echoed while you paste. It logs archon's `gh` in with
+the token and runs gh-probe, which should print PASS for every factory repo:
+
 ```bash
-sudo ops/host/archon-user/install.sh --set-gh-token      # paste the github_pat_… from (a); runs gh-probe
-claude setup-token                                        # as asiri, in a browser-capable terminal; prints sk-ant-oat…
-sudo ops/host/archon-user/install.sh --set-claude-token  # paste it; runs one real probe as archon
+sudo ops/host/archon-user/install.sh --set-gh-token
 ```
+
+**Claude.** First create a token for archon, then hand it over:
+
+1. In a normal terminal, as asiri, run `claude setup-token`. Do not run it inside a Claude
+   Code session (the `!` prefix or an agent's shell): it needs an interactive terminal and
+   a browser.
+2. It opens a browser (or prints a URL to open). Sign in with the Claude account the
+   factory should bill to and approve.
+3. Back in the terminal it prints a long token starting `sk-ant-oat01-`. Copy all of it;
+   it is shown once. It is not saved for asiri, and running `setup-token` again simply makes
+   a new one.
+4. Run the command below, paste the token at the `token:` prompt and press Enter (not
+   echoed). It writes `/mnt/ext-fast/archon-home/.config/archon-user/claude.env` (0600,
+   archon's) and runs one real `claude -p` request as archon:
+
+   ```bash
+   sudo ops/host/archon-user/install.sh --set-claude-token
+   ```
 
 `claude setup-token` prints a one-year token that can only make model requests. It
 cannot fetch the account's claude.ai connectors (Drive, mail), so none of them reach a
@@ -135,18 +187,18 @@ tail -f ~/.local/state/archon-cron/logs/issue-pickup.log
 
 `verify.sh` checks the following:
 
-- **Host.** The flag. The server unit runs as archon, asiri's unit is stopped, the server answers 200. The shim link and the crontab line. sudo lets asiri run the wrapper as archon and nothing else.
+- **Host.** The flag. The server unit runs as archon, asiri's unit is stopped, the server answers 200. The shim link and the crontab line. sudo lets asiri run the wrapper as archon and nothing else without a password. The probes use `sudo -k`, which ignores a cached `sudo` password for that call, so a recent `sudo` in the same terminal cannot make them pass or fail.
 - **Owner side.** The modes of the home, the secret dirs and the secret files. asiri is in group `archon`. A warning for `safe.directory = *`.
 - **Archon side** (`archon-as-archon selftest`, run as archon):
   - archon is in no extra groups and has no sudo.
   - Every named secret path is unreachable, e.g. `secrets.env`, `consolidated-db.env`, `~/.config/{personal-ops,gh,opencode,rclone}`, `~/.railway`, `~/.ssh`, `~/.claude*`, `~/.archon`, `~/backups`, `/mnt/nas`, the NAS mirror, `personal-ops`, `archon-playground/security`, `/mnt/steam-slow/backups`, `/etc/shadow`.
-  - A sweep of `/home /mnt /media /srv /var/backups`, plus every top-level entry of the mounts (archon cannot list them itself), finds nothing readable outside the allowlist.
+  - A sweep of `/home /mnt /media /srv /var/backups`, plus every top-level entry of the mounts (archon cannot list them itself), finds nothing readable outside the allowlist. Debian's own backups in `/var/backups` are skipped by exact name: `dpkg.status*`, `dpkg.arch*`, `dpkg.diversions*`, `dpkg.statoverride*`, `apt.extended_states*`, `alternatives.tar*`. They are world-readable on every Ubuntu host and hold package lists. Anything else there, such as `passwd`/`group`/`shadow` backups, is still flagged. None existed on 2026-09-26.
   - Leftovers in `/tmp` are listed as WARN.
   - archon can write its own tree but not the engine or the owner's clones.
   - The environment of every archon process is free of secret-looking variables.
   - All toolchains are present.
   - There are no claude.ai connectors.
-- **Credentials.** A real Claude request as archon. The gh token is a fine-grained PAT (`github_pat_`). A write probe, creating a ref at the all-zero sha, which can never succeed, answers 422 on every factory repo and 403/404 on the Archon fork. That measures the token's grant; `.permissions.push` would only show the owner's role.
+- **Credentials.** A real Claude request as archon. The gh token is a fine-grained PAT (`github_pat_`). A write probe, creating a ref at the all-zero sha, which can never succeed, answers 422 on every factory repo and 403/404 on the Archon fork. That measures the token's grant; `.permissions.push` would only show the owner's role. A 422 on the fork is a FAIL, or a WARN after `install.sh --allow-all-repos-token` (see (a)).
 - **Factory path.** `archon doctor`. The cron's own `archon` (shim → wrapper) lists runs from archon's DB. A `--dry-run` of `archon-assist` through the wrapper works (no provider call). With `--live`, one real run.
 
 ### (f) Roll back (one step)
@@ -178,7 +230,7 @@ Removing it entirely:
 - **Global workflow overrides** live in `/mnt/ext-fast/archon-home/.archon/workflows/`. They are owned by asiri, readable by archon and not writable by it. `~/.archon/workflows` is no longer read.
 - **Adding a project.**
   1. Add it to `ops/cron/archon-projects.txt`.
-  2. Add the repo to the PAT (GitHub → the token → Edit).
+  2. Add the repo to the PAT (GitHub → the token → Edit). Not needed with an all-repositories token.
   3. Run `sudo ops/host/archon-user/install.sh` (rewrites `/etc/archon-user/projects`, the list the wrapper accepts).
   4. The wrapper clones it on first use.
 - **Toolchains.** Toolchains are copies, owned by archon, so the factory cannot alter the owner's. Claude updates itself as archon, and bun is upgraded for both users by `tool-freshness.sh --apply`. Everything else (gh, JDK, Android SDK, rustup, Flutter, Playwright, uv): re-run `sudo ops/host/archon-user/install.sh` after upgrading the owner's copy.
@@ -236,7 +288,14 @@ These were grepped for `secrets.env|railway|psql|SUPABASE|CLOUDFLARE|wrangler|DA
 
 - **The factory token can merge and push to every factory repo.** That is what the factory is for, and a merge there deploys to prod through CI. Branch protection, required checks and the trust gate (`lib/trust.sh`) remain the controls.
 - **Network egress is open.** archon can send out what it can read: its repos, its own two tokens.
-- **Leftovers in `/tmp`.** World-readable files other users leave there are readable (WARN in `verify.sh`). asiri's umask is 002; `umask 027` in `~/.profile` would stop new ones.
+- **Leftovers in `/tmp`.** World-readable files other users leave there are readable (WARN in `verify.sh`, which lists the first 20). asiri's umask is 002; `umask 027` in `~/.profile` would stop new ones. pipeline-health's `/tmp` autoclean does not tidy them: it removes only known build-artifact names and asiri's *directories* idle for 3 days, never regular files (the crons keep state files such as `/tmp/.archon-active-runs.*` there). To shut archon out of the ones already there without deleting anything, run as asiri:
+
+  ```bash
+  find /tmp -mindepth 1 -maxdepth 1 -user "$USER" ! -type l -perm /o=rwx -exec chmod -R o-rwx {} +
+  ```
+
+  Delete what you no longer need by hand.
+- **An all-repositories token** (only after `install.sh --allow-all-repos-token`). It can write `alexsiri7/Archon` and any repo you create later. See (a).
 - **New directories under `/mnt/ext-fast` are world-readable by default.** Re-run `install.sh` after creating one. `verify.sh`'s sweep flags any it can read.
 - **Process arguments are visible** to all users (`/proc` has no `hidepid`). No cron passes a secret on a command line (`lib/pg-backup.sh` uses the `PG*` environment).
 - **A local kernel exploit** is out of scope. `no_new_privs` removes setuid binaries as a route; this is not a VM.
@@ -245,7 +304,7 @@ These were grepped for `secrets.env|railway|psql|SUPABASE|CLOUDFLARE|wrangler|DA
 
 | File | Installed as | Purpose |
 |---|---|---|
-| `install.sh` | — | prepare / `--set-gh-token` / `--set-claude-token` / `--drain` / `--cutover` / `--rollback` / `--status` / `--dry-run` |
+| `install.sh` | — | prepare / `--set-gh-token` / `--set-claude-token` / `--[no-]allow-all-repos-token` / `--drain` / `--cutover` / `--rollback` / `--status` / `--dry-run` |
 | `archon-as-archon` | `/usr/local/bin/archon-as-archon` (root 0755) | the wrapper |
 | `sudoers-archon-user` | `/etc/sudoers.d/archon-user` (0440) | `asiri ALL=(archon) NOPASSWD: /usr/local/bin/archon-as-archon` and `asiri ALL=(root) NOPASSWD: /usr/bin/systemctl restart archon-serve.service` |
 | `archon-serve.service` | `/etc/systemd/system/archon-serve.service` | the server as archon |
@@ -256,6 +315,7 @@ These were grepped for `secrets.env|railway|psql|SUPABASE|CLOUDFLARE|wrangler|DA
 Also written by `install.sh`:
 
 - `/etc/archon-user/projects`
+- `/etc/archon-user/config`, owner opt-ins (`ALLOW_ALL_REPOS_TOKEN=1`), only by `--allow-all-repos-token`
 - `/usr/local/lib/archon-user/bin/archon`, a symlink to the engine's CLI
 - `/mnt/ext-fast/archon-home/{.archon/config.yaml,.archon/.env,.gitconfig,.claude/settings.json}`
 - `/mnt/ext-fast/archon-home/.config/archon-user/claude.env`, the token, mode 0600
