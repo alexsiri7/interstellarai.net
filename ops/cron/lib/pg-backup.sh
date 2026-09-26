@@ -18,12 +18,21 @@
 # The backed-up projects, shared by backup-dbs.sh (dump + verify) and
 # restore-test.sh (restore the archive somewhere else and re-verify):
 #   project | URL variable | schema | sanity table (quoted as SQL needs it)
-# All live on Supabase. Lachesis moved (2026-09-26) into schema `lachesis` of
-# Kindred's project, reached through role `lachesis`; the others keep their
-# tables in `public` of their own projects. backup-dbs.sh
-# still verifies the schema on the server at runtime so a migration to a
-# per-project schema fails loudly there instead of silently producing an
-# empty dump.
+# Each entry dumps exactly one schema (pg_dump --schema=<schema>) through the
+# URL in ~/.config/archon-cron/secrets.env. backup-dbs.sh verifies the schema
+# exists on the server at runtime, so a line pointing at the wrong schema
+# fails loudly instead of silently producing an empty dump.
+#
+# Database consolidation (2026-09): the apps are moving one at a time into
+# Kindred's Supabase project, each in its own schema reached through its own
+# role's URL. Until an app moves, its line keeps pointing at its old project
+# (`public` schema). When an app moves, its line changes to
+#   <app>|<APP>_DB_URL|<app>|<table>
+# and secrets.env's <APP>_DB_URL is switched to the new role's URL, in the
+# same step. Lachesis moved (2026-09-26) into schema `lachesis`, reached
+# through role `lachesis`. Thaleia was born there (schema `events`).
+# `kindred-auth` backs up the Supabase Auth users of that project (schema
+# `auth`), which a `--schema=public` dump never contains.
 # shellcheck disable=SC2034  # consumed by the sourcing scripts
 PG_BACKUP_PROJECTS=(
     'annie|ANNIE_DB_URL|public|"Project"'
@@ -31,6 +40,8 @@ PG_BACKUP_PROJECTS=(
     'filmduel|FILMDUEL_DB_URL|public|users'
     'kindred|KINDRED_DB_URL|public|entries'
     'lachesis|LACHESIS_DB_URL|lachesis|lachesis_backlog'
+    'thaleia|THALEIA_DB_URL|events|sources'
+    'kindred-auth|KINDRED_DB_URL|auth|users'
 )
 
 # pg_url_percent_decode STRING → prints STRING with %XX sequences decoded.

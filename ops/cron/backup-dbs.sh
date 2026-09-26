@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Backup Annie, Reli, FilmDuel, Kindred, Lachesis (pg_dump, schema-scoped)
+# Backup Annie, Reli, FilmDuel, Kindred (+ its Supabase Auth users), Lachesis,
+# Thaleia (pg_dump, one schema per entry of PG_BACKUP_PROJECTS)
 # - Local: /mnt/steam-slow/backups/<project>/ (7-day rotation)
 # - Remote: Google Drive via rclone (if configured)
 #
@@ -28,8 +29,8 @@ set -euo pipefail
 # cron's PATH is /usr/bin:/bin — ~/.local/bin (pg_dump 17) must come first.
 export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
 
-# Secrets: ANNIE_DB_URL, RELI_DB_URL, FILMDUEL_DB_URL, KINDRED_DB_URL, LACHESIS_DB_URL
-# (+ optional NTFY_TOPIC) loaded from an env file outside the repo. chmod 600.
+# Secrets: ANNIE_DB_URL, RELI_DB_URL, FILMDUEL_DB_URL, KINDRED_DB_URL, LACHESIS_DB_URL,
+# THALEIA_DB_URL (+ optional NTFY_TOPIC) loaded from an env file outside the repo. chmod 600.
 # Override with $ARCHON_CRON_SECRETS.
 SECRETS_FILE="${ARCHON_CRON_SECRETS:-$HOME/.config/archon-cron/secrets.env}"
 # shellcheck source=/dev/null

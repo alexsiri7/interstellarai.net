@@ -160,3 +160,18 @@ STUB
     [ "$(pg_archive_count_tables "$T/good.sql.gz" public.things)" -eq 1 ]
     [ "$(pg_archive_count_tables "$T/good.sql.gz" public.other)" -eq 0 ]
 }
+
+# ── PG_BACKUP_PROJECTS ───────────────────────────────────────────────────────
+
+@test "PG_BACKUP_PROJECTS: four fields per entry, unique names, thaleia and kindred-auth present" {
+    local e name url_var schema table extra names=()
+    for e in "${PG_BACKUP_PROJECTS[@]}"; do
+        IFS='|' read -r name url_var schema table extra <<< "$e"
+        [ -n "$name" ] && [ -n "$schema" ] && [ -n "$table" ] && [ -z "$extra" ]
+        [[ "$url_var" =~ ^[A-Z]+_DB_URL$ ]]
+        names+=("$name")
+    done
+    [ "$(printf '%s\n' "${names[@]}" | sort | uniq -d)" = "" ]
+    [[ " ${PG_BACKUP_PROJECTS[*]} " == *" thaleia|THALEIA_DB_URL|events|sources "* ]]
+    [[ " ${PG_BACKUP_PROJECTS[*]} " == *" kindred-auth|KINDRED_DB_URL|auth|users "* ]]
+}
