@@ -1,0 +1,521 @@
+#!/usr/bin/env bash
+# archon-as-archon — the only door from the owner's cron jobs into the factory
+# user. Installed root-owned at /usr/local/bin/archon-as-archon by
+# ops/host/archon-user/install.sh; /etc/sudoers.d/archon-user lets `asiri` run
+# exactly this file as user `archon` (never as root):
+#
+#   sudo -n -u archon /usr/local/bin/archon-as-archon <verb> [args...]
+#
+# It runs as `archon`. It never evaluates its arguments as shell: each verb has
+# a fixed argument grammar, anything else is refused (exit 64), and the archon
+# CLI is exec'd with a fresh environment built here (env -i + an allowlist), so
+# nothing from the caller's environment (secrets.env, gh tokens, CLAUDE_CONFIG_DIR)
+# can reach an agent session. The process also gets no_new_privs, so nothing an
+# agent starts can gain privileges through a setuid binary.
+#
+# Working directory: the cron jobs address projects by the owner's clone
+# (/mnt/ext-fast/<project>, by --cwd or by their own cwd). The factory never
+# touches those: every such path is mapped to the factory's own clone,
+# $ARCHON_HOME_DIR/repos/<project>, which is cloned on first use. The owner's
+# clones (including the live ops checkout the crontab runs) stay unwritable
+# for archon.
+#
+# Verbs:
+#   workflow run|runs|status|get|wait|resume|abandon|cancel ...   archon CLI
+#   validate workflows|commands [name] [--cwd P] [--json]         archon CLI
+#   --version | version                                           archon CLI
+#   doctor                                                        archon doctor
+#   claude-probe [timeout-seconds]   one real `claude -p --model haiku` request
+#   gh-probe                         gh auth + push access per factory repo
+#   worktree-trim [--dry-run]        remove stale task worktrees (no open PR, idle 4h)
+#   bun-upgrade                      `bun upgrade` of archon's own bun
+#   ensure-clones                    clone every factory repo that is missing
+#   selftest [abs-path...]           prove what archon can and cannot read; the
+#                                    paths (verify.sh passes every top-level entry
+#                                    of the mounts, which archon cannot list) are
+#                                    probed on top of the built-in list
+#
+# Exit codes: 64 refused (bad verb/argument), 65 not running as archon,
+# 66 project not in /etc/archon-user/projects, otherwise the command's own.
+#
+# Test hook: ARCHON_AS_TEST=1 (honoured only when not started by sudo, i.e.
+# SUDO_USER is unset — sudo's env_reset strips it anyway) lets
+# ops/cron/tests/archon-as-archon.bats override the paths below and, with
+# ARCHON_AS_DRY_EXEC=1, print the final directory, environment and argv
+# instead of exec'ing.
+
+set -euo pipefail
+
+# ------------------------------------------------------------- constants ---
+ARCHON_USER=archon
+ARCHON_HOME_DIR=/mnt/ext-fast/archon-home
+PROJECTS_FILE=/etc/archon-user/projects
+OWNER_BASE=/mnt/ext-fast
+ARCHON_BIN=/usr/local/lib/archon-user/bin/archon     # symlink -> <archon checkout>/packages/cli/src/cli.ts
+GH_OWNER=alexsiri7
+DRY_EXEC=0
+
+if [ "${ARCHON_AS_TEST:-}" = 1 ] && [ -z "${SUDO_USER:-}" ]; then
+    ARCHON_USER="${ARCHON_AS_USER:-$(id -un)}"
+    ARCHON_HOME_DIR="${ARCHON_AS_HOME:-$ARCHON_HOME_DIR}"
+    PROJECTS_FILE="${ARCHON_AS_PROJECTS_FILE:-$PROJECTS_FILE}"
+    OWNER_BASE="${ARCHON_AS_OWNER_BASE:-$OWNER_BASE}"
+    ARCHON_BIN="${ARCHON_AS_ARCHON_BIN:-$ARCHON_BIN}"
+    DRY_EXEC="${ARCHON_AS_DRY_EXEC:-0}"
+fi
+
+REPOS_DIR="$ARCHON_HOME_DIR/repos"
+CLAUDE_TOKEN_ENV="$ARCHON_HOME_DIR/.config/archon-user/claude.env"
+
+die()  { printf 'archon-as-archon: %s\n' "$2" >&2; exit "$1"; }
+refuse() { die 64 "refused: $*"; }
+
+[ "$(id -un)" = "$ARCHON_USER" ] || die 65 "must run as user $ARCHON_USER (sudo -n -u $ARCHON_USER $0 ...), not $(id -un)"
+
+# ------------------------------------------------------------- projects ---
+PROJECTS=()
+load_projects() {
+    [ -r "$PROJECTS_FILE" ] || die 66 "$PROJECTS_FILE missing — run: sudo ops/host/archon-user/install.sh"
+    local line
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%%#*}"; line="${line//[[:space:]]/}"
+        [ -n "$line" ] || continue
+        valid_project_name "$line" || continue
+        PROJECTS+=("$line")
+    done < "$PROJECTS_FILE"
+    [ "${#PROJECTS[@]}" -gt 0 ] || die 66 "no projects in $PROJECTS_FILE"
+}
+valid_project_name() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$ ]] && [[ "$1" != *..* ]]; }
+is_project() { local p; for p in "${PROJECTS[@]}"; do [ "$p" = "$1" ] && return 0; done; return 1; }
+
+# project_of <abs path> — prints the project a path belongs to (owner clone or
+# factory clone, the root or anything below it) and "root" or "sub" on the
+# next line. Pure string work: archon cannot read the owner's clones.
+project_of() {
+    local path="$1" rest base
+    for base in "$REPOS_DIR" "$OWNER_BASE"; do
+        case "$path" in
+            "$base"/*) rest="${path#"$base"/}" ;;
+            *) continue ;;
+        esac
+        local name="${rest%%/*}"
+        is_project "$name" || continue
+        if [ "$rest" = "$name" ]; then printf '%s\nroot\n' "$name"; else printf '%s\nsub\n' "$name"; fi
+        return 0
+    done
+    return 1
+}
+
+# normalize_path <path> — absolute, no `.`/`..` components, no trailing slash.
+normalize_path() {
+    local p="$1"
+    [[ "$p" == /* ]] || return 1
+    [[ "/$p/" == */../* || "/$p/" == */./* ]] && return 1
+    while [[ "$p" == */ && "$p" != / ]]; do p="${p%/}"; done
+    printf '%s' "$p"
+}
+
+# ------------------------------------------------------------- env ---------
+archon_env() {
+    local path="$ARCHON_HOME_DIR/.bun/bin:$ARCHON_HOME_DIR/.local/bin:$ARCHON_HOME_DIR/.cargo/bin"
+    [ -d "$ARCHON_HOME_DIR/.local/opt/flutter/bin" ] && path="$path:$ARCHON_HOME_DIR/.local/opt/flutter/bin"
+    [ -d "$ARCHON_HOME_DIR/.local/opt/jdk/bin" ] && path="$path:$ARCHON_HOME_DIR/.local/opt/jdk/bin"
+    path="$path:/usr/local/bin:/usr/bin:/bin"
+    ENV=(
+        "HOME=$ARCHON_HOME_DIR" "USER=$ARCHON_USER" "LOGNAME=$ARCHON_USER" "SHELL=/bin/bash"
+        "LANG=C.UTF-8" "PATH=$path" "TMPDIR=$ARCHON_HOME_DIR/tmp"
+        "CLAUDECODE=0" "ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING=1"
+        # No claude.ai connectors (Drive, mail, ...) in factory sessions; the
+        # setup-token credential cannot fetch them either — belt and braces.
+        "ENABLE_CLAUDEAI_MCP_SERVERS=false"
+    )
+    [ -d "$ARCHON_HOME_DIR/.local/opt/jdk" ] && ENV+=("JAVA_HOME=$ARCHON_HOME_DIR/.local/opt/jdk")
+    if [ -d "$ARCHON_HOME_DIR/Android/Sdk" ]; then
+        ENV+=("ANDROID_HOME=$ARCHON_HOME_DIR/Android/Sdk" "ANDROID_SDK_ROOT=$ARCHON_HOME_DIR/Android/Sdk")
+    fi
+    # The factory's own Claude credential (`claude setup-token`, written by
+    # install.sh --set-claude-token). Read as data, never sourced.
+    if [ -r "$CLAUDE_TOKEN_ENV" ]; then
+        local tok
+        tok=$(sed -nE 's/^CLAUDE_CODE_OAUTH_TOKEN=["'\'']?([A-Za-z0-9._~+/=-]+)["'\'']?[[:space:]]*$/\1/p' "$CLAUDE_TOKEN_ENV" | tail -n 1)
+        [ -n "$tok" ] && ENV+=("CLAUDE_CODE_OAUTH_TOKEN=$tok")
+    fi
+    return 0
+}
+
+# run_in <dir> <cmd...> — exec <cmd> in <dir> with the archon environment.
+run_in() {
+    local dir="$1"; shift
+    [ -n "$dir" ] && [ -d "$dir" ] || die 1 "no directory to run in (${dir:-empty})"
+    archon_env
+    mkdir -p "$ARCHON_HOME_DIR/tmp" 2>/dev/null || true
+    cd "$dir" || die 1 "cannot cd to $dir"
+    umask 0027
+    if [ "$DRY_EXEC" = 1 ]; then
+        printf 'DIR=%s\n' "$dir"
+        printf 'ENV=%s\n' "${ENV[@]}"
+        printf 'ARGV:'; printf ' %s' "$@"; printf '\n'
+        exit 0
+    fi
+    exec setpriv --no-new-privs -- env -i "${ENV[@]}" "$@"
+}
+
+# like run_in, but returns (for verbs that run several commands).
+sub_in() {
+    local dir="$1"; shift
+    ( archon_env; cd "$dir" && umask 0027 && exec setpriv --no-new-privs -- env -i "${ENV[@]}" "$@" )
+}
+
+# ensure_clone <project> — the factory clone, cloned (as archon, with archon's
+# own gh credential) when missing. Prints its path.
+ensure_clone() {
+    local p="$1" dir="$REPOS_DIR/$1"
+    if [ ! -d "$dir/.git" ]; then
+        mkdir -p "$REPOS_DIR"
+        echo "archon-as-archon: cloning $GH_OWNER/$p into $dir" >&2
+        if ! sub_in "$ARCHON_HOME_DIR" git clone -q "https://github.com/$GH_OWNER/$p.git" "$dir" >&2; then
+            die 1 "git clone https://github.com/$GH_OWNER/$p.git failed — is archon's gh token set up? (sudo ops/host/archon-user/install.sh --set-gh-token)"
+        fi
+    fi
+    printf '%s' "$dir"
+}
+
+# first_clone — any factory clone (the CLI needs some git checkout to start in,
+# even for `workflow runs --all`). Prefers an existing one.
+first_clone() {
+    local p
+    for p in "${PROJECTS[@]}"; do
+        [ -d "$REPOS_DIR/$p/.git" ] && { printf '%s' "$REPOS_DIR/$p"; return 0; }
+    done
+    ensure_clone "${PROJECTS[0]}"
+}
+
+# resolve_dir <given --cwd or ""> <strict 0|1> — the factory directory to run in.
+# strict: the path must be a project root (workflow run); otherwise anything
+# inside a project maps to its clone and anything else to first_clone.
+resolve_dir() {
+    local given="$1" strict="$2" path info name kind
+    if [ -n "$given" ]; then
+        path=$(normalize_path "$given") || refuse "--cwd must be an absolute path without . or .. ($given)"
+    else
+        path=$(pwd -P 2>/dev/null || true)
+    fi
+    if [ -n "$path" ] && info=$(project_of "$path"); then
+        name=$(sed -n 1p <<<"$info"); kind=$(sed -n 2p <<<"$info")
+        if [ "$strict" = 1 ] && [ "$kind" != root ]; then
+            refuse "workflow run needs a project root, not $path"
+        fi
+        ensure_clone "$name"
+        return 0
+    fi
+    if [ "$strict" = 1 ]; then
+        die 66 "${path:-<unknown cwd>} is not a factory project (known: ${PROJECTS[*]}; list: $PROJECTS_FILE)"
+    fi
+    first_clone
+}
+
+# ------------------------------------------------------------- argument grammar
+re_ref='^[A-Za-z0-9._/#@+-]{1,200}$'
+re_id='^[A-Za-z0-9_-]{1,128}$'
+re_num='^[0-9]{1,7}$'
+
+# check_value <flag> <value>
+check_value() {
+    local f="$1" v="$2"
+    case "$f" in
+        --branch|-b|--from|--from-branch|--base)
+            [[ "$v" =~ $re_ref ]] && [[ "$v" != -* ]] || refuse "$f value '$v'" ;;
+        --input)
+            [[ "$v" =~ ^[A-Za-z0-9_.-]{1,64}= ]] && [ "${#v}" -le 8000 ] || refuse "$f value (want name=value)" ;;
+        --model)
+            [[ "$v" =~ ^[A-Za-z0-9@_.-]{1,64}=[A-Za-z0-9@_.:/\[\]-]{1,128}$ ]] || refuse "$f value '$v'" ;;
+        --adopt|--supersedes|--conversation-id)
+            [[ "$v" =~ $re_id ]] || refuse "$f value '$v'" ;;
+        --status)
+            [[ "$v" =~ ^[a-z_]{1,32}$ ]] || refuse "$f value '$v'" ;;
+        --limit|--timeout)
+            [[ "$v" =~ $re_num ]] || refuse "$f value '$v'" ;;
+        --cwd) ;;   # mapped by resolve_dir
+        *) refuse "unexpected flag $f" ;;
+    esac
+}
+
+# parse <value-flags> <bool-flags> <min-pos> <max-pos> <pos-kind> args...
+# Fills OUT (argv to pass on, --cwd removed) and CWD_ARG. pos-kind: id | name | text.
+OUT=(); CWD_ARG=""
+parse() {
+    local vflags=" $1 " bflags=" $2 " minp="$3" maxp="$4" kind="$5"; shift 5
+    local npos=0 a f v
+    OUT=(); CWD_ARG=""
+    while [ "$#" -gt 0 ]; do
+        a="$1"; shift
+        [ "${#a}" -le 8000 ] || refuse "argument too long"
+        case "$a" in
+            --*=*) f="${a%%=*}"; v="${a#*=}"
+                   [[ "$vflags" == *" $f "* ]] || refuse "flag $f"
+                   check_value "$f" "$v"
+                   if [ "$f" = --cwd ]; then CWD_ARG="$v"; else OUT+=("$f" "$v"); fi ;;
+            -*)    if [[ "$vflags" == *" $a "* ]]; then
+                       [ "$#" -gt 0 ] || refuse "$a needs a value"
+                       v="$1"; shift
+                       check_value "$a" "$v"
+                       if [ "$a" = --cwd ]; then CWD_ARG="$v"; else OUT+=("$a" "$v"); fi
+                   elif [[ "$bflags" == *" $a "* ]]; then
+                       OUT+=("$a")
+                   else
+                       refuse "flag $a"
+                   fi ;;
+            *)     npos=$((npos + 1))
+                   case "$kind" in
+                       id)   [[ "$a" =~ $re_id ]] || refuse "run id '$a'" ;;
+                       name) if [ "$npos" -eq 1 ]; then [[ "$a" =~ ^[A-Za-z0-9._-]{1,128}$ ]] || refuse "name '$a'"; fi ;;
+                       text) ;;
+                   esac
+                   OUT+=("$a") ;;
+        esac
+    done
+    [ "$npos" -ge "$minp" ] || refuse "missing argument"
+    [ "$maxp" -lt 0 ] || [ "$npos" -le "$maxp" ] || refuse "too many arguments"
+    return 0
+}
+
+# ------------------------------------------------------------- verbs -------
+verb_workflow() {
+    local sub="${1:-}"; shift || true
+    local strict=0
+    case "$sub" in
+        run)
+            # `name` checks only the first positional (the workflow); the rest is the message.
+            parse "--cwd --branch -b --from --from-branch --base --input --model --adopt --supersedes --conversation-id" \
+                  "--no-worktree --resume --dry-run --default-stubs --pause-at-gates --json --detach --quiet -q --verbose -v" \
+                  1 -1 name "$@"
+            strict=1 ;;
+        runs)    parse "--cwd --status --limit" "--all --json --open --quiet -q" 0 0 id "$@" ;;
+        status)  parse "--cwd" "--json --verbose -v --events --quiet -q" 0 0 id "$@" ;;
+        get)     parse "--cwd" "--json --verbose -v --events" 1 1 id "$@" ;;
+        wait)    parse "--cwd --timeout" "--json" 1 1 id "$@" ;;
+        resume)  parse "--cwd" "--detach --json --quiet -q" 1 1 id "$@" ;;
+        abandon|cancel) parse "--cwd" "--json" 1 1 id "$@" ;;
+        *) refuse "workflow subcommand '${sub}'" ;;
+    esac
+    local dir
+    dir=$(resolve_dir "$CWD_ARG" "$strict")
+    # Never pass --cwd on: the CLI takes the directory we cd into, and the
+    # argv then reads `archon workflow run <name> ...` exactly like the
+    # pre-cutover processes the cron pgrep guards match on.
+    run_in "$dir" "$ARCHON_BIN" workflow "$sub" "${OUT[@]}"
+}
+
+verb_validate() {
+    local sub="${1:-}"; shift || true
+    case "$sub" in workflows|commands) ;; *) refuse "validate subcommand '$sub'" ;; esac
+    parse "--cwd" "--json --quiet -q" 0 1 name "$@"
+    local dir; dir=$(resolve_dir "$CWD_ARG" 0)
+    run_in "$dir" "$ARCHON_BIN" validate "$sub" "${OUT[@]}"
+}
+
+verb_claude_probe() {
+    local t="${1:-90}"
+    [[ "$t" =~ ^[0-9]{1,4}$ ]] || refuse "timeout '$t'"
+    [ "$#" -le 1 ] || refuse "too many arguments"
+    run_in "$ARCHON_HOME_DIR" timeout "$t" claude -p --model haiku "ok"
+}
+
+verb_gh_probe() {
+    [ "$#" -eq 0 ] || refuse "gh-probe takes no arguments"
+    local rc=0 p push scopes
+    if sub_in "$ARCHON_HOME_DIR" gh auth status >/dev/null 2>&1; then
+        echo "PASS gh: authenticated as $(sub_in "$ARCHON_HOME_DIR" gh api user --jq .login 2>/dev/null || echo '?')"
+    else
+        echo "FAIL gh: not authenticated (sudo ops/host/archon-user/install.sh --set-gh-token)"; return 1
+    fi
+    # A classic token answers with X-OAuth-Scopes (repo, workflow, ...); a
+    # fine-grained one sends none.
+    scopes=$(sub_in "$ARCHON_HOME_DIR" gh api -i user 2>/dev/null | tr -d '\r' | sed -n 's/^[Xx]-[Oo][Aa]uth-[Ss]copes: *//p' | head -n1)
+    if [ -n "$scopes" ]; then
+        echo "FAIL gh: classic token with scopes '$scopes' — use a fine-grained PAT limited to the factory repos"; rc=1
+    else
+        echo "PASS gh: fine-grained token (no OAuth scopes header)"
+    fi
+    for p in "${PROJECTS[@]}"; do
+        push=$(sub_in "$ARCHON_HOME_DIR" gh api "repos/$GH_OWNER/$p" --jq .permissions.push 2>/dev/null || echo error)
+        if [ "$push" = true ]; then echo "PASS gh: push access to $GH_OWNER/$p"
+        else echo "FAIL gh: no push access to $GH_OWNER/$p ($push)"; rc=1; fi
+    done
+    # Repos outside the factory must stay out of the token (Archon: the fork
+    # archon-update.sh builds and tests as asiri).
+    push=$(sub_in "$ARCHON_HOME_DIR" gh api "repos/$GH_OWNER/Archon" --jq .permissions.push 2>/dev/null || echo none)
+    if [ "$push" = true ]; then echo "FAIL gh: token can push to $GH_OWNER/Archon — remove it from the PAT"; rc=1
+    else echo "PASS gh: no push access to $GH_OWNER/Archon"; fi
+    return "$rc"
+}
+
+# Port of pipeline-health-cron.sh autoclean_stale_worktrees for the factory's
+# own layout: task-archon-* worktrees whose archon/<dir> branch has no open PR
+# and that nothing touched for 4h. A project whose PR listing fails is skipped.
+verb_worktree_trim() {
+    local dry=0
+    case "${1:-}" in --dry-run) dry=1 ;; "") ;; *) refuse "worktree-trim [--dry-run]" ;; esac
+    local p open wt_base wt_path name removed candidates=0 total=0 size
+    for p in "${PROJECTS[@]}"; do
+        [ -d "$REPOS_DIR/$p/.git" ] || continue
+        if ! open=$(sub_in "$ARCHON_HOME_DIR" gh pr list --repo "$GH_OWNER/$p" --state open --limit 200 \
+                --json headRefName --jq '.[].headRefName' 2>/dev/null); then
+            echo "autoclean: gh pr list failed for $p — skipping its worktrees"; continue
+        fi
+        removed=0
+        for wt_base in "$ARCHON_HOME_DIR"/.archon/workspaces/*/"$p"/worktrees/archon; do
+            [ -d "$wt_base" ] || continue
+            while IFS= read -r wt_path; do
+                name=$(basename "$wt_path")
+                grep -qxF "archon/$name" <<<"$open" && continue
+                find "$wt_path" -maxdepth 0 -mmin -240 2>/dev/null | grep -q . && continue
+                if [ "$dry" = 1 ]; then
+                    size=$(du -sm "$wt_path" 2>/dev/null | cut -f1); size=${size:-0}
+                    echo "autoclean: would remove $wt_path (${size}MB)"
+                    candidates=$((candidates + 1)); total=$((total + size)); continue
+                fi
+                if rm -rf "$wt_path" 2>/dev/null; then removed=$((removed + 1))
+                else echo "autoclean: rm -rf $wt_path failed"; fi
+            done < <(find "$wt_base" -maxdepth 1 -type d -name 'task-archon-*' 2>/dev/null)
+        done
+        if [ "$removed" -gt 0 ]; then
+            sub_in "$REPOS_DIR/$p" git worktree prune --expire now >/dev/null 2>&1 \
+                || echo "autoclean: git worktree prune failed for $p"
+            echo "autoclean: pruned $removed stale worktrees for $p"
+        fi
+    done
+    [ "$dry" = 1 ] && echo "autoclean: dry run — $candidates stale worktrees, ${total}MB total"
+    return 0
+}
+
+verb_ensure_clones() {
+    [ "$#" -eq 0 ] || refuse "ensure-clones takes no arguments"
+    local p rc=0
+    for p in "${PROJECTS[@]}"; do
+        if ( ensure_clone "$p" >/dev/null ); then echo "ok $p $REPOS_DIR/$p"; else echo "FAILED $p"; rc=1; fi
+    done
+    return "$rc"
+}
+
+# selftest — what this user can reach. PASS/FAIL/WARN lines, exit 1 on any FAIL.
+verb_selftest() {
+    [ "$#" -le 2000 ] || refuse "selftest: too many paths"
+    local extra=() a
+    for a in "$@"; do
+        a=$(normalize_path "$a") || refuse "selftest paths must be absolute without . or .."
+        extra+=("$a")
+    done
+    local fails=0 p out
+    pass() { echo "PASS $*"; }
+    fail() { echo "FAIL $*"; fails=$((fails + 1)); }
+    warn() { echo "WARN $*"; }
+
+    # identity: no group that grants anything (sudo, adm, docker, the owner's group)
+    local groups; groups=$(id -Gn)
+    if [ "$groups" = "$ARCHON_USER" ]; then pass "groups: only '$groups'"
+    else fail "groups: '$groups' (expected only '$ARCHON_USER')"; fi
+    if out=$(setpriv --no-new-privs sudo -n true 2>&1); then fail "sudo -n true succeeded"
+    else pass "no sudo (${out%%$'\n'*})"; fi
+
+    # named secrets: must be neither readable nor listable
+    local owner_home; owner_home=$(getent passwd asiri | cut -d: -f6); owner_home=${owner_home:-/home/asiri}
+    for p in "$owner_home" "$owner_home/.config/archon-cron/secrets.env" "$owner_home/.config/archon-cron/consolidated-db.env" \
+             "$owner_home/.config/personal-ops" "$owner_home/.railway" "$owner_home/.config/gh" "$owner_home/.ssh" \
+             "$owner_home/.config/.wrangler" "$owner_home/.wrangler" "$owner_home/.config/opencode" "$owner_home/.claude" \
+             "$owner_home/.claude.json" "$owner_home/.archon" "$owner_home/backups" "$owner_home/.config/rclone" \
+             /mnt/nas "$OWNER_BASE/nas" "$OWNER_BASE/personal-ops" "$OWNER_BASE/archon-playground" \
+             "$OWNER_BASE/archon-playground/security" "$OWNER_BASE/gemini-playground" \
+             /mnt/steam-slow/backups /mnt/steam-slow /mnt/steam-fast /root /etc/shadow /etc/sudoers \
+             "${extra[@]}"; do
+        [[ "$p" =~ ^($ARCHON_HOME_DIR|$OWNER_BASE/archon)(/|$) ]] && continue   # allowed trees
+        if [ ! -e "$p" ] && ! ls -d "$p" >/dev/null 2>&1; then
+            # -e is false both for "absent" and for "parent not traversable"; either is fine.
+            pass "unreachable: $p"
+        elif [ -d "$p" ] && ls "$p" >/dev/null 2>&1; then fail "listable: $p"
+        elif [ -f "$p" ] && [ -r "$p" ]; then fail "readable: $p"
+        else pass "unreadable: $p"; fi
+    done
+
+    # sweep: anything readable under the mounts and homes that is not on the allowlist
+    local allow_re="^($ARCHON_HOME_DIR|$OWNER_BASE/archon|$OWNER_BASE/lost\\+found)(/|$)"
+    local top entry n=0
+    for top in /home /mnt /media /srv /var/backups; do
+        [ -d "$top" ] || continue
+        while IFS= read -r entry; do
+            [[ "$entry" =~ $allow_re ]] && continue
+            [ "$entry" = "$top" ] && continue
+            case "$entry" in /mnt|"$OWNER_BASE") continue ;; esac   # parents of allowed trees
+            fail "readable outside the allowlist: $entry"; n=$((n + 1))
+            [ "$n" -ge 40 ] && { warn "sweep stopped after 40 hits"; break 2; }
+        done < <(find "$top" -maxdepth 2 -mindepth 0 \( -type d -readable -o -type f -readable \) 2>/dev/null | sort)
+    done
+    [ "$n" -eq 0 ] && pass "sweep: nothing readable under /home /mnt /media /srv /var/backups outside the allowlist"
+    n=0
+    while IFS= read -r entry; do
+        warn "readable in /tmp (owned by $(stat -c %U "$entry" 2>/dev/null)): $entry"; n=$((n + 1))
+        [ "$n" -ge 20 ] && { warn "/tmp listing stopped after 20"; break; }
+    done < <(find /tmp -mindepth 1 -maxdepth 1 ! -user "$ARCHON_USER" \( -type f -o -type d \) -readable 2>/dev/null \
+                 | grep -vE '^/tmp/(\.X11-unix|\.ICE-unix|\.XIM-unix|\.font-unix|\.Test-unix|snap-private-tmp|systemd-private-.*)$' | sort)
+
+    # writes: its own tree yes, the engine and the owner's clones no
+    if touch "$ARCHON_HOME_DIR/tmp/.selftest" 2>/dev/null; then pass "writable: $ARCHON_HOME_DIR/tmp"; rm -f "$ARCHON_HOME_DIR/tmp/.selftest"
+    else fail "cannot write $ARCHON_HOME_DIR/tmp"; fi
+    for p in "$OWNER_BASE/archon" "$OWNER_BASE/archon/packages" "$OWNER_BASE/interstellarai.net" "$OWNER_BASE"; do
+        if touch "$p/.archon-selftest" 2>/dev/null; then fail "writable: $p"; rm -f "$p/.archon-selftest"
+        else pass "not writable: $p"; fi
+    done
+    if [ -r "$OWNER_BASE/archon/packages/cli/src/cli.ts" ]; then pass "readable: archon engine checkout"
+    else fail "cannot read $OWNER_BASE/archon/packages/cli/src/cli.ts (engine)"; fi
+
+    # process environments of every archon process: no owner secrets
+    local pid bad
+    for pid in $(pgrep -u "$ARCHON_USER" 2>/dev/null); do
+        [ -r "/proc/$pid/environ" ] || continue
+        bad=$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | cut -d= -f1 \
+              | grep -E '(_DB_URL|DATABASE_URL|NTFY|RAILWAY|SUPABASE|CLOUDFLARE|CF_API|SENTRY_AUTH|REQUESTY|OPENROUTER|ANTHROPIC_API_KEY|GITHUB_TOKEN|GH_TOKEN|AWS_|RCLONE|PGPASSWORD|SECRET)' | sort -u | tr '\n' ' ') || true
+        [ -n "$bad" ] && fail "pid $pid ($(tr '\0' ' ' < "/proc/$pid/cmdline" | cut -c1-60)) carries: $bad"
+    done
+    pass "process environments checked ($(pgrep -u "$ARCHON_USER" 2>/dev/null | wc -l) archon processes)"
+
+    # toolchains and connectors, in the environment the factory runs with
+    archon_env
+    local t
+    for t in bun node npm npx python3 uv cargo rustc git gh claude jq shellcheck java flutter; do
+        if out=$(env -i "${ENV[@]}" bash -c "command -v $t" 2>/dev/null); then pass "tool: $t -> $out"
+        else
+            case "$t" in java|flutter|shellcheck) warn "tool missing: $t (only projects that need it fail)" ;;
+                         *) fail "tool missing: $t" ;; esac
+        fi
+    done
+    if out=$(cd "$ARCHON_HOME_DIR" && timeout 60 env -i "${ENV[@]}" claude mcp list 2>&1); then
+        if grep -qi 'claude\.ai' <<<"$out"; then fail "claude.ai connectors visible to factory sessions: $(grep -i 'claude\.ai' <<<"$out" | head -3 | tr '\n' ';')"
+        else pass "claude mcp list: no claude.ai connectors"; fi
+    else
+        warn "claude mcp list failed: ${out%%$'\n'*}"
+    fi
+
+    echo "selftest: $fails failure(s)"
+    [ "$fails" -eq 0 ]
+}
+
+# ------------------------------------------------------------- dispatch ----
+load_projects
+verb="${1:-}"; shift || true
+case "$verb" in
+    workflow)             verb_workflow "$@" ;;
+    validate)             verb_validate "$@" ;;
+    --version|version|-V) [ "$#" -eq 0 ] || refuse "--version takes no arguments"
+                          run_in "$(first_clone)" "$ARCHON_BIN" --version ;;
+    doctor)               [ "$#" -eq 0 ] || refuse "doctor takes no arguments"
+                          run_in "$(first_clone)" "$ARCHON_BIN" doctor ;;
+    claude-probe)         verb_claude_probe "$@" ;;
+    gh-probe)             verb_gh_probe "$@" ;;
+    worktree-trim)        verb_worktree_trim "$@" ;;
+    bun-upgrade)          [ "$#" -eq 0 ] || refuse "bun-upgrade takes no arguments"
+                          run_in "$ARCHON_HOME_DIR" bun upgrade ;;
+    ensure-clones)        verb_ensure_clones "$@" ;;
+    selftest)             verb_selftest "$@" ;;
+    "")                   refuse "no verb (see the header of $0)" ;;
+    *)                    refuse "verb '$verb'" ;;
+esac

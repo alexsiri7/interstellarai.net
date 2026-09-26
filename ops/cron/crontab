@@ -25,4 +25,6 @@
 0 3 * * 0 /mnt/ext-fast/interstellarai.net/ops/cron/archon-update.sh >> /home/asiri/.local/state/archon-cron/logs/archon-update.log 2>&1
 # Self-update: this checkout is what cron runs, and nothing else pulls it. ff-only, so a dirty
 # or diverged checkout fails harmlessly and shows in the log instead of being overwritten.
-*/10 * * * * git -C /mnt/ext-fast/interstellarai.net pull --ff-only -q origin main >> /home/asiri/.local/state/archon-cron/logs/ops-self-update.log 2>&1
+# ops-self-update.sh is `git pull --ff-only -q origin main` until ARCHON_RUN_AS=archon; then an
+# update touching ops/** waits for the owner's `ops-self-update.sh --approve` (see the script).
+*/10 * * * * /mnt/ext-fast/interstellarai.net/ops/cron/ops-self-update.sh >> /home/asiri/.local/state/archon-cron/logs/ops-self-update.log 2>&1

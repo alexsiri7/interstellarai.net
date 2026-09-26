@@ -39,9 +39,12 @@ set -uo pipefail
 export PATH="$HOME/.bun/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/run-as.sh
+source "$SCRIPT_DIR/lib/run-as.sh"
 # shellcheck source=lib/throttle.sh
 source "$SCRIPT_DIR/lib/throttle.sh"
 should_tick "sweep-audits" || exit 0
+runas_may_launch "sweep-audits" || exit 0
 # shellcheck source=lib/claude-auth.sh
 source "$SCRIPT_DIR/lib/claude-auth.sh"
 BASE_DIR="/mnt/ext-fast"
@@ -142,7 +145,7 @@ if [ -z "$local_path" ]; then
 fi
 
 # Alternate Claude accounts per slot, falling back through the rest in order.
-IFS=':' read -ra accounts <<< "$CLAUDE_ACCOUNTS"
+IFS=':' read -ra accounts <<< "$(runas_claude_accounts)"
 account_dir=""
 for (( i = 0; i < ${#accounts[@]}; i++ )); do
   candidate="${accounts[$(( (slot + i) % ${#accounts[@]} ))]}"

@@ -153,6 +153,7 @@ EOF
 
 @test "check_claude_auth probes every account once a day" {
     SCRIPT_FILE="$BATS_TEST_DIRNAME/../pipeline-health-cron.sh"
+    source "$BATS_TEST_DIRNAME/../lib/run-as.sh"
     # shellcheck disable=SC1090
     source <(awk '/^check_claude_auth\(\)/{p=1} p{print} p && /^}$/{p=0}' "$SCRIPT_FILE")
     CLAUDE_ACCOUNTS="$GOOD:$BAD"
@@ -164,4 +165,26 @@ $BAD" ]
     [[ "$output" == *"$GOOD ok"* ]]
     run check_claude_auth
     [ "$(wc -l < "$TEST_TMP/claude-calls")" -eq 2 ]    # second tick today: no probe
+}
+
+@test "under ARCHON_RUN_AS=archon the factory user's own credential is probed, through the wrapper" {
+    SCRIPT_FILE="$BATS_TEST_DIRNAME/../pipeline-health-cron.sh"
+    export ARCHON_RUN_AS=archon
+    unset _ARCHON_RUN_AS_SH
+    source "$BATS_TEST_DIRNAME/../lib/run-as.sh"
+    # shellcheck disable=SC1090
+    source <(awk '/^check_claude_auth\(\)/{p=1} p{print} p && /^}$/{p=0}' "$SCRIPT_FILE")
+    printf '#!/usr/bin/env bash\necho "$*" >> "%s/sudo-calls"\necho ok\n' "$TEST_TMP" > "$TEST_TMP/bin/sudo"
+    chmod +x "$TEST_TMP/bin/sudo"
+    CLAUDE_ACCOUNTS="$GOOD:$BAD"
+    run check_claude_auth
+    [ "$status" -eq 0 ]
+    [ ! -e "$TEST_TMP/claude-calls" ]                  # the owner's accounts are not touched
+    [[ "$(cat "$TEST_TMP/sudo-calls")" == "-n -u archon /usr/local/bin/archon-as-archon claude-probe "* ]]
+    [[ "$output" == *"archon ok"* ]]
+}
+
+@test "a failing factory credential names the setup-token fix, not CLAUDE_CONFIG_DIR" {
+    [[ "$(claude_auth_login_cmd archon)" == "claude setup-token"* ]]
+    [ "$(claude_auth_login_cmd /x/.claude)" = "CLAUDE_CONFIG_DIR=/x/.claude claude auth login" ]
 }

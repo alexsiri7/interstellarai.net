@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# `archon` for the owner's side once ARCHON_RUN_AS is drain or archon (see
+# ../run-as.sh). lib/run-as.sh puts this directory first on PATH for the cron
+# scripts, and install.sh --cutover points ~/.bun/bin/archon here so a manual
+# `archon ...` by the owner cannot start a second, stale factory as asiri.
+#
+#   archon mode: exec sudo -n -u archon /usr/local/bin/archon-as-archon "$@"
+#                (the wrapper validates the arguments and maps the directory)
+#   drain mode:  `workflow run` is refused (exit 75); anything else runs the
+#                real CLI as asiri so the runs in flight can finish
+#   asiri mode:  the real CLI as asiri (only reached when ~/.bun/bin/archon
+#                still points here after a rollback that skipped the symlink)
+#
+# `exec`, so the pid a caller records ($!) is the sudo process, whose argv
+# (".../archon-as-archon workflow run <name> ...") the pgrep guards match.
+set -u
+mode="${ARCHON_RUN_AS:-}"
+if [ -z "$mode" ]; then
+    f="${ARCHON_RUN_AS_FILE:-$HOME/.config/archon-cron/run-as}"
+    [ -r "$f" ] && mode=$(sed -nE 's/^[[:space:]]*ARCHON_RUN_AS=["'\'']?([a-z]+)["'\'']?[[:space:]]*(#.*)?$/\1/p' "$f" | tail -n 1)
+fi
+real="${ARCHON_REAL_BIN:-/mnt/ext-fast/archon/packages/cli/src/cli.ts}"
+case "$mode" in
+    archon)
+        exec sudo -n -u "${ARCHON_AS_USER:-archon}" "${ARCHON_AS_WRAPPER:-/usr/local/bin/archon-as-archon}" "$@" ;;
+    drain)
+        if [ "${1:-}" = workflow ] && [ "${2:-}" = run ]; then
+            echo "archon: refusing 'workflow run' — factory is draining for the archon-user cutover (ARCHON_RUN_AS=drain)" >&2
+            exit 75
+        fi
+        exec "$real" "$@" ;;
+    *)
+        exec "$real" "$@" ;;
+esac

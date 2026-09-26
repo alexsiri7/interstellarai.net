@@ -22,6 +22,10 @@ the cron line is installed (`crontab ops/cron/crontab`, see `../cron/README.md`)
 and, since NodeSource moved to Node 24, restart the archon user services once as
 `asiri`: `systemctl --user restart archon-serve.service`.
 
+Running the factory's agent sessions as the unprivileged `archon` user (its own
+Claude and GitHub credentials, no access to the owner's secrets) is a separate,
+later step with its own script and cutover: [`archon-user/README.md`](archon-user/README.md).
+
 ## What install.sh does
 
 | Step | Files | Effect |

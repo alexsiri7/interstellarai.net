@@ -68,6 +68,8 @@ SECRETS_FILE="${ARCHON_CRON_SECRETS:-$HOME/.config/archon-cron/secrets.env}"
 LOG_PREFIX="[tool-freshness]"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/run-as.sh
+source "$SCRIPT_DIR/lib/run-as.sh"
 STATE_DIR="${TOOL_FRESHNESS_STATE_DIR:-$HOME/.archon/pipeline-health-state}"
 STATUS_FILE="$STATE_DIR/tool-freshness"
 LOCK_FILE="${TOOL_FRESHNESS_LOCK:-$STATE_DIR/tool-freshness.lock}"

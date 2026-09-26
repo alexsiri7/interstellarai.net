@@ -63,6 +63,8 @@ esac
 export PATH="$HOME/.bun/bin:$HOME/.local/bin:/usr/local/bin:/snap/bin:$PATH"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/run-as.sh
+source "$SCRIPT_DIR/lib/run-as.sh"
 # shellcheck source=lib/archon-projects.sh
 source "$SCRIPT_DIR/lib/archon-projects.sh"
 load_archon_projects REPOS
@@ -70,6 +72,7 @@ load_archon_projects REPOS
 source "$SCRIPT_DIR/lib/throttle.sh"
 if [ "$MODE" = tick ]; then
   should_tick "pipeline-health" || exit 0
+  runas_may_launch "pipeline-health" || exit 0
 fi
 # shellcheck source=lib/archon-active-runs.sh
 source "$SCRIPT_DIR/lib/archon-active-runs.sh"
@@ -1265,6 +1268,19 @@ autoclean_stale_worktrees() {
     fi
   done
   [ "$dry_run" -eq 1 ] && log "autoclean: dry run — $candidates stale worktrees, ${total_mb}MB total"
+  # ARCHON_RUN_AS=archon: new worktrees are the factory user's (its home, its
+  # clones), which asiri can neither delete nor should run git in. The same
+  # rule runs there as archon (archon-as-archon worktree-trim); the loop above
+  # still clears what asiri's own runs left behind.
+  if runas_archon; then
+    local out trim_args=()
+    [ "$dry_run" -eq 1 ] && trim_args=(--dry-run)
+    if out=$(runas_wrapper worktree-trim "${trim_args[@]}" 2>&1); then
+      [ -n "$out" ] && printf '%s\n' "$out" | while IFS= read -r l; do log "[archon] $l"; done
+    else
+      log "autoclean: archon worktree-trim failed: $(tail -n 1 <<<"$out")"
+    fi
+  fi
   return 0
 }
 
@@ -1463,8 +1479,12 @@ check_progress() {
   echo "$now" > "$stall_marker"
 
   local logf="$LOG_DIR/pipeline-health-diagnostic-$(date +%Y%m%d-%H%M%S).log"
+  # Under ARCHON_RUN_AS=archon the factory user may only run in a factory
+  # project (the engine checkout is read-only to it): use the ops repo's clone.
+  local diag_dir="$BASE_DIR/archon"
+  runas_archon && diag_dir="$BASE_DIR/interstellarai.net"
   (
-    cd "$BASE_DIR/archon"
+    cd "$diag_dir"
     CLAUDECODE=0 nohup archon workflow run archon-assist \
       "Pipeline-health-cron detected no progress across repos ${REPOS[*]} in the last 30 minutes. No commits landed on origin/main, no archon workflows completed, and no token-limit markers were found in recent .archon-logs. Investigate: check 'gh run list' per repo, 'archon workflow status', recent logs in $LOG_DIR/pr-maintenance.log and $LOG_DIR/issue-pickup.log, and take action to unblock whatever is stuck." \
       > "$logf" 2>&1 &
@@ -2089,7 +2109,7 @@ check_claude_auth() {
   [ "$(cat "$stamp" 2>/dev/null)" = "$today" ] && return 0
   mkdir -p "$CLAUDE_AUTH_STATE_DIR"
   local -a accounts
-  IFS=':' read -ra accounts <<< "$CLAUDE_ACCOUNTS"
+  IFS=':' read -ra accounts <<< "$(runas_claude_accounts)"
   for dir in "${accounts[@]}"; do
     claude_auth_check "$dir" && log "claude-auth: $dir ok"
   done

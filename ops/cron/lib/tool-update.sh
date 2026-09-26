@@ -185,8 +185,18 @@ upgrade_bun() {
     record_apply bun failed "bun upgrade exit $rc, bun --version now '${now:-?}' (expected $to)"
     return
   fi
+  # ARCHON_RUN_AS=archon (lib/run-as.sh): the server and every run use the
+  # factory user's own bun, so upgrade that one too before the restart.
+  if declare -F runas_archon >/dev/null && runas_archon; then
+    local aout
+    if ! aout=$(runas_wrapper bun-upgrade 2>&1); then
+      record_apply bun failed "upgraded $from → $now for asiri, but archon's bun upgrade failed: $(tail -n 1 <<<"$aout")"
+      return
+    fi
+    log "bun: archon's bun upgraded too"
+  fi
   log "bun: now $now — restarting $TU_SERVICE"
-  if ! systemctl --user restart "$TU_SERVICE" >/dev/null 2>&1; then
+  if ! { if declare -F runas_serve_restart >/dev/null; then runas_serve_restart "$TU_SERVICE"; else systemctl --user restart "$TU_SERVICE"; fi; } >/dev/null 2>&1; then
     record_apply bun failed "upgraded $from → $now but 'systemctl --user restart $TU_SERVICE' failed"
     notify "archon-serve restart FAILED after bun upgrade" \
       "bun $from → $now installed; systemctl --user restart $TU_SERVICE failed. Check: systemctl --user status $TU_SERVICE" \
