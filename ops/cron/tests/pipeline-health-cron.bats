@@ -297,16 +297,16 @@ setup_main_ci_env() {
 # old two-label guard, refiling a fresh issue every tick (reli #1472–#1474).
 
 stub_gh_issues() {
-    gh() { echo "$ISSUE_LIST_FIXTURE"; }
+    gh() { printf '%s\n' "$@" > "$STATE_DIR/issue-list-argv"; echo "$ISSUE_LIST_FIXTURE"; }
 }
 
 @test "find_tracked_issue: a human-needed issue is tracked and active (the #75 refile)" {
     load_tracked_labels
     load_fn find_tracked_issue
-    ISSUE_LIST_FIXTURE='[{"number":11,"labels":[{"name":"bug"},{"name":"human-needed"}]}]'
+    ISSUE_LIST_FIXTURE='[{"number":11,"title":"Main CI red: build","body":"## Main CI red\n\nAuto-filed by `pipeline-health-cron.sh`.","labels":[{"name":"bug"},{"name":"human-needed"}]}]'
     stub_gh_issues
 
-    run find_tracked_issue "alexsiri7/test-project" "Main CI"
+    run find_tracked_issue "alexsiri7/test-project" "Main CI red"
 
     [ "$output" = "11 active" ]
 }
@@ -314,10 +314,10 @@ stub_gh_issues() {
 @test "find_tracked_issue: archon:skipped is tracked but stalled" {
     load_tracked_labels
     load_fn find_tracked_issue
-    ISSUE_LIST_FIXTURE='[{"number":14,"labels":[{"name":"archon:skipped"}]}]'
+    ISSUE_LIST_FIXTURE='[{"number":14,"title":"Main CI red: build","body":"## Main CI red\n\nAuto-filed by `pipeline-health-cron.sh`.","labels":[{"name":"archon:skipped"}]}]'
     stub_gh_issues
 
-    run find_tracked_issue "alexsiri7/test-project" "Main CI"
+    run find_tracked_issue "alexsiri7/test-project" "Main CI red"
 
     [ "$output" = "14 stalled" ]
 }
@@ -325,10 +325,10 @@ stub_gh_issues() {
 @test "find_tracked_issue: archon:failed is tracked but stalled" {
     load_tracked_labels
     load_fn find_tracked_issue
-    ISSUE_LIST_FIXTURE='[{"number":10,"labels":[{"name":"bug"},{"name":"archon:failed"}]}]'
+    ISSUE_LIST_FIXTURE='[{"number":10,"title":"Main CI red: build","body":"## Main CI red\n\nAuto-filed by `pipeline-health-cron.sh`.","labels":[{"name":"bug"},{"name":"archon:failed"}]}]'
     stub_gh_issues
 
-    run find_tracked_issue "alexsiri7/test-project" "Main CI"
+    run find_tracked_issue "alexsiri7/test-project" "Main CI red"
 
     [ "$output" = "10 stalled" ]
 }
@@ -337,10 +337,10 @@ stub_gh_issues() {
     load_tracked_labels
     load_fn find_tracked_issue
     # The operator's own 2026-09-11 workaround shape (reli #1474) — no nag.
-    ISSUE_LIST_FIXTURE='[{"number":13,"labels":[{"name":"archon:in-progress"},{"name":"human-needed"}]}]'
+    ISSUE_LIST_FIXTURE='[{"number":13,"title":"Main CI red: build","body":"## Main CI red\n\nAuto-filed by `pipeline-health-cron.sh`.","labels":[{"name":"archon:in-progress"},{"name":"human-needed"}]}]'
     stub_gh_issues
 
-    run find_tracked_issue "alexsiri7/test-project" "Main CI"
+    run find_tracked_issue "alexsiri7/test-project" "Main CI red"
 
     [ "$output" = "13 active" ]
 }
@@ -348,10 +348,10 @@ stub_gh_issues() {
 @test "find_tracked_issue: an untracked bug-only issue does not suppress detection" {
     load_tracked_labels
     load_fn find_tracked_issue
-    ISSUE_LIST_FIXTURE='[{"number":15,"labels":[{"name":"bug"}]}]'
+    ISSUE_LIST_FIXTURE='[{"number":15,"title":"Main CI red: build","body":"## Main CI red\n\nAuto-filed by `pipeline-health-cron.sh`.","labels":[{"name":"bug"}]}]'
     stub_gh_issues
 
-    run find_tracked_issue "alexsiri7/test-project" "Main CI"
+    run find_tracked_issue "alexsiri7/test-project" "Main CI red"
 
     [ -z "$output" ]
 }
@@ -362,7 +362,44 @@ stub_gh_issues() {
     ISSUE_LIST_FIXTURE='[]'
     stub_gh_issues
 
-    run find_tracked_issue "alexsiri7/test-project" "Main CI"
+    run find_tracked_issue "alexsiri7/test-project" "Main CI red"
+
+    [ -z "$output" ]
+}
+
+# #126: the predicate below reads title and body, and a stub answers whatever
+# fields are asked for — so pin that gh is asked for them.
+@test "find_tracked_issue: asks gh for the title and body it matches on" {
+    load_tracked_labels
+    load_fn find_tracked_issue
+    ISSUE_LIST_FIXTURE='[]'
+    stub_gh_issues
+
+    find_tracked_issue "alexsiri7/test-project" "Main CI red"
+
+    grep -qxF "Main CI red in:title" "$STATE_DIR/issue-list-argv"
+    grep -qxF "number,title,body,labels" "$STATE_DIR/issue-list-argv"
+}
+
+@test "find_tracked_issue: an archon issue this script did not file is not tracked" {
+    load_tracked_labels
+    load_fn find_tracked_issue
+    ISSUE_LIST_FIXTURE='[{"number":16,"title":"Main CI red: flaky login test","body":"Seen twice this week.","labels":[{"name":"archon:in-progress"}]}]'
+    stub_gh_issues
+
+    run find_tracked_issue "alexsiri7/test-project" "Main CI red"
+
+    [ -z "$output" ]
+}
+
+@test "find_tracked_issue: an auto-filed issue under another title is not tracked" {
+    load_tracked_labels
+    load_fn find_tracked_issue
+    # file_stuck_issue's escalation also says "main CI red" and is auto-filed.
+    ISSUE_LIST_FIXTURE='[{"number":17,"title":"factory stuck: test-project main CI red after 3 attempts (SHA aaa)","body":"Auto-filed by `pipeline-health-cron.sh` after `sha_attempt_decide` exhausted the remediation budget.","labels":[{"name":"manual-review"}]}]'
+    stub_gh_issues
+
+    run find_tracked_issue "alexsiri7/test-project" "Main CI red"
 
     [ -z "$output" ]
 }
@@ -507,7 +544,7 @@ stub_gh_issues() {
 @test "check_main_ci suppresses and alerts once when the open issue is stalled" {
     setup_main_ci_env
     RUNS_FIXTURE='[{"databaseId":1,"conclusion":"failure","headSha":"aaa","workflowName":"CI"}]'
-    ISSUE_LIST_FIXTURE='[{"number":10,"labels":[{"name":"bug"},{"name":"archon:failed"}]}]'
+    ISSUE_LIST_FIXTURE='[{"number":10,"title":"Main CI red: build","body":"## Main CI red\n\nAuto-filed by `pipeline-health-cron.sh`.","labels":[{"name":"bug"},{"name":"archon:failed"}]}]'
     stub_gh_for_main_ci
 
     check_main_ci "test-project"
@@ -524,7 +561,7 @@ stub_gh_issues() {
 @test "check_main_ci keeps the stalled alert armed when the ntfy fails to send" {
     setup_main_ci_env
     RUNS_FIXTURE='[{"databaseId":1,"conclusion":"failure","headSha":"aaa","workflowName":"CI"}]'
-    ISSUE_LIST_FIXTURE='[{"number":10,"labels":[{"name":"bug"},{"name":"archon:failed"}]}]'
+    ISSUE_LIST_FIXTURE='[{"number":10,"title":"Main CI red: build","body":"## Main CI red\n\nAuto-filed by `pipeline-health-cron.sh`.","labels":[{"name":"bug"},{"name":"archon:failed"}]}]'
     stub_gh_for_main_ci
 
     NOTIFY_FAILS=1
@@ -538,10 +575,25 @@ stub_gh_issues() {
     [ -f "$STATE_DIR/escalated-main/test-project-stalled-10" ]
 }
 
+@test "check_main_ci reads the issue it filed as tracked on the next tick" {
+    setup_main_ci_env
+    RUNS_FIXTURE='[{"databaseId":1,"conclusion":"failure","headSha":"aaa","workflowName":"CI"}]'
+    stub_gh_for_main_ci
+    check_main_ci "test-project"
+    [ -f "$ISSUE_SENTINEL" ]
+
+    ISSUE_LIST_FIXTURE=$(jq -nc --rawfile body "$STATE_DIR/issue-body" \
+        '[{number:42, title:"Main CI red: build", body:$body, labels:[{name:"archon:in-progress"}]}]')
+    rm -f "$ISSUE_SENTINEL" "$STATE_DIR/main-ci-cooldown-test-project"
+    check_main_ci "test-project"
+
+    [ ! -f "$ISSUE_SENTINEL" ]
+}
+
 @test "check_main_ci suppresses silently when archon is working the open issue" {
     setup_main_ci_env
     RUNS_FIXTURE='[{"databaseId":1,"conclusion":"failure","headSha":"aaa","workflowName":"CI"}]'
-    ISSUE_LIST_FIXTURE='[{"number":12,"labels":[{"name":"archon:in-progress"}]}]'
+    ISSUE_LIST_FIXTURE='[{"number":12,"title":"Main CI red: build","body":"## Main CI red\n\nAuto-filed by `pipeline-health-cron.sh`.","labels":[{"name":"archon:in-progress"}]}]'
     stub_gh_for_main_ci
 
     check_main_ci "test-project"
