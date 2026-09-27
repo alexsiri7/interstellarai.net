@@ -578,6 +578,20 @@ make_build_worktree() {
     [[ "$output" == *"removed $root/ab/0123456789abcd (idle >2d)"* ]]
 }
 
+@test "autoclean_cargo_build_dirs reaps idle /tmp build dirs and keeps cargo-build/tmp" {
+    export BASE_DIR="$STATE_DIR/base"
+    load_fn autoclean_cargo_build_dirs
+    local tmp="$BASE_DIR/.archon/cargo-build/tmp"
+    mkdir -p "$tmp/ab/0123456789abcd/deps"
+    echo x > "$tmp/ab/0123456789abcd/deps/old"; touch -d "3 days ago" "$tmp/ab/0123456789abcd/deps/old"
+
+    run autoclean_cargo_build_dirs
+    [ "$status" -eq 0 ]
+    [ ! -e "$tmp/ab" ]
+    [ -d "$tmp" ]
+    [[ "$output" == *"removed $tmp/ab/0123456789abcd (idle >2d)"* ]]
+}
+
 # ── daily light trim ─────────────────────────────────────────────────────────
 
 make_daily_trim_sandbox() {
@@ -747,4 +761,55 @@ make_cargo_config_sandbox() {
     [ "$status" -eq 0 ]
     [ -z "$output" ]
     grep -qxF "build-dir = \"$BASE_DIR/.archon/cargo-build/musenmingle/{workspace-path-hash}\"" "$cfg"
+}
+
+make_cargo_tmp_link_sandbox() {
+    export HOME="$STATE_DIR/home" BASE_DIR="$STATE_DIR/base"
+    unset CARGO_HOME
+    mkdir -p "$HOME/.cargo"
+    load_fn ensure_cargo_tmp_build_link
+}
+
+@test "ensure_cargo_tmp_build_link links ~/.cargo/tmp-build to the build-dir root and is idempotent" {
+    make_cargo_tmp_link_sandbox
+    local want="$BASE_DIR/.archon/cargo-build/tmp"
+
+    run ensure_cargo_tmp_build_link
+    [ "$status" -eq 0 ]
+    [ "$(readlink "$HOME/.cargo/tmp-build")" = "$want" ]
+    [ -d "$want" ]
+    [[ "$output" == *"cargo: $HOME/.cargo/tmp-build → $want"* ]]
+
+    run ensure_cargo_tmp_build_link
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "ensure_cargo_tmp_build_link does nothing for a user without a cargo home" {
+    make_cargo_tmp_link_sandbox
+    rmdir "$HOME/.cargo"
+    run ensure_cargo_tmp_build_link
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ ! -e "$HOME/.cargo" ]
+    [ ! -e "$BASE_DIR/.archon/cargo-build/tmp" ]
+}
+
+@test "ensure_cargo_tmp_build_link replaces an idle tmp-build dir and leaves one being written to a later tick" {
+    make_cargo_tmp_link_sandbox
+    local link="$HOME/.cargo/tmp-build" want="$BASE_DIR/.archon/cargo-build/tmp"
+    mkdir -p "$link/ab/0123456789abcd"
+    echo x > "$link/ab/0123456789abcd/f"
+
+    run ensure_cargo_tmp_build_link
+    [ "$status" -eq 0 ]
+    [ ! -L "$link" ]
+    [ -f "$link/ab/0123456789abcd/f" ]
+    [[ "$output" == *"written in the last hour — linking it to $want on a later tick"* ]]
+
+    find "$link" -exec touch -d "2 hours ago" {} +
+    run ensure_cargo_tmp_build_link
+    [ "$status" -eq 0 ]
+    [ "$(readlink "$link")" = "$want" ]
+    [[ "$output" == *"cargo: removed $link built before the link — freed "*"MB"* ]]
 }

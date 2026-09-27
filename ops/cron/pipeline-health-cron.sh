@@ -21,7 +21,9 @@
 #      every failing step is logged
 #  4b. / at 80-84% → the light autoclean, at most once a day
 #  4c. Rust projects: keep <workspace>/.cargo/config.toml pointing each archon
-#      worktree's Cargo build-dir at $BASE_DIR/.archon/cargo-build
+#      worktree's Cargo build-dir at $BASE_DIR/.archon/cargo-build, and link
+#      ~/.cargo/tmp-build (the build-dir /tmp/.cargo/config.toml gives builds
+#      under /tmp) to $BASE_DIR/.archon/cargo-build/tmp
 #   5. No pipeline progress in last tick (no commits, no archon completions)
 #      while work is pending (queued/in-progress issues or actionable PRs):
 #        - If token-limit markers in recent logs → wait, retry next tick
@@ -1621,6 +1623,39 @@ build-dir = \"$root/$project/{workspace-path-hash}\""
   return 0
 }
 
+# /tmp/.cargo/config.toml (ops/host/cargo-tmp-build-dir.conf, #133) sends any
+# build under /tmp to {cargo-cache-home}/tmp-build. This user's cargo home is
+# on /, so its tmp-build is a symlink to $BASE_DIR/.archon/cargo-build/tmp,
+# where autoclean_cargo_build_dirs reaps it like the per-project dirs.
+ensure_cargo_tmp_build_link() {
+  local home="${CARGO_HOME:-$HOME/.cargo}" want="$BASE_DIR/.archon/cargo-build/tmp" link mb
+  link="$home/tmp-build"
+  [ -d "$home" ] || return 0
+  if ! mkdir -p "$want"; then
+    log "cargo: mkdir $want failed"
+    return 0
+  fi
+  [ "$(readlink "$link" 2>/dev/null)" = "$want" ] && return 0
+  if [ -d "$link" ] && [ ! -L "$link" ]; then
+    if find "$link" -mmin -60 -print -quit 2>/dev/null | grep -q .; then
+      log "cargo: $link written in the last hour — linking it to $want on a later tick"
+      return 0
+    fi
+    mb=$(dir_size_mb "$link")
+    if ! rm -rf "$link"; then
+      log "cargo: rm -rf $link failed — not linking it to $want"
+      return 0
+    fi
+    log "cargo: removed $link built before the link — freed ${mb}MB"
+  fi
+  if ln -sfn "$want" "$link"; then
+    log "cargo: $link → $want"
+  else
+    log "cargo: linking $link to $want failed"
+  fi
+  return 0
+}
+
 # ----------------------------------------------------------------------------
 # Check 4: Progress detection.
 #   Signal = commits to origin/main across repos + archon log completions since
@@ -2448,6 +2483,7 @@ check_daily_trim
 check_disk
 check_archon_tmp_trim
 ensure_cargo_build_dir_config
+ensure_cargo_tmp_build_link
 check_db_backup
 check_system_maintenance
 check_archon_update
