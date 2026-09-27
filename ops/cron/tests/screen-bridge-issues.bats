@@ -181,9 +181,10 @@ issue() { # issue <number> <title> <body> <labels-json> [author]
     [ "$(grep -c ntfy.sh "$CURL_ARGV")" -eq 1 ]
 }
 
-@test "phase: a classifier error writes nothing and leaves the issue for the next tick" {
-    issue 7 'Bug: x' 'plain' '["bug"]' | jq -s . > "$T/issues.json"
+@test "phase: a classifier error writes nothing, leaves the issue for the next tick, and moves on to the next" {
+    { issue 7 'Bug: x' 'plain' '["bug"]'; issue 8 'Bug: y' 'plain' '["bug"]'; } | jq -s . > "$T/issues.json"
     CLASSIFIER_FAIL=1 screen_bridge_issues proj 2>/dev/null
+    [ "$(wc -l < "$CLASSIFIER_CALLS")" -eq 2 ]
     ! grep -qE '^issue (edit|comment)' "$GH_ARGV"
 }
 
