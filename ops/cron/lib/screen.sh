@@ -10,6 +10,8 @@
 #      per-call nonce-delimited block and answers strict JSON
 #      {verdict: safe|suspicious, issue_type, reasons}. Anything that is not
 #      exactly that is an error: the issue stays held and is retried next tick.
+#      Exhausted Requesty credits end the tick's screening and ntfy the owner
+#      once a day.
 #
 #   safe       → labels archon:auto-approved + type:<issue_type>; the normal
 #                triage/queue path picks it up. PRs built from it must pass the
@@ -106,7 +108,7 @@ _screen_classify() {
   local source="$1" text="$2" nonce
   [ -r "$SCREEN_KEY_FILE" ] || { _screen_log "no classifier key at $SCREEN_KEY_FILE"; return 1; }
   nonce=$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')
-  local system user payload resp
+  local system user payload resp status
   local what
   case "$source" in
     sentry-*) what="an automated error or event report that the project's own Sentry monitoring forwarded to its issue tracker: a crash, exception, warning, log message or timeout. Its text comes from the running app, and anyone can send events to that app's Sentry. Stack traces, sentry.io links, internal paths, module and table names are normal, and a terse report is normal." ;;
@@ -137,15 +139,39 @@ END-ISSUE-$nonce
 Classify it now. JSON only."
   payload=$(jq -n --arg m "$SCREEN_MODEL" --arg s "$system" --arg u "$user" \
     '{model:$m, temperature:0, max_tokens:300, messages:[{role:"system",content:$s},{role:"user",content:$u}]}')
-  resp=$(curl -s --fail -m 90 "$SCREEN_URL" \
+  resp=$(curl -s -m 90 -w '\n%{http_code}' "$SCREEN_URL" \
     -H @<(printf 'Authorization: Bearer %s\n' "$(cat "$SCREEN_KEY_FILE")") \
     -H 'Content-Type: application/json' --data-binary @- <<<"$payload") || return 1
-  jq -r '.choices[0].message.content // empty' <<<"$resp" 2>/dev/null
+  status="${resp##*$'\n'}"; resp="${resp%$'\n'*}"
+  if _screen_credits_exhausted "$status" "$resp"; then
+    _screen_log "classifier: Requesty credits exhausted (HTTP $status)"
+    return 2
+  fi
+  case "$status" in
+    2??) ;;
+    *) _screen_log "classifier: HTTP $status"; return 1 ;;
+  esac
+  jq -r '.choices[0].message.content // empty' <<<"$resp" 2>/dev/null || return 1
+}
+
+# _screen_credits_exhausted <http-status> <body> — the account's balance or
+# spend limit ran out, as opposed to a transient failure. 402 always is; a 403
+# or 429 is when its body blames credit, balance, billing or a spend limit
+# rather than a rate.
+_screen_credits_exhausted() {
+  case "$1" in
+    402) return 0 ;;
+    403|429)
+      grep -qiE 'credit|balance|billing|spend(ing)?[ _-]?limit' <<<"$2" &&
+        ! grep -qiE '\brate(\b|[ _-]?limit)' <<<"$2" ;;
+    *) return 1 ;;
+  esac
 }
 
 # screen_issue_text <project> <source> <text> — the whole decision, no GitHub
 # writes. Prints one line: "safe <type> <codes…>", "suspicious <type> <codes…>"
-# or "error <why>".
+# or "error <why>"; "error credits-exhausted" means no classify call can
+# succeed until the Requesty balance is topped up.
 screen_issue_text() {
   local project="$1" source="$2" text="$3" hits raw verdict type allowed
   allowed="${SCREEN_SOURCE_TYPES[$source]:-}"
@@ -155,9 +181,12 @@ screen_issue_text() {
     echo "suspicious ${allowed%% *} $hits"
     return
   fi
-  if ! raw=$(_screen_classify "$source" "$text") || [ -z "$raw" ]; then
-    echo "error classifier-unavailable"; return
-  fi
+  raw=$(_screen_classify "$source" "$text")
+  case "$?:${raw:+x}" in
+    0:x) ;;
+    2:*) echo "error credits-exhausted"; return ;;
+    *) echo "error classifier-unavailable"; return ;;
+  esac
   # Strict: one JSON object with a known verdict and type, nothing else — at
   # most wrapped whole in one ```json fence, which some models add anyway.
   raw=$(sed -e '1{/^```\(json\)\{0,1\}[[:space:]]*$/d}' -e '${/^```[[:space:]]*$/d}' <<<"$raw")
@@ -216,6 +245,7 @@ screen_bridge_issues() {
     read -r verdict type codes <<<"$decision"
     if [ -n "${SCREEN_DRY_RUN:-}" ]; then
       echo "$project #$num $source → $decision"
+      [ "$decision" = "error credits-exhausted" ] && break
       continue
     fi
     case "$verdict" in
@@ -235,7 +265,16 @@ screen_bridge_issues() {
             "$project #$num from $source held by screening ($codes). Add $TRUST_APPROVED_LABEL to let the factory work it. https://github.com/$repo/issues/$num"
         fi
         ;;
-      *) _screen_log "$project: #$num ($source) not screened this tick: $type" ;;
+      *)
+        _screen_log "$project: #$num ($source) not screened this tick: $type"
+        if [ "$type" = "credits-exhausted" ]; then
+          # The key is shared by every factory repo: one ntfy a day in all.
+          trust_notify_once requesty credits-exhausted "$(date -u +%F)" \
+            "Requesty credits exhausted: screening of bridge-filed issues is paused in every factory repo (seen on $project). Top up at https://app.requesty.ai" \
+            "Issue screening paused"
+          break
+        fi
+        ;;
     esac
   done <<<"$rows"
 }

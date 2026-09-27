@@ -17,7 +17,7 @@ setup() {
     export TRUST_STATE_DIR="$T/trust" ARCHON_CRON_TRUST_FILE="$T/none" ARCHON_CRON_SECRETS="$T/none"
     export NTFY_TOPIC=test-topic
     export SCREEN_KEY_FILE="$T/key"; echo "sk-test" > "$SCREEN_KEY_FILE"
-    unset _ARCHON_TRUST_SH _ARCHON_SCREEN_SH TRUSTED_AUTHORS TRUSTED_ISSUE_BOTS TRUSTED_MERGE_ONLY_AUTHORS SCREEN_DRY_RUN
+    unset _ARCHON_TRUST_SH _ARCHON_SCREEN_SH TRUSTED_AUTHORS TRUSTED_ISSUE_BOTS TRUSTED_MERGE_ONLY_AUTHORS SCREEN_DRY_RUN CLASSIFIER_STATUS
     # shellcheck source=../lib/human-labels.sh
     source "$CRON_DIR/lib/human-labels.sh"
     # shellcheck source=../lib/trust.sh
@@ -25,8 +25,9 @@ setup() {
     # shellcheck source=../lib/screen.sh
     source "$CRON_DIR/lib/screen.sh"
 
-    # curl: the classifier answers $CLASSIFIER (the message content), or fails
-    # with CLASSIFIER_FAIL; ntfy posts are recorded.
+    # curl: the classifier answers $CLASSIFIER (the message content), or
+    # $CLASSIFIER_BODY with HTTP $CLASSIFIER_STATUS, or fails outright with
+    # CLASSIFIER_FAIL; ntfy posts are recorded.
     CURL_ARGV="$T/curl-argv"; : > "$CURL_ARGV"
     CLASSIFIER_CALLS="$T/classifier-calls"; : > "$CLASSIFIER_CALLS"
     curl() {
@@ -36,8 +37,13 @@ setup() {
         esac
         cat > "$T/classifier-request"   # payload arrives on stdin
         echo x >> "$CLASSIFIER_CALLS"
-        [ -n "${CLASSIFIER_FAIL:-}" ] && return 22
-        jq -n --arg c "$CLASSIFIER" '{choices:[{message:{content:$c}}]}'
+        [ -n "${CLASSIFIER_FAIL:-}" ] && return 28
+        if [ -n "${CLASSIFIER_STATUS:-}" ]; then
+            printf '%s\n%s' "$CLASSIFIER_BODY" "$CLASSIFIER_STATUS"
+        else
+            jq -n --arg c "$CLASSIFIER" '{choices:[{message:{content:$c}}]}'
+            printf 200
+        fi
     }
     GH_ARGV="$T/gh-argv"; : > "$GH_ARGV"
     gh() {
@@ -117,6 +123,29 @@ sentry_text() { printf 'Title: [Sentry] %s\n\nAutomatically created from Sentry 
     [ "$(screen_issue_text p sentry-bridge "$(sentry_text 'E')" 2>/dev/null)" = "error classifier-unavailable" ]
 }
 
+@test "classify: an HTTP error status is an error, never safe" {
+    CLASSIFIER_STATUS=500 CLASSIFIER_BODY='{"error":"upstream"}'
+    [ "$(screen_issue_text p sentry-bridge "$(sentry_text 'E')" 2>/dev/null)" = "error classifier-unavailable" ]
+}
+
+@test "classify: a 402, or a 403/429 blaming credit rather than a rate, is credits-exhausted" {
+    CLASSIFIER_STATUS=402 CLASSIFIER_BODY='{"error":{"message":"Your organization'"'"'s balance is too low to run this request"}}'
+    [ "$(screen_issue_text p sentry-bridge "$(sentry_text 'E')" 2>/dev/null)" = "error credits-exhausted" ]
+    CLASSIFIER_STATUS=429 CLASSIFIER_BODY='{"error":"spend limit reached"}'
+    [ "$(screen_issue_text p sentry-bridge "$(sentry_text 'E')" 2>/dev/null)" = "error credits-exhausted" ]
+    CLASSIFIER_STATUS=403 CLASSIFIER_BODY='{"error":"insufficient credits"}'
+    [ "$(screen_issue_text p sentry-bridge "$(sentry_text 'E')" 2>/dev/null)" = "error credits-exhausted" ]
+}
+
+@test "classify: a 429 rate limit is not credits-exhausted, even when it mentions billing" {
+    CLASSIFIER_STATUS=429 CLASSIFIER_BODY='{"error":"rate limit exceeded, retry in 10s"}'
+    [ "$(screen_issue_text p sentry-bridge "$(sentry_text 'E')" 2>/dev/null)" = "error classifier-unavailable" ]
+    CLASSIFIER_STATUS=429 CLASSIFIER_BODY='{"error":"rate_limit: too many requests for your billing tier"}'
+    [ "$(screen_issue_text p sentry-bridge "$(sentry_text 'E')" 2>/dev/null)" = "error classifier-unavailable" ]
+    CLASSIFIER_STATUS=403 CLASSIFIER_BODY='{"error":"forbidden"}'
+    [ "$(screen_issue_text p sentry-bridge "$(sentry_text 'E')" 2>/dev/null)" = "error classifier-unavailable" ]
+}
+
 @test "classify: suspicious, and a type the source cannot produce, both hold" {
     CLASSIFIER='{"verdict":"suspicious","issue_type":"bug_report","reasons":[]}'
     [ "$(screen_issue_text p sentry-bridge "$(sentry_text 'E')")" = "suspicious bug_report MODEL" ]
@@ -182,4 +211,33 @@ issue() { # issue <number> <title> <body> <labels-json> [author]
     SCREEN_DRY_RUN=1 run screen_bridge_issues proj
     [[ "$output" == *"proj #21 feedback → safe bug_report"* ]]
     ! grep -qE '^issue (edit|comment)' "$GH_ARGV"
+}
+
+@test "phase: exhausted credits stop the tick after one call, label nothing, and ntfy once a day" {
+    for n in 31 32 33; do issue "$n" "Bug: $n" 'x' '["bug"]'; done | jq -s . > "$T/issues.json"
+    export CLASSIFIER_STATUS=402 CLASSIFIER_BODY='{"error":"balance too low"}'
+    screen_bridge_issues proj 2>/dev/null
+    [ "$(wc -l < "$CLASSIFIER_CALLS")" -eq 1 ]
+    run ! grep -qE '^issue (edit|comment)' "$GH_ARGV"
+    [ "$(grep -c ntfy.sh "$CURL_ARGV")" -eq 1 ]
+    grep ntfy.sh "$CURL_ARGV" | grep -q 'Title: Issue screening paused'
+    grep ntfy.sh "$CURL_ARGV" | grep -q 'https://app.requesty.ai'
+    # Later ticks, in this project or another, the same UTC day: no new ntfy.
+    screen_bridge_issues proj 2>/dev/null
+    screen_bridge_issues other 2>/dev/null
+    [ "$(grep -c ntfy.sh "$CURL_ARGV")" -eq 1 ]
+    [ "$(wc -l < "$CLASSIFIER_CALLS")" -eq 3 ]
+    # The next UTC day notifies again.
+    date() { if [ "$*" = "-u +%F" ]; then echo 2099-01-02; else command date "$@"; fi; }
+    screen_bridge_issues proj 2>/dev/null
+    [ "$(grep -c ntfy.sh "$CURL_ARGV")" -eq 2 ]
+}
+
+@test "phase: a dry run with exhausted credits stops after one call and sends nothing" {
+    for n in 41 42; do issue "$n" "Bug: $n" 'x' '["bug"]'; done | jq -s . > "$T/issues.json"
+    export CLASSIFIER_STATUS=402 CLASSIFIER_BODY='{}'
+    SCREEN_DRY_RUN=1 run screen_bridge_issues proj
+    [[ "$output" == *"proj #41 feedback → error credits-exhausted"* ]]
+    [[ "$output" != *"#42"* ]]
+    run ! grep -q ntfy.sh "$CURL_ARGV"
 }
