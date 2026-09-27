@@ -51,8 +51,9 @@
 # cache prune, idle Gradle version caches, old APK builds, stale archon
 # worktrees, idle Cargo build dirs, stale /tmp entries), logs the MB freed and
 # exits. It takes no run snapshot, so the build output of inactive worktrees is
-# left to the tick's daily trim. It never runs the >=85%-only steps that wipe hot caches (go clean -cache, bun pm cache rm,
-# npm cache clean), skips the throttle gate and does none of the health checks.
+# left to the tick's daily trim. It never runs the >=85%-only steps that wipe
+# hot caches (go clean -cache, bun pm cache rm, npm cache clean), skips the
+# throttle gate and does none of the health checks.
 #
 # `--list-stale-worktrees` is the dry run of the stale-worktree step: it logs
 # every worktree the autoclean would remove, with its size and a total, and
