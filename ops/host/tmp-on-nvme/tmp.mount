@@ -1,0 +1,33 @@
+# /etc/systemd/system/tmp.mount — installed by ops/host/install.sh (step 11), issue #133.
+# /tmp is a bind mount of /mnt/ext-fast/.tmp-root (NVMe, root:root 1777)
+# instead of a directory on the slow root SSD, which agent builds in /tmp
+# (47 GB of cargo output in one dir) kept filling.
+#
+# A native unit rather than an fstab line, for two reasons:
+#  - Every PrivateTmp= service Wants=tmp.mount. With an fstab line, the next
+#    such service start after any daemon-reload would bind over the live /tmp
+#    and hide tmux/X11 sockets and running builds. install.sh creates
+#    /run/tmp-on-nvme.defer before it installs this unit, so any activation
+#    before the next boot is skipped (condition), not failed. /run is tmpfs:
+#    the file is gone at the next boot, and the mount happens then.
+#  - WantedBy= (not RequiredBy=) local-fs.target: when the NVMe does not
+#    mount, this unit fails its RequiresMountsFor= and /tmp simply stays on /,
+#    as it was before, instead of dropping the boot into emergency mode.
+# Ordered before local-fs.target, so before systemd-tmpfiles-setup (which
+# creates /tmp/.X11-unix and friends) and before every ordinary service.
+[Unit]
+Description=Temporary Directory /tmp (bind of /mnt/ext-fast/.tmp-root)
+Documentation=file:/mnt/ext-fast/interstellarai.net/ops/host/README.md
+ConditionPathExists=!/run/tmp-on-nvme.defer
+ConditionPathIsSymbolicLink=!/tmp
+RequiresMountsFor=/mnt/ext-fast
+Before=local-fs.target
+
+[Mount]
+What=/mnt/ext-fast/.tmp-root
+Where=/tmp
+Type=none
+Options=bind
+
+[Install]
+WantedBy=local-fs.target

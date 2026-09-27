@@ -62,7 +62,9 @@ SUDOERS_D="${SANDBOX:+$SANDBOX/sudoers.d}"; SUDOERS_D="${SUDOERS_D:-/etc/sudoers
 SUDOERS_DST="$SUDOERS_D/archon-user"
 HEALTH_URL=http://127.0.0.1:3090/
 # Top-level entries of $BASE archon may reach; everything else gets u:archon:---.
-BASE_ALLOW=(archon archon-home lost+found)
+# .tmp-root: the NVMe dir /tmp is bound from (ops/host/install.sh step 11),
+# root:root 1777 like /tmp itself. A deny ACL on it would lock archon out of /tmp.
+BASE_ALLOW=(archon archon-home lost+found .tmp-root)
 
 OWNER_HOME=$(getent passwd "$OWNER" | cut -d: -f6); OWNER_HOME=${OWNER_HOME:-/home/$OWNER}
 OWNER_UID=$(id -u "$OWNER" 2>/dev/null || echo 1000)

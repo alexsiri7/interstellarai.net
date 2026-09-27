@@ -318,3 +318,75 @@ STUB
     [[ "$output" == *"removed 1 idle cargo build dirs"* ]]
     [ ! -e "$bd/ab/old1" ] && [ -d "$bd/ab/mixed" ] && [ -d "$bd/cd/new1" ]
 }
+
+# ── worktree-trim: /tmp and archon's own TMPDIR (#133) ──────────────────────
+# make_tmp_sandbox: an idle dir, an idle file, a dir idle on the outside with a
+# fresh file inside, a fresh dir and an idle session dir, in the /tmp stand-in
+# and in $ARCHON_AS_HOME/tmp.
+make_tmp_sandbox() {
+    echo notcloned > "$T/noprojects"   # no clone: the worktree half makes no gh calls
+    export ARCHON_AS_PROJECTS_FILE="$T/noprojects" ARCHON_AS_TMP_ROOT="$T/systmp"
+    S="$T/systmp" H="$T/home/tmp"
+    mkdir -p "$S/cargotest-builddir/ab/cdef/deps" "$S/review_5ea34/src" "$S/fresh" "$S/claude-1000/x" "$H/vam_check/target"
+    touch "$S/cargotest-builddir/ab/cdef/deps/libx.rlib" "$S/review_5ea34/src/fresh.rs" "$S/fresh/a" "$S/old.log" "$H/vam_check/target/y"
+    old='13 hours ago'
+    touch -d "$old" "$S/cargotest-builddir/ab/cdef/deps/libx.rlib" "$S/cargotest-builddir/ab/cdef/deps" \
+        "$S/cargotest-builddir/ab/cdef" "$S/cargotest-builddir/ab" "$S/cargotest-builddir" \
+        "$S/review_5ea34/src" "$S/review_5ea34" "$S/old.log" "$S/claude-1000/x" "$S/claude-1000" \
+        "$H/vam_check/target/y" "$H/vam_check/target" "$H/vam_check"
+}
+
+@test "worktree-trim --tmp-only: removes archon's entries idle 12h in /tmp and its TMPDIR, keeps active ones" {
+    make_tmp_sandbox
+    run "$W" worktree-trim --tmp-only
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"removed 3 idle tmp entries"* ]]
+    [ ! -e "$S/cargotest-builddir" ] && [ ! -e "$S/old.log" ] && [ ! -e "$H/vam_check" ]
+    [ -d "$S/review_5ea34" ]      # fresh file inside: a build still writing
+    [ -d "$S/fresh" ]
+    [ -d "$S/claude-1000" ]       # session dirs are never trimmed
+}
+
+@test "worktree-trim --tmp-only --dry-run lists candidates with sizes and removes nothing" {
+    make_tmp_sandbox
+    run "$W" worktree-trim --dry-run --tmp-only
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"would remove tmp entry $S/cargotest-builddir ("*"MB)"* ]]
+    [[ "$output" == *"would remove tmp entry $H/vam_check ("* ]]
+    [[ "$output" == *"dry run — 3 idle tmp entries"* ]]
+    [[ "$output" != *review_5ea34* && "$output" != *fresh* && "$output" != *claude-1000* ]]
+    [ -d "$S/cargotest-builddir" ] && [ -e "$S/old.log" ] && [ -d "$H/vam_check" ]
+}
+
+@test "worktree-trim keeps an idle tmp dir a live process has its cwd in, and sockets" {
+    make_tmp_sandbox
+    mkdir -p "$S/venv-server"; touch -d '13 hours ago' "$S/venv-server"
+    (cd "$S/venv-server" && exec sleep 30) & pid=$!
+    python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' "$S/agent.sock"
+    touch -h -d '13 hours ago' "$S/agent.sock"
+    run "$W" worktree-trim --tmp-only
+    kill "$pid" 2>/dev/null || true
+    [ "$status" -eq 0 ]
+    [ -d "$S/venv-server" ] && [ -S "$S/agent.sock" ]
+    [ ! -e "$S/cargotest-builddir" ]
+}
+
+@test "worktree-trim without --tmp-only trims the tmp roots too; unknown flags are refused" {
+    make_tmp_sandbox
+    run "$W" worktree-trim
+    [ "$status" -eq 0 ]
+    [ ! -e "$S/cargotest-builddir" ] && [ -d "$S/review_5ea34" ]
+    run "$W" worktree-trim --all
+    [ "$status" -eq 64 ]
+    run "$W" worktree-trim /tmp
+    [ "$status" -eq 64 ]
+}
+
+@test "worktree-trim never removes a symlink's target, only an idle link it owns" {
+    make_tmp_sandbox
+    mkdir -p "$T/precious"; touch "$T/precious/keep"
+    ln -s "$T/precious" "$S/link"; touch -h -d '13 hours ago' "$S/link"
+    run "$W" worktree-trim --tmp-only
+    [ "$status" -eq 0 ]
+    [ ! -L "$S/link" ] && [ -e "$T/precious/keep" ]
+}
