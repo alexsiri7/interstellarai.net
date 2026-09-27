@@ -1,0 +1,13 @@
+# /etc/systemd/system/safe-reboot.service — installed by ops/host/install.sh (step 8).
+# One gate tick: reboots only when /var/run/reboot-required exists, inside the
+# nightly window, and nothing is busy (see /usr/local/sbin/safe-reboot --help).
+[Unit]
+Description=Safe reboot gate (reboot for pending updates only when the host is idle)
+Documentation=file:/mnt/ext-fast/interstellarai.net/ops/host/README.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/safe-reboot gate
+# The gate records tmux panes (/tmp/tmux-<uid>) and user units: no PrivateTmp.
+TimeoutStartSec=30min

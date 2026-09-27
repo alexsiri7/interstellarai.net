@@ -1,0 +1,606 @@
+#!/usr/bin/env bash
+# safe-reboot — installed to /usr/local/sbin by ops/host/install.sh (step 8).
+#
+#   safe-reboot status              # any user: what the gate would do now, and why (alias: --dry-run)
+#   safe-reboot gate                # root, from safe-reboot.timer every 15 min
+#   safe-reboot restore [--dry-run] # root, from safe-reboot-restore.service once per boot
+#
+# Replaces unattended-upgrades' Automatic-Reboot (which rebooted at 05:45 on
+# whatever day /var/run/reboot-required appeared, 2026-09-26: mid-session).
+#
+# gate: acts only while /var/run/reboot-required exists and only inside the
+# nightly window (SAFE_REBOOT_WINDOW, 02:30-06:30 local). It reboots when
+# nothing is busy:
+#   hard (never overridden)  the hold file; a DB backup / restore test / weekly
+#                            maintenance / archon update script mid-run;
+#                            apt, dpkg or unattended-upgrade running
+#   soft (overridden by the  archon runs running or paused (in the DB of the
+#         deadline)          user the run-as flag names); an `archon workflow
+#                            run` process; a Claude transcript (.jsonl under any
+#                            user's ~/.claude/projects) written in the last
+#                            SAFE_REBOOT_ACTIVE_MIN (30) minutes
+# Before rebooting it saves the run-as flag and sets it to drain (never
+# overwriting a drain someone else set), re-checks archon, records the owner's
+# running user services and interactive Claude sessions (cwd, session id, tmux
+# session/window, permission flags), ntfys, syncs, reboots. A reboot pending
+# longer than SAFE_REBOOT_DEADLINE_H (72) hours ignores the soft blockers: one
+# urgent warning ntfy, then the reboot on the next tick at least 10 minutes
+# later (touch the hold file in between to veto). While a reboot is pending and
+# has not happened, one ntfy a day (from 07:00) says since when and why.
+#
+# restore: puts the flag back, makes sure the right archon-serve unit (system
+# unit under ARCHON_RUN_AS=archon, the owner's user unit otherwise) answers,
+# restarts the recorded user services, recreates the tmux sessions with
+# `claude --resume <id>` in the recorded cwd (idle, at the prompt), and ntfys a
+# health summary.
+#
+# Root never executes or sources a file a user can edit: the ntfy topic is
+# grepped out of secrets.env (as smartd-ntfy does), the run-as flag is parsed
+# with sed, every archon CLI call and every write into the owner's home runs as
+# that user through runuser.
+#
+# Every path and command is overridable through SAFE_REBOOT_* variables so
+# ops/cron/tests/safe-reboot.bats can run it as a normal user against stubs.
+set -uo pipefail
+
+OWNER="${SAFE_REBOOT_OWNER:-asiri}"
+OWNER_HOME="${SAFE_REBOOT_OWNER_HOME:-$(getent passwd "$OWNER" | cut -d: -f6)}"; OWNER_HOME="${OWNER_HOME:-/home/$OWNER}"
+FACTORY_USER="${SAFE_REBOOT_FACTORY_USER:-archon}"
+REBOOT_REQUIRED="${SAFE_REBOOT_REQUIRED:-/var/run/reboot-required}"
+STATE="${SAFE_REBOOT_STATE_DIR:-/var/lib/safe-reboot}"
+HOLD="${SAFE_REBOOT_HOLD:-$OWNER_HOME/.config/safe-reboot/hold}"
+WINDOW="${SAFE_REBOOT_WINDOW:-02:30-06:30}"
+DEADLINE_H="${SAFE_REBOOT_DEADLINE_H:-72}"
+ACTIVE_MIN="${SAFE_REBOOT_ACTIVE_MIN:-30}"
+DAILY_HOUR="${SAFE_REBOOT_DAILY_HOUR:-7}"
+FORCE_GRACE_S="${SAFE_REBOOT_FORCE_GRACE_S:-600}"
+FLAG_FILE="${SAFE_REBOOT_FLAG_FILE:-$OWNER_HOME/.config/archon-cron/run-as}"
+SECRETS="${SAFE_REBOOT_SECRETS:-$OWNER_HOME/.config/archon-cron/secrets.env}"
+ENGINE="${SAFE_REBOOT_ENGINE:-/mnt/ext-fast/archon}"
+REPO="${SAFE_REBOOT_REPO:-/mnt/ext-fast/interstellarai.net}"
+BUN="${SAFE_REBOOT_BUN:-$OWNER_HOME/.bun/bin/bun}"
+WRAPPER="${SAFE_REBOOT_WRAPPER:-/usr/local/bin/archon-as-archon}"
+SERVE_UNIT="${SAFE_REBOOT_SERVE_UNIT:-archon-serve.service}"
+SERVE_URL="${SAFE_REBOOT_SERVE_URL:-http://127.0.0.1:3090/}"
+BOOT_ID_FILE="${SAFE_REBOOT_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}"
+REBOOT_CMD="${SAFE_REBOOT_REBOOT_CMD:-systemctl reboot}"
+SYNC_TIMEOUT="${SAFE_REBOOT_SYNC_TIMEOUT:-900}"
+WAIT_S="${SAFE_REBOOT_WAIT_S:-120}"
+# Homes whose ~/.claude/projects count as "a Claude session is working".
+# Default: every passwd entry with a ~/.claude/projects directory.
+HOMES="${SAFE_REBOOT_HOMES:-}"
+# Scripts that must not be cut off (ops/cron/crontab): the 3-hourly DB backup,
+# the Sunday restore test, weekly apt maintenance, the weekly archon update and
+# the Sunday cache trim. Plus apt/dpkg themselves.
+JOBS_RE="${SAFE_REBOOT_JOBS_RE:-ops/cron/(backup-dbs|restore-test|system-maintenance|archon-update)\.sh|pipeline-health-cron\.sh --trim}"
+APT_RE="${SAFE_REBOOT_APT_RE:-^(/usr/bin/)?(dpkg|apt|apt-get|aptitude)( |$)|/usr/bin/unattended-upgrade( |$)|apt\.systemd\.daily}"
+RUNS_PROC_RE='archon workflow run |cli\.ts workflow run '
+
+TOOL="${SAFE_REBOOT_TOOL:-safe-reboot}"
+NOW="${SAFE_REBOOT_NOW:-$(date +%s)}"
+ME=$(id -un)
+IS_ROOT=0; [ "$(id -u)" -eq 0 ] && IS_ROOT=1
+
+log()  { printf '%s [%s] %s\n' "$(date -d "@$NOW" '+%F %T')" "$TOOL" "$*"; }
+line() { printf '    %s\n' "$*"; }
+
+boot_id() { cat "$BOOT_ID_FILE" 2>/dev/null || echo unknown; }
+fmt_ts()  { date -d "@$1" '+%a %d %b %H:%M'; }
+hm_to_min() { local h=${1%%:*} m=${1##*:}; echo $(( 10#$h * 60 + 10#$m )); }
+
+# ------------------------------------------------------------ as a user -----
+# as_user <user> <cmd...> — run as <user>: directly when we are that user,
+# through runuser when root, otherwise fail with 126 ("needs root").
+as_user() {
+    local u="$1"; shift
+    if [ "$ME" = "$u" ]; then "$@"
+    elif [ "$IS_ROOT" -eq 1 ]; then runuser -u "$u" -- "$@"
+    else return 126; fi
+}
+# owner_systemctl <args...> — the owner's user manager.
+owner_systemctl() {
+    if [ "$ME" = "$OWNER" ]; then systemctl --user "$@"
+    elif [ "$IS_ROOT" -eq 1 ]; then systemctl --user -M "$OWNER@" "$@"
+    else return 126; fi
+}
+owner_tmux() {
+    as_user "$OWNER" env HOME="$OWNER_HOME" XDG_RUNTIME_DIR="/run/user/$(id -u "$OWNER" 2>/dev/null || echo 1000)" tmux "$@"
+}
+
+# ----------------------------------------------------------------- ntfy -----
+# The topic is grepped, never sourced: root must not execute a file the owner
+# can edit (same rule as ops/host/smartd-ntfy).
+DRY=0
+notify() {  # title body [priority] [tags]
+    local title="$1" body="$2" prio="${3:-default}" tags="${4:-arrows_counterclockwise}" topic=""
+    if [ "$DRY" -eq 1 ]; then line "would ntfy ($prio): $title — $body"; return 0; fi
+    [ -r "$SECRETS" ] && topic=$(grep -E '^NTFY_TOPIC=' "$SECRETS" | head -n1 | cut -d= -f2- | tr -d '"'"'")
+    if [ -z "$topic" ]; then log "WARNING: NTFY_TOPIC not found in $SECRETS — not delivered: $title"; return 0; fi
+    curl -s --fail -o /dev/null --max-time 20 -H "Title: $title" -H "Priority: $prio" -H "Tags: $tags" \
+        -d "$body" "https://ntfy.sh/$topic" || log "WARNING: ntfy failed: $title"
+    return 0
+}
+
+# ------------------------------------------------------------- run-as flag --
+# Same parse as ops/cron/lib/run-as.sh; "unknown" when it cannot be read.
+flag_read() {
+    if [ ! -e "$FLAG_FILE" ]; then echo asiri; return; fi
+    [ -r "$FLAG_FILE" ] || { echo unknown; return; }
+    local m
+    m=$(sed -nE 's/^[[:space:]]*ARCHON_RUN_AS=["'\'']?([a-z]+)["'\'']?[[:space:]]*(#.*)?$/\1/p' "$FLAG_FILE" | tail -n 1)
+    case "$m" in archon|drain) echo "$m" ;; *) echo asiri ;; esac
+}
+FLAG_MARK="safe-reboot"
+# flag_write <value> <header> — same shape as ops/host/archon-user/install.sh
+# set_flag (one comment line, ARCHON_RUN_AS=<value>, 0600, owner's), written
+# as the owner with mktemp + mv in the same directory.
+flag_write() {
+    local val="$1" header="$2"
+    # shellcheck disable=SC2016  # expanded by the inner sh
+    as_user "$OWNER" sh -c 'set -e; d=$(dirname "$1"); mkdir -p "$d"; t=$(mktemp "$1.XXXXXX");
+        printf "%s\nARCHON_RUN_AS=%s\n" "$3" "$2" > "$t"; chmod 0600 "$t"; mv -f "$t" "$1"' \
+        sh "$FLAG_FILE" "$val" "$header"
+}
+flag_ours() { grep -q "$FLAG_MARK" "$FLAG_FILE" 2>/dev/null; }
+
+# ------------------------------------------------------------ busy checks ---
+# Each check appends "hard:<reason>" or "soft:<reason>" lines to $REASONS.
+REASONS=""
+add() { REASONS+="$1"$'\n'; }
+
+check_hold() {
+    [ -e "$HOLD" ] || return 0
+    local why; why=$(head -c 200 "$HOLD" 2>/dev/null | head -n 1)
+    add "hard:hold file $HOLD (since $(fmt_ts "$(stat -c %Y "$HOLD")"))${why:+: $why}"
+}
+
+check_jobs() {
+    local out
+    out=$(pgrep -af -- "$JOBS_RE" 2>/dev/null | grep -v -- "$TOOL" | head -n 3)
+    [ -n "$out" ] && add "hard:maintenance job running: $(tr '\n' ';' <<<"$out" | cut -c1-200)"
+    out=$(pgrep -af -- "$APT_RE" 2>/dev/null | head -n 3)
+    [ -n "$out" ] && add "hard:apt/dpkg running: $(tr '\n' ';' <<<"$out" | cut -c1-200)"
+    return 0
+}
+
+# runs_count <status> — count of archon runs in the DB of the user the flag
+# names; "unknown" when the query fails (which counts as busy).
+runs_count() {
+    local st="$1" flag="$2" raw
+    if [ "$flag" = archon ]; then
+        # The shape ops/host/archon-user/install.sh --rollback uses; the wrapper validates argv.
+        raw=$(cd / && as_user "$FACTORY_USER" "$WRAPPER" workflow runs --all --status "$st" --json 2>/dev/null) || { echo unknown; return; }
+    else
+        # The shape install.sh --cutover's drain check uses, as the owner, clean env.
+        raw=$(cd / && as_user "$OWNER" env -i HOME="$OWNER_HOME" PATH="$OWNER_HOME/.bun/bin:/usr/bin:/bin" CLAUDECODE=0 \
+              ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING=1 "$BUN" "$ENGINE/packages/cli/src/cli.ts" \
+              workflow runs --all --status "$st" --limit 100 --json --cwd "$REPO" 2>/dev/null) || { echo unknown; return; }
+    fi
+    printf '%s' "$raw" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["runs"]))' 2>/dev/null || echo unknown
+}
+
+check_archon() {
+    local flag="$1" who st n p
+    case "$flag" in archon) who="$FACTORY_USER" ;; unknown) add "soft:run-as flag $FLAG_FILE unreadable"; return 0 ;; *) who="$OWNER" ;; esac
+    for st in running paused; do
+        n=$(runs_count "$st" "$flag")
+        [ "$n" = 0 ] && continue
+        if [ "$n" = unknown ]; then add "soft:archon $st runs in $who's DB: unknown (query failed$( [ "$IS_ROOT" -eq 0 ] && [ "$ME" != "$who" ] && echo ', needs root'))"
+        else add "soft:archon: $n $st run(s) in $who's DB"; fi
+    done
+    p=$(pgrep -fc -- "$RUNS_PROC_RE" 2>/dev/null || true)
+    [ "${p:-0}" -gt 0 ] && add "soft:$p 'archon workflow run' process(es)"
+    return 0
+}
+
+list_homes() {
+    if [ -n "$HOMES" ]; then tr ' ' '\n' <<<"$HOMES"; return; fi
+    getent passwd | cut -d: -f6 | sort -u | while read -r h; do [ -d "$h/.claude/projects" ] && echo "$h"; done
+}
+
+check_claude() {
+    local h f unread=()
+    while read -r h; do
+        [ -n "$h" ] || continue
+        if [ ! -r "$h/.claude/projects" ] || [ ! -x "$h/.claude/projects" ]; then unread+=("$h"); continue; fi
+        f=$(find "$h/.claude/projects" -name '*.jsonl' -mmin "-$ACTIVE_MIN" -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n 1)
+        [ -n "$f" ] && add "soft:Claude session active in the last ${ACTIVE_MIN}m: ${f#* } ($(date -d "@${f%%.*}" +%H:%M))"
+    done < <(list_homes)
+    [ "${#unread[@]}" -gt 0 ] && UNREAD_NOTE="cannot read ${unread[*]} ~/.claude/projects (needs root) — not counted"
+    return 0
+}
+
+evaluate() {  # fills REASONS
+    REASONS=""; UNREAD_NOTE=""
+    check_hold
+    check_jobs
+    check_archon "$(flag_read)"
+    check_claude
+}
+reasons_of() { grep "^$1:" <<<"$REASONS" | cut -d: -f2-; }
+reasons_csv() { grep -v '^$' <<<"$REASONS" | cut -d: -f2- | paste -sd';' | sed 's/;/; /g'; }
+
+in_window() {
+    local s e n
+    s=$(hm_to_min "${WINDOW%-*}"); e=$(hm_to_min "${WINDOW#*-}"); n=$(hm_to_min "$(date -d "@$NOW" +%H:%M)")
+    if [ "$s" -le "$e" ]; then [ "$n" -ge "$s" ] && [ "$n" -lt "$e" ]
+    else [ "$n" -ge "$s" ] || [ "$n" -lt "$e" ]; fi
+}
+
+# pending_since — epoch this boot first saw reboot-required. Persisted in
+# $STATE (reboot-required lives on tmpfs and apt touches it again on every
+# upgrade that needs a reboot, so its mtime is not "since").
+pending_since() {
+    local f="$STATE/pending-since" b since sb
+    b=$(boot_id)
+    if [ -r "$f" ]; then read -r since sb < "$f"; [ "$sb" = "$b" ] && [ -n "$since" ] && { echo "$since"; return; }; fi
+    since=$(stat -c %Y "$REBOOT_REQUIRED" 2>/dev/null || echo "$NOW")
+    [ "$since" -gt "$NOW" ] && since=$NOW
+    if [ "$DRY" -eq 0 ]; then printf '%s %s\n' "$since" "$b" > "$f"; fi
+    echo "$since"
+}
+
+# ------------------------------------------------------- record for restore -
+# services.tsv: unit <TAB> how (start|runtime) <TAB> target unit
+# A transient unit (systemd-run) is gone after a reboot: it is restarted as the
+# persistent unit in ~/.config/systemd/user with the same ExecStart when one
+# exists (cloud-mirror-firstrun -> cloud-mirror.service), else its unit file
+# is saved and re-installed as a runtime unit (/run/user/<uid>/systemd/user).
+record_services() {
+    local out="$1" u frag ufs exe tgt p
+    : > "$out"
+    owner_systemctl list-units --type=service --state=running,activating --no-legend --plain 2>/dev/null \
+      | awk '{print $1}' | while read -r u; do
+        [ -n "$u" ] && [ "$u" != "$SERVE_UNIT" ] || continue
+        frag=$(owner_systemctl show "$u" -p FragmentPath --value 2>/dev/null)
+        ufs=$(owner_systemctl show "$u" -p UnitFileState --value 2>/dev/null)
+        [ "$ufs" = enabled ] && continue                       # comes back by itself
+        case "$frag" in "$OWNER_HOME"/.config/systemd/user/*|/run/user/*/systemd/transient/*) ;; *) continue ;; esac
+        if [ "$ufs" != transient ]; then printf '%s\tstart\t%s\n' "$u" "$u" >> "$out"; continue; fi
+        exe=$(owner_systemctl show "$u" -p ExecStart --value 2>/dev/null | sed -nE 's/.*argv\[\]=([^;]*);.*/\1/p' | sed 's/ *$//')
+        tgt=""
+        for p in "$OWNER_HOME"/.config/systemd/user/*.service; do
+            [ -e "$p" ] || continue
+            [ "$(owner_systemctl show "${p##*/}" -p ExecStart --value 2>/dev/null | sed -nE 's/.*argv\[\]=([^;]*);.*/\1/p' | sed 's/ *$//')" = "$exe" ] \
+                && { tgt="${p##*/}"; break; }
+        done
+        if [ -n "$tgt" ]; then printf '%s\tstart\t%s\n' "$u" "$tgt" >> "$out"
+        else cp "$frag" "$STATE/restore/unit.$u" 2>/dev/null && printf '%s\truntime\t%s\n' "$u" "$u" >> "$out"; fi
+    done
+}
+
+# sessions.tsv: user <TAB> session_id <TAB> cwd <TAB> tmux session <TAB> window index <TAB> window name <TAB> flags
+# From ~/.claude/sessions/<pid>.json (written by every claude process): only
+# live (pid + start time match) interactive CLI sessions; the factory's
+# sdk-ts sessions are archon's to resume, not ours.
+record_sessions() {
+    local out="$1" h u panes
+    : > "$out"
+    while read -r h; do
+        [ -d "$h/.claude/sessions" ] && [ -r "$h/.claude/sessions" ] || continue
+        u=$(stat -c %U "$h")
+        panes=$(owner_tmux list-panes -a -F '#{pane_id}	#{session_name}	#{window_index}	#{window_name}' 2>/dev/null || true)
+        [ "$u" = "$OWNER" ] || panes=""
+        PANES="$panes" SR_USER="$u" python3 - "$h/.claude/sessions" >> "$out" <<'PY'
+import json, os, sys, glob
+panes = {}
+for l in os.environ.get("PANES", "").splitlines():
+    f = l.split("\t")
+    if len(f) == 4:
+        panes[f[0]] = f[1:]
+KEEP = ("--permission-mode", "--model", "--effort", "--agent")
+KEEP_BARE = ("--dangerously-skip-permissions", "--allow-dangerously-skip-permissions")
+for path in sorted(glob.glob(os.path.join(sys.argv[1], "*.json"))):
+    try:
+        d = json.load(open(path))
+        pid = int(d["pid"])
+        if d.get("kind") != "interactive" or d.get("entrypoint") != "cli":
+            continue
+        stat = open(f"/proc/{pid}/stat").read()
+        start = stat.rsplit(")", 1)[1].split()[19]
+        if str(d.get("procStart", start)) != start:
+            continue
+        argv = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")
+        argv = [a.decode(errors="replace") for a in argv if a][1:]
+    except (OSError, ValueError, KeyError, IndexError):
+        continue
+    flags, i = [], 0
+    while i < len(argv):
+        a = argv[i]
+        if a in KEEP_BARE or any(a.startswith(k + "=") for k in KEEP):
+            flags.append(a)
+        elif a in KEEP and i + 1 < len(argv):
+            flags.append(f"{a}={argv[i + 1]}"); i += 1
+        i += 1
+    pane = str(d.get("tmux") or "")
+    if not pane:
+        try:
+            env = open(f"/proc/{pid}/environ", "rb").read().split(b"\0")
+            pane = next((e[10:].decode() for e in env if e.startswith(b"TMUX_PANE=")), "")
+        except OSError:
+            pane = ""
+    pane_id = pane.rsplit(".", 1)[-1] if pane else ""
+    sess, widx, wname = panes.get(pane_id, ["", "", ""])
+    if not sess and pane and ":" in pane:
+        sess = pane.split(":", 1)[0]
+    # "-" for empty: bash `read` with IFS=tab collapses empty fields.
+    row = [os.environ["SR_USER"], d["sessionId"], d.get("cwd", ""), sess or "restored", widx or "-", wname or "claude", " ".join(flags) or "-"]
+    print("\t".join(str(x).replace("\t", " ").replace("\n", " ") for x in row))
+PY
+    done < <(list_homes)
+}
+
+# --------------------------------------------------------------- the gate ---
+ABORT_FLAG_PREV=""
+restore_flag_on_abort() {
+    [ -n "$ABORT_FLAG_PREV" ] || return 0
+    if flag_ours; then
+        flag_write "$ABORT_FLAG_PREV" "# Written by safe-reboot (reboot aborted, flag put back) — read by ops/cron/lib/run-as.sh" \
+            && log "flag put back to ARCHON_RUN_AS=$ABORT_FLAG_PREV (reboot aborted)"
+    fi
+    rm -rf "$STATE/restore"
+    ABORT_FLAG_PREV=""
+}
+
+cmd_gate() {
+    [ "$DRY" -eq 1 ] || [ "$IS_ROOT" -eq 1 ] || [ -n "${SAFE_REBOOT_TEST:-}" ] || { echo "gate needs root (or: $TOOL status)" >&2; exit 1; }
+    [ "$DRY" -eq 1 ] || mkdir -p "$STATE"
+    local b; b=$(boot_id)
+
+    # A recorded reboot that never happened (reboot command failed, or the
+    # host was powered off by hand before it) must not leave the factory drained.
+    if [ "$DRY" -eq 0 ] && [ -r "$STATE/restore/meta" ] && grep -qx "boot_id=$b" "$STATE/restore/meta" \
+       && [ $(( NOW - $(stat -c %Y "$STATE/restore/meta") )) -gt 1200 ]; then
+        ABORT_FLAG_PREV=$(sed -n 's/^flag_prev=//p' "$STATE/restore/meta")
+        [ "$(sed -n 's/^flag_written=//p' "$STATE/restore/meta")" = 1 ] || ABORT_FLAG_PREV=""
+        log "a reboot recorded 20+ minutes ago on this boot never happened — undoing the drain"
+        restore_flag_on_abort; rm -rf "$STATE/restore"
+        notify "Reboot did not happen on $(hostname)" "safe-reboot recorded a reboot on this boot that never took place; the archon flag was put back. Check: journalctl -u safe-reboot.service" high warning
+    fi
+
+    local since age overdue=0 pkgs
+    if [ ! -e "$REBOOT_REQUIRED" ]; then
+        log "no reboot pending ($REBOOT_REQUIRED absent)"
+        if [ "$DRY" -eq 0 ]; then rm -f "$STATE/pending-since" "$STATE/force-warned" "$STATE/last-blocked"; return 0; fi
+        line "(status: evaluating as if one had just become pending)"
+        since=$NOW
+    else
+        since=$(pending_since)
+    fi
+    age=$(( NOW - since ))
+    [ "$age" -gt $(( DEADLINE_H * 3600 )) ] && overdue=1
+    pkgs=$( [ -r "$REBOOT_REQUIRED.pkgs" ] && sort -u "$REBOOT_REQUIRED.pkgs" | paste -sd' ' )
+    log "reboot pending since $(fmt_ts "$since") ($(( age / 3600 ))h; deadline ${DEADLINE_H}h${pkgs:+; $pkgs})"
+
+    evaluate
+    local hard soft
+    hard=$(reasons_of hard); soft=$(reasons_of soft)
+    [ -n "$UNREAD_NOTE" ] && line "note: $UNREAD_NOTE"
+    if [ -n "$REASONS" ]; then line "busy:"; grep -v '^$' <<<"$REASONS" | sed 's/^/      - /'; else line "idle: nothing blocks a reboot"; fi
+
+    if ! in_window; then
+        line "outside the window $WINDOW — no reboot now"
+        daily_ntfy "$since" "$overdue"
+        return 0
+    fi
+    if [ "$DRY" -eq 0 ]; then printf '%s\t%s\n' "$NOW" "$(reasons_csv)" > "$STATE/last-blocked"; fi
+
+    if [ -n "$hard" ]; then
+        line "decision: wait — hard blocker (the deadline never overrides these)"
+        return 0
+    fi
+    local forced=0
+    if [ -n "$soft" ]; then
+        if [ "$overdue" -eq 0 ]; then line "decision: wait — busy, not overdue"; return 0; fi
+        local warned=0
+        [ -r "$STATE/force-warned" ] && warned=$(cat "$STATE/force-warned")
+        if [ $(( NOW - warned )) -gt 3600 ]; then
+            line "decision: overdue (>${DEADLINE_H}h) — warning now, forcing on the next tick"
+            notify "Forcing reboot of $(hostname) in ~15 min" \
+                "Reboot pending since $(fmt_ts "$since") (> ${DEADLINE_H}h). Forcing it despite: $(reasons_csv). Veto: touch $HOLD" urgent warning
+            [ "$DRY" -eq 1 ] || echo "$NOW" > "$STATE/force-warned"
+            return 0
+        fi
+        if [ $(( NOW - warned )) -lt "$FORCE_GRACE_S" ]; then line "decision: overdue — warned $(( (NOW - warned) / 60 ))m ago, waiting out the grace period"; return 0; fi
+        forced=1
+        line "decision: overdue and warned — forcing the reboot"
+    else
+        line "decision: reboot now"
+    fi
+    [ "$DRY" -eq 1 ] && { dry_reboot_plan; return 0; }
+    do_reboot "$since" "$forced"
+}
+
+daily_ntfy() {  # since overdue
+    local today; today=$(date -d "@$NOW" +%F)
+    [ "$(date -d "@$NOW" +%-H)" -ge "$DAILY_HOUR" ] || return 0
+    [ "$(cat "$STATE/daily-notified" 2>/dev/null)" = "$today" ] && return 0
+    local last why
+    last=$(cut -f2- "$STATE/last-blocked" 2>/dev/null)
+    why=${last:-$(reasons_csv)}; why=${why:-nothing (the window is $WINDOW)}
+    notify "Reboot pending on $(hostname)" \
+        "Reboot pending since $(fmt_ts "$1"); blocked by: $why. Next window $WINDOW; forced after ${DEADLINE_H}h unless $HOLD exists." \
+        "$( [ "$2" -eq 1 ] && echo high || echo default )" arrows_counterclockwise
+    [ "$DRY" -eq 1 ] || echo "$today" > "$STATE/daily-notified"
+}
+
+dry_reboot_plan() {
+    local flag tmp; flag=$(flag_read); tmp=$(mktemp -d)
+    line "would: save ARCHON_RUN_AS=$flag$( [ "$flag" = drain ] && echo ' (already drain: left as is, restored as drain)' || echo ', set drain')"
+    line "would: re-check archon runs, record, ntfy, sync, $REBOOT_CMD"
+    record_services "$tmp/s" 2>/dev/null; record_sessions "$tmp/c" 2>/dev/null
+    line "would restore user services after boot:"; sed 's/^/      - /' "$tmp/s"; [ -s "$tmp/s" ] || line "  (none)"
+    line "would resume Claude sessions after boot:"; awk -F'\t' '{printf "      - %s %s in %s (tmux %s:%s %s) %s\n", $1, $2, $3, $4, $5, $6, $7}' "$tmp/c"; [ -s "$tmp/c" ] || line "  (none)"
+    rm -rf "$tmp"
+}
+
+do_reboot() {  # since forced
+    local flag written=0
+    flag=$(flag_read)
+    if [ "$flag" = unknown ]; then log "cannot read $FLAG_FILE — not rebooting"; return 1; fi
+    rm -rf "$STATE/restore"; mkdir -p "$STATE/restore"; chmod 0700 "$STATE/restore"
+    # meta before the flag: whatever happens next, the previous value is on disk.
+    printf 'boot_id=%s\nat=%s\nflag_prev=%s\nflag_written=0\nforced=%s\n' "$(boot_id)" "$NOW" "$flag" "$2" > "$STATE/restore/meta"
+    trap 'restore_flag_on_abort' EXIT
+    if [ "$flag" != drain ]; then
+        ABORT_FLAG_PREV="$flag"
+        if ! flag_write drain "# Written by $FLAG_MARK before a reboot (was ARCHON_RUN_AS=$flag; put back after boot) — read by ops/cron/lib/run-as.sh"; then
+            log "could not set the flag to drain — not rebooting"; return 1
+        fi
+        written=1; sed -i 's/^flag_written=0/flag_written=1/' "$STATE/restore/meta"
+        log "flag: ARCHON_RUN_AS=drain (was $flag)"
+    else
+        log "flag already drain (set by someone else) — left alone"
+    fi
+    # A cron tick may have launched a run between the check and the drain.
+    if [ "$2" -eq 0 ]; then
+        REASONS=""; check_archon "$flag"
+        if [ -n "$REASONS" ]; then log "archon became busy after the drain ($(reasons_csv)) — not rebooting"; return 0; fi
+    fi
+    record_services "$STATE/restore/services.tsv"
+    record_sessions "$STATE/restore/sessions.tsv"
+    log "recorded $(wc -l < "$STATE/restore/services.tsv") user service(s), $(wc -l < "$STATE/restore/sessions.tsv") Claude session(s)"
+    local svc ses
+    svc=$(cut -f1 "$STATE/restore/services.tsv" | paste -sd' '); ses=$(cut -f3 "$STATE/restore/sessions.tsv" | xargs -r -n1 basename | paste -sd' ')
+    notify "Rebooting $(hostname)$( [ "$2" -eq 1 ] && echo ' (forced, deadline)')" \
+        "Reboot pending since $(fmt_ts "$1"). Will restore: flag=$flag; services: ${svc:-none}; Claude sessions: ${ses:-none}." default arrows_counterclockwise
+    log "sync (up to ${SYNC_TIMEOUT}s)"
+    timeout "$SYNC_TIMEOUT" sync || log "WARNING: sync did not finish in ${SYNC_TIMEOUT}s — rebooting anyway"
+    trap - EXIT; ABORT_FLAG_PREV=""
+    log "rebooting: $REBOOT_CMD"
+    # shellcheck disable=SC2086  # a command line by design
+    if ! $REBOOT_CMD; then
+        ABORT_FLAG_PREV=$( [ "$written" -eq 1 ] && echo "$flag" ); restore_flag_on_abort
+        notify "Reboot FAILED on $(hostname)" "$REBOOT_CMD failed; flag put back. journalctl -u safe-reboot.service" high warning
+        return 1
+    fi
+    return 0
+}
+
+# ----------------------------------------------------------- the restore ----
+serve_code() { curl -s -o /dev/null --max-time 5 -w '%{http_code}' "$SERVE_URL" 2>/dev/null || true; }
+
+cmd_restore() {
+    [ "$DRY" -eq 1 ] || [ "$IS_ROOT" -eq 1 ] || [ -n "${SAFE_REBOOT_TEST:-}" ] || { echo "restore needs root (or: $TOOL restore --dry-run)" >&2; exit 1; }
+    local meta="$STATE/restore/meta"
+    [ "$DRY" -eq 1 ] || rm -f "$STATE/pending-since" "$STATE/force-warned" "$STATE/daily-notified" "$STATE/last-blocked"
+    if [ ! -r "$meta" ]; then log "nothing recorded — not a safe-reboot reboot"; return 0; fi
+    local prev written same_boot=0 i st
+    prev=$(sed -n 's/^flag_prev=//p' "$meta"); written=$(sed -n 's/^flag_written=//p' "$meta")
+    grep -qx "boot_id=$(boot_id)" "$meta" && same_boot=1
+    log "restoring state recorded $(fmt_ts "$(sed -n 's/^at=//p' "$meta")") (flag was $prev)"
+
+    # 1. the user manager (lingering) must be up before anything of the owner's.
+    if [ "$DRY" -eq 0 ]; then
+        for ((i = 0; i < WAIT_S; i += 2)); do
+            st=$(owner_systemctl is-system-running 2>/dev/null || true)
+            case "$st" in running|degraded) break ;; esac
+            sleep 2
+        done
+        log "owner's user manager: ${st:-unreachable}"
+    fi
+
+    # 2. archon-serve: system unit after the cutover, the owner's user unit before.
+    local serve="" code
+    if [ "$prev" = archon ]; then
+        if [ "$DRY" -eq 1 ]; then line "would: systemctl start $SERVE_UNIT (system unit, User=$FACTORY_USER)"
+        else systemctl is-active -q "$SERVE_UNIT" || systemctl start "$SERVE_UNIT" || log "WARNING: systemctl start $SERVE_UNIT failed"; fi
+        serve="system $SERVE_UNIT"
+    else
+        if [ "$DRY" -eq 1 ]; then line "would: systemctl --user -M $OWNER@ start $SERVE_UNIT"
+        else owner_systemctl is-active -q "$SERVE_UNIT" || owner_systemctl start "$SERVE_UNIT" || log "WARNING: user $SERVE_UNIT start failed"; fi
+        serve="$OWNER's user $SERVE_UNIT"
+    fi
+    code=""
+    if [ "$DRY" -eq 0 ]; then
+        for ((i = 0; i < WAIT_S; i += 2)); do code=$(serve_code); [ "$code" = 200 ] && break; sleep 2; done
+        log "$serve: $SERVE_URL answers ${code:-nothing}"
+    fi
+
+    # 3. the flag, only if it is still the drain we wrote (the owner may have
+    #    changed it by hand since).
+    local flagmsg="flag left alone (was already drain)"
+    if [ "$written" = 1 ]; then
+        if [ "$(flag_read)" = drain ] && flag_ours; then
+            if [ "$DRY" -eq 1 ]; then flagmsg="would put ARCHON_RUN_AS=$prev back"
+            elif flag_write "$prev" "# Written by $FLAG_MARK restore after a reboot — read by ops/cron/lib/run-as.sh"; then flagmsg="flag back to $prev"
+            else flagmsg="FAILED to put the flag back to $prev"; fi
+        else flagmsg="flag changed by hand since ($(flag_read)) — left alone"; fi
+    fi
+    log "$flagmsg"
+
+    # 4. user services (--no-block: the NAS mirror runs for hours).
+    local restored=() u how tgt
+    if [ "$same_boot" -eq 0 ] && [ -r "$STATE/restore/services.tsv" ]; then
+        while IFS=$'\t' read -r u how tgt; do
+            [ -n "$u" ] || continue
+            if [ "$DRY" -eq 1 ]; then line "would start $tgt ($how, was $u)"; continue; fi
+            if [ "$how" = runtime ]; then
+                local rdir; rdir="/run/user/$(id -u "$OWNER")/systemd/user"
+                # shellcheck disable=SC2016
+                as_user "$OWNER" sh -c 'mkdir -p "$1" && cat > "$1/$2"' sh "$rdir" "$tgt" < "$STATE/restore/unit.$u" \
+                    && owner_systemctl daemon-reload
+            fi
+            owner_systemctl reset-failed "$tgt" 2>/dev/null
+            if owner_systemctl start --no-block "$tgt"; then restored+=("$tgt"); else log "WARNING: could not start $tgt"; fi
+        done < "$STATE/restore/services.tsv"
+    fi
+
+    # 5. Claude sessions: one tmux window each, `claude --resume <id>` typed into
+    #    a login shell (so the pane survives claude exiting), idle at the prompt.
+    local sessions=() user sid cwd ts _widx wname flags first unit
+    if [ "$same_boot" -eq 0 ] && [ -r "$STATE/restore/sessions.tsv" ]; then
+        while IFS=$'\t' read -r user sid cwd ts _widx wname flags; do
+            [ "$flags" = - ] && flags=""
+            [ -n "$sid" ] && [ "$user" = "$OWNER" ] || continue
+            [ -d "$cwd" ] || cwd="$OWNER_HOME"
+            [[ "$sid" =~ ^[0-9a-f-]+$ ]] || continue
+            local cmd="unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SSE_PORT; claude --resume $sid${flags:+ $flags}"
+            if [ "$DRY" -eq 1 ]; then line "would resume in tmux $ts ($wname) at $cwd: $cmd"; continue; fi
+            if owner_tmux has-session -t "=$ts" 2>/dev/null; then
+                owner_tmux new-window -d -t "=$ts:" -n "$wname" -c "$cwd"
+            else
+                # The first tmux server must live in the owner's user manager,
+                # not in this oneshot's cgroup (which is killed when it exits).
+                unit="safe-reboot-tmux-$(tr -c 'A-Za-z0-9\n' '-' <<<"$ts")-$(date +%s)"
+                if [ "$IS_ROOT" -eq 1 ]; then set -- -M "$OWNER@"; else set --; fi
+                systemd-run --user "$@" --quiet --collect --unit="$unit" -p Type=forking \
+                    /usr/bin/tmux new-session -d -s "$ts" -n "$wname" -c "$cwd"
+            fi
+            first=$(owner_tmux list-windows -t "=$ts" -F '#{window_index} #{window_name}' 2>/dev/null | awk -v n="$wname" '$2 == n {w = $1} END {print w}')
+            if [ -n "$first" ] && owner_tmux send-keys -t "=$ts:$first" "$cmd" Enter; then
+                sessions+=("$ts:$wname ($(basename "$cwd"))")
+            else log "WARNING: could not start tmux window for session $sid"; fi
+        done < "$STATE/restore/sessions.tsv"
+    fi
+
+    # 6. health summary.
+    local health=() failed_sys failed_usr freeroot
+    code=$(serve_code); health+=("archon-serve ${code:-down}")
+    health+=("flag $(flag_read)")
+    failed_sys=$(systemctl list-units --state=failed --no-legend --plain 2>/dev/null | awk '{print $1}' | paste -sd' ')
+    failed_usr=$(owner_systemctl list-units --state=failed --no-legend --plain 2>/dev/null | awk '{print $1}' | paste -sd' ')
+    health+=("failed units: ${failed_sys:-none}${failed_usr:+; user: $failed_usr}")
+    freeroot=$(df -Pm / | awk 'NR == 2 {print int($4 / 1024) "G"}'); health+=("/ free $freeroot")
+    if [ "$prev" = archon ] && [ "$DRY" -eq 0 ] && [ -x "$REPO/ops/host/archon-user/verify.sh" ]; then
+        local v; v=$(cd / && timeout 300 runuser -u "$OWNER" -- "$REPO/ops/host/archon-user/verify.sh" 2>&1)
+        health+=("verify.sh $(grep -c PASS <<<"$v") PASS / $(grep -c FAIL <<<"$v") FAIL")
+    fi
+    local summary
+    summary="Back up after reboot. $flagmsg; restored services: ${restored[*]:-none}; Claude sessions: ${sessions[*]:-none}. Health: $(printf '%s; ' "${health[@]}" | sed 's/; $//')."
+    log "$summary"
+    local prio=default
+    { [ "${code:-}" != 200 ] || [ -n "$failed_sys$failed_usr" ]; } && prio=high
+    notify "$(hostname) back up after reboot" "$summary" "$prio" white_check_mark
+    if [ "$DRY" -eq 0 ]; then rm -rf "$STATE/restored.last"; mv "$STATE/restore" "$STATE/restored.last"; fi
+    return 0
+}
+
+# ------------------------------------------------------------------ main ----
+case "${1:-}" in
+    status|--dry-run|-n) DRY=1; log "status (dry-run: nothing is changed, no ntfy is sent)"; cmd_gate ;;
+    gate) cmd_gate ;;
+    restore) [ "${2:-}" = --dry-run ] && DRY=1; cmd_restore ;;
+    -h|--help) sed -n '2,40p' "$0" ;;
+    *) echo "usage: $TOOL status|gate|restore [--dry-run]" >&2; exit 2 ;;
+esac

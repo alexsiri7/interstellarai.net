@@ -1,0 +1,11 @@
+# /etc/systemd/system/safe-reboot.timer — installed by ops/host/install.sh (step 8).
+[Unit]
+Description=Safe reboot gate every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+AccuracySec=1min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

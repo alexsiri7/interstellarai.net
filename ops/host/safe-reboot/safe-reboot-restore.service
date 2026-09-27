@@ -1,0 +1,18 @@
+# /etc/systemd/system/safe-reboot-restore.service — installed by ops/host/install.sh (step 8).
+# Once per boot: puts back what safe-reboot recorded before rebooting (run-as
+# flag, archon-serve, the owner's user services, Claude sessions in tmux) and
+# ntfys a health summary. A no-op after a boot safe-reboot did not cause.
+[Unit]
+Description=Restore the factory and sessions after a safe-reboot
+Documentation=file:/mnt/ext-fast/interstellarai.net/ops/host/README.md
+Wants=network-online.target
+After=network-online.target user@1000.service systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/safe-reboot restore
+TimeoutStartSec=15min
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
