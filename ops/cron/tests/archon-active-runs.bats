@@ -274,3 +274,30 @@ no_running() { export STUB_PAYLOAD='{"runs": []}'; }
     ! archon_worktree_active /mnt/ext-fast/musenmingle
     archon_run_active /mnt/ext-fast/musenmingle musenmingle '^archon-ship$' '#9'
 }
+
+@test "a listing that returns fewer runs than its total marks the snapshot unknown" {
+    export STUB_PAYLOAD='{"runs": [], "total": 0}'
+    export STUB_PAYLOAD_PAUSED='{"runs": [{"workflow_name": "archon-ship", "status": "paused",
+      "working_path": "/w/musenmingle/worktrees/archon/task-archon-ship-1",
+      "metadata": {"workflow_source": {"origin": "/mnt/ext-fast/musenmingle"}}}], "total": 101}'
+    run --separate-stderr archon_runs_snapshot
+    [[ "$stderr" == *"could not list paused runs"*"listing truncated: 1 of 101 runs returned"* ]]
+    archon_runs_snapshot 2>/dev/null
+    ! archon_runs_known
+    ! archon_worktrees_known
+}
+
+@test "archon_worktrees_known fails while an active run has no working_path" {
+    export STUB_PAYLOAD='{"runs": [{"workflow_name": "archon-ship", "status": "running",
+      "working_path": "/w/musenmingle/worktrees/archon/task-archon-ship-1",
+      "metadata": {"workflow_source": {"origin": "/mnt/ext-fast/musenmingle"}}}], "total": 1}'
+    export STUB_PAYLOAD_PAUSED='{"runs": [], "total": 0}'
+    archon_runs_snapshot
+    archon_worktrees_known
+
+    export STUB_PAYLOAD_PAUSED='{"runs": [{"workflow_name": "archon-ship", "status": "paused", "working_path": null,
+      "metadata": {"workflow_source": {"origin": "/mnt/ext-fast/musenmingle"}}}], "total": 1}'
+    archon_runs_snapshot
+    archon_runs_known
+    ! archon_worktrees_known
+}

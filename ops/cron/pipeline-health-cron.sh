@@ -1219,13 +1219,26 @@ autoclean_apks() {
   return 0
 }
 
-# archon_worktree_bases <project> — the dirs holding asiri's archon task
-# worktrees of <project>, one per line (see autoclean_stale_worktrees).
-archon_worktree_bases() {
+# archon_workspace_dirs <project> — asiri's archon workspace dirs of
+# <project>, one per line.
+archon_workspace_dirs() {
   printf '%s\n' \
-    "$HOME/.archon/workspaces/ext-fast/$1/worktrees/archon" \
-    "$HOME/.archon/workspaces/alexsiri7/$1/worktrees/archon" \
-    "$BASE_DIR/.archon/worktrees/ext-fast/$1/archon"
+    "$HOME/.archon/workspaces/ext-fast/$1" \
+    "$HOME/.archon/workspaces/alexsiri7/$1"
+}
+
+# archon_project_worktrees <project> — asiri's archon task worktrees of
+# <project>, one per line, across both layouts (see autoclean_stale_worktrees).
+archon_project_worktrees() {
+  local ws wt_base wt_bases=()
+  while IFS= read -r ws; do
+    wt_bases+=("$ws/worktrees/archon")
+  done < <(archon_workspace_dirs "$1")
+  wt_bases+=("$BASE_DIR/.archon/worktrees/ext-fast/$1/archon")
+  for wt_base in "${wt_bases[@]}"; do
+    [ -d "$wt_base" ] || continue
+    find "$wt_base" -mindepth 1 -maxdepth 1 -type d -name 'task-archon-*' 2>/dev/null
+  done
 }
 
 # autoclean_stale_worktrees [--dry-run] — remove Archon task worktrees whose
@@ -1258,36 +1271,31 @@ autoclean_stale_worktrees() {
     fi
 
     local removed=0
-    local wt_base bases
-    mapfile -t bases < <(archon_worktree_bases "$project")
-    for wt_base in "${bases[@]}"; do
-      [ -d "$wt_base" ] || continue
-      while IFS= read -r wt_path; do
-        local wt_name; wt_name=$(basename "$wt_path")
-        local branch="archon/$wt_name"
-        # Keep if there is an open PR on this branch.
-        if echo "$open_branches" | grep -qxF "$branch"; then
-          continue
-        fi
-        # Keep if modified in the last 4h — task may be in-progress but pre-PR.
-        if find "$wt_path" -maxdepth 0 -mmin -240 2>/dev/null | grep -q .; then
-          continue
-        fi
-        if [ "$dry_run" -eq 1 ]; then
-          local size; size=$(dir_size_mb "$wt_path")
-          log "autoclean: would remove $wt_path (${size}MB)"
-          candidates=$((candidates + 1)); total_mb=$((total_mb + size))
-          continue
-        fi
-        local rc=0
-        rm -rf "$wt_path" 2>/dev/null || rc=$?
-        if [ "$rc" -ne 0 ]; then
-          log "autoclean: rm -rf $wt_path failed (exit $rc)"
-          continue
-        fi
-        removed=$((removed + 1))
-      done < <(find "$wt_base" -maxdepth 1 -type d -name 'task-archon-*' 2>/dev/null)
-    done
+    while IFS= read -r wt_path; do
+      local wt_name; wt_name=$(basename "$wt_path")
+      local branch="archon/$wt_name"
+      # Keep if there is an open PR on this branch.
+      if echo "$open_branches" | grep -qxF "$branch"; then
+        continue
+      fi
+      # Keep if modified in the last 4h — task may be in-progress but pre-PR.
+      if find "$wt_path" -maxdepth 0 -mmin -240 2>/dev/null | grep -q .; then
+        continue
+      fi
+      if [ "$dry_run" -eq 1 ]; then
+        local size; size=$(dir_size_mb "$wt_path")
+        log "autoclean: would remove $wt_path (${size}MB)"
+        candidates=$((candidates + 1)); total_mb=$((total_mb + size))
+        continue
+      fi
+      local rc=0
+      rm -rf "$wt_path" 2>/dev/null || rc=$?
+      if [ "$rc" -ne 0 ]; then
+        log "autoclean: rm -rf $wt_path failed (exit $rc)"
+        continue
+      fi
+      removed=$((removed + 1))
+    done < <(archon_project_worktrees "$project")
 
     if [ "$removed" -gt 0 ]; then
       git -C "$repo_dir" worktree prune --expire now 2>/dev/null \
@@ -1347,48 +1355,49 @@ build_output_dirs() {
 # musenmingle one held 4-15 GB of Rust target/ on / (#123: / went 64% → 100%
 # in a week). An output dir written in the last hour is kept too: a run can
 # start after this tick's snapshot. With no snapshot (the --trim path, or a
-# failed listing) nothing can be told apart, so nothing is removed.
+# failed or truncated listing), or a run whose worktree archon never recorded,
+# nothing can be told apart, so nothing is removed.
 autoclean_build_output() {
   if ! archon_runs_known; then
     log "autoclean: build output skipped — no archon run snapshot this tick"
     return 0
   fi
+  if ! archon_worktrees_known; then
+    log "autoclean: build output skipped — an active archon run has no recorded worktree"
+    return 0
+  fi
   local removed=0 total_mb=0
-  local repo_dir project wt_base bases wt real dirs c size rc
+  local repo_dir project wt real dirs c size rc
   for repo_dir in "$BASE_DIR"/*/; do
     [ -d "$repo_dir/.git" ] || continue
     project=$(basename "$repo_dir")
-    mapfile -t bases < <(archon_worktree_bases "$project")
-    for wt_base in "${bases[@]}"; do
-      [ -d "$wt_base" ] || continue
-      while IFS= read -r wt; do
-        mapfile -t dirs < <(build_output_dirs "$wt")
-        [ "${#dirs[@]}" -gt 0 ] || continue
-        real=$(readlink -f "$wt")
-        if archon_worktree_active "$wt" "$real"; then
-          log "autoclean: build output kept — $wt has an active archon run"
+    while IFS= read -r wt; do
+      mapfile -t dirs < <(build_output_dirs "$wt")
+      [ "${#dirs[@]}" -gt 0 ] || continue
+      real=$(readlink -f "$wt")
+      if archon_worktree_active "$wt" "$real"; then
+        log "autoclean: build output kept — $wt has an active archon run"
+        continue
+      fi
+      if worktree_has_live_process "$real"; then
+        log "autoclean: build output kept — a live process is in $wt"
+        continue
+      fi
+      for c in "${dirs[@]}"; do
+        if find "$c" -mmin -60 -print -quit 2>/dev/null | grep -q .; then
+          log "autoclean: build output kept — $c written in the last hour"
           continue
         fi
-        if worktree_has_live_process "$real"; then
-          log "autoclean: build output kept — a live process is in $wt"
+        size=$(dir_size_mb "$c")
+        rc=0; rm -rf "$c" 2>/dev/null || rc=$?
+        if [ "$rc" -ne 0 ]; then
+          log "autoclean: rm -rf $c failed (exit $rc)"
           continue
         fi
-        for c in "${dirs[@]}"; do
-          if find "$c" -mmin -60 -print -quit 2>/dev/null | grep -q .; then
-            log "autoclean: build output kept — $c written in the last hour"
-            continue
-          fi
-          size=$(dir_size_mb "$c")
-          rc=0; rm -rf "$c" 2>/dev/null || rc=$?
-          if [ "$rc" -ne 0 ]; then
-            log "autoclean: rm -rf $c failed (exit $rc)"
-            continue
-          fi
-          log "autoclean: removed build output $c — freed ${size}MB"
-          removed=$((removed + 1)); total_mb=$((total_mb + size))
-        done
-      done < <(find "$wt_base" -mindepth 1 -maxdepth 1 -type d -name 'task-archon-*' 2>/dev/null)
-    done
+        log "autoclean: removed build output $c — freed ${size}MB"
+        removed=$((removed + 1)); total_mb=$((total_mb + size))
+      done
+    done < <(archon_project_worktrees "$project")
   done
   [ "$removed" -gt 0 ] && log "autoclean: build output — removed $removed dirs, freed ${total_mb}MB"
   return 0
@@ -1513,13 +1522,20 @@ check_disk() {
 
 # At 80-84% on / the light autoclean runs once a day instead of waiting for
 # the weekly --trim; from 85% check_disk runs it as part of autoclean_root.
-# The marker is written first so a failing trim is not retried every tick.
+# The marker is written first so a failing trim is not retried every tick. A
+# tick whose run snapshot cannot tell worktrees apart would skip the build
+# output, the bulk of what this trim is for, so it leaves the day's trim to a
+# later tick.
 check_daily_trim() {
   local used marker="$STATE_DIR/daily-trim" today
   used=$(disk_used_pct /)
   { [ -n "$used" ] && [ "$used" -ge 80 ] && [ "$used" -lt 85 ]; } || return 0
   today=$(date +%F)
   [ "$(cat "$marker" 2>/dev/null)" = "$today" ] && return 0
+  if ! archon_worktrees_known; then
+    log "disk / at ${used}% (>=80%) — daily light trim deferred: archon runs' worktrees unknown this tick"
+    return 0
+  fi
   echo "$today" > "$marker"
   log "disk / at ${used}% (>=80%) — daily light trim"
   autoclean_light
@@ -1544,7 +1560,7 @@ ensure_cargo_build_dir_config() {
 # Each archon worktree of this project keeps its intermediate build output under $root.
 [build]
 build-dir = \"$root/$project/{workspace-path-hash}\""
-    for ws in "$HOME/.archon/workspaces/alexsiri7/$project" "$HOME/.archon/workspaces/ext-fast/$project"; do
+    while IFS= read -r ws; do
       [ -d "$ws" ] || continue
       [ "$(cat "$ws/.cargo/config.toml" 2>/dev/null)" = "$want" ] && continue
       if mkdir -p "$ws/.cargo" && printf '%s\n' "$want" > "$ws/.cargo/config.toml"; then
@@ -1552,7 +1568,7 @@ build-dir = \"$root/$project/{workspace-path-hash}\""
       else
         log "cargo: writing $ws/.cargo/config.toml failed"
       fi
-    done
+    done < <(archon_workspace_dirs "$project")
   done
   return 0
 }

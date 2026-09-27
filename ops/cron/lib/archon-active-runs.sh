@@ -19,6 +19,7 @@
 #   if archon_run_active "$repo_dir" "$project" '^archon-ship$' "#42\\b"; then ...
 #   msg=$(archon_run_active_msg "$repo_dir" "$project" '^archon-ship$') # first match's user_message
 #   if archon_worktree_active "$wt" "$(readlink -f "$wt")"; then ...   # a run owns this worktree
+#   archon_worktrees_known || ...       # false when some active run's worktree is unknown
 #   archon_runs_known || ...            # false when this tick's snapshot failed
 #   archon_parked_runs 1800             # rows for paused runs nothing will resume
 #
@@ -79,7 +80,8 @@ ARCHON_RUNS_SNAPSHOT_OK=0
 # rewritten, so taking the max keeps a scheduler that is actively retrying from
 # ever looking stale. $8 is wait.waitingSince as an epoch, 0 otherwise.
 #
-# A listing failure leaves the snapshot short and sets ARCHON_RUNS_SNAPSHOT_OK=0
+# A listing failure, or a page holding fewer runs than its `total` (the listing
+# is capped at 100), leaves the snapshot short and sets ARCHON_RUNS_SNAPSHOT_OK=0
 # with one stderr line per failed status (cron captures stderr into the tick
 # log). Matchers then report "no active run" — the pgrep guards still stand —
 # so a tick never stalls on the snapshot; guards whose action is destructive
@@ -140,6 +142,10 @@ if not isinstance(runs, list):
     err = d.get("error") if isinstance(d, dict) else None
     sys.stderr.write(str(err or raw.strip()[:200]).replace("\n", " "))
     sys.exit(3)
+total = d.get("total")
+if isinstance(total, int) and total > len(runs):
+    sys.stderr.write(f"listing truncated: {len(runs)} of {total} runs returned")
+    sys.exit(3)
 for r in runs:
     name = r.get("workflow_name") or ""
     msg = (r.get("user_message") or "").replace("\t", " ").replace("\n", " ")
@@ -196,6 +202,15 @@ archon_worktree_active() {
       "$ARCHON_RUNS_SNAPSHOT" && return 0
   done
   return 1
+}
+
+# archon_worktrees_known — exit 0 when the snapshot is trustworthy and records a
+# worktree for every run in it. archon writes working_path once, and a run can
+# be live without one; archon_worktree_active cannot see that run's worktree,
+# so a guard that deletes on "no run owns this worktree" defers instead.
+archon_worktrees_known() {
+  archon_runs_known || return 1
+  awk -F'\t' '$9 == "" { exit 1 }' "$ARCHON_RUNS_SNAPSHOT"
 }
 
 # archon_parked_runs <stale_seconds> [hard_max_seconds]

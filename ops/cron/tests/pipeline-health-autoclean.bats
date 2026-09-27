@@ -298,7 +298,8 @@ make_worktree_sandbox() {
         printf '%s\n' "$GH_OPEN_BRANCHES"
     }
     export -f gh
-    load_fn archon_worktree_bases
+    load_fn archon_workspace_dirs
+    load_fn archon_project_worktrees
     load_fn autoclean_stale_worktrees
 }
 
@@ -424,7 +425,8 @@ make_build_output_sandbox() {
     git init -q "$BASE_DIR/musenmingle"
     export WT_BASE="$HOME/.archon/workspaces/alexsiri7/musenmingle/worktrees/archon"
     mkdir -p "$WT_BASE"
-    load_fn archon_worktree_bases
+    load_fn archon_workspace_dirs
+    load_fn archon_project_worktrees
     load_fn worktree_has_live_process
     load_fn build_output_dirs
     load_fn autoclean_build_output
@@ -544,6 +546,22 @@ make_build_worktree() {
     [[ "$output" == *"build output skipped — no archon run snapshot this tick"* ]]
 }
 
+@test "autoclean_build_output removes nothing while an active run has no recorded worktree" {
+    make_build_output_sandbox
+    local wt="$WT_BASE/task-archon-ship-1"
+    make_build_worktree "$wt"
+    # The paused run that owns $wt, with the working_path archon never wrote.
+    printf 'archon-ship\tpaused\t%s\tfix #1\trun-1\twait\t0\t0\t\n' "$BASE_DIR/musenmingle" > "$ARCHON_RUNS_SNAPSHOT"
+    worktree_has_live_process() { return 1; }
+
+    run autoclean_build_output
+    [ "$status" -eq 0 ]
+    [ -d "$wt/target/debug" ]
+    [ -d "$wt/frontend/node_modules" ]
+    [ -d "$wt/.next/cache" ]
+    [[ "$output" == *"build output skipped — an active archon run has no recorded worktree"* ]]
+}
+
 @test "autoclean_cargo_build_dirs removes build dirs idle for 2 days and keeps fresh ones" {
     export BASE_DIR="$STATE_DIR/base"
     load_fn autoclean_cargo_build_dirs
@@ -566,6 +584,10 @@ make_daily_trim_sandbox() {
     disk_used_pct() { echo "$DISK_PCT"; }
     autoclean_light() { echo "autoclean_light" >> "$CALLS"; }
     load_fn check_daily_trim
+    # shellcheck disable=SC1091
+    source "$(dirname "$SCRIPT_FILE")/lib/archon-active-runs.sh"
+    ARCHON_RUNS_SNAPSHOT="$STATE_DIR/snapshot"; : > "$ARCHON_RUNS_SNAPSHOT"
+    ARCHON_RUNS_SNAPSHOT_OK=1
 }
 
 @test "check_daily_trim runs the light trim once a day when / is 80-84%" {
@@ -592,14 +614,40 @@ make_daily_trim_sandbox() {
     [ ! -e "$STATE_DIR/daily-trim" ]
 }
 
+@test "check_daily_trim leaves the day's trim to a later tick when runs' worktrees are unknown" {
+    make_daily_trim_sandbox
+    export DISK_PCT=82
+    local reason
+    for reason in snapshot working_path; do
+        if [ "$reason" = snapshot ]; then
+            ARCHON_RUNS_SNAPSHOT_OK=0
+        else
+            ARCHON_RUNS_SNAPSHOT_OK=1
+            printf 'archon-ship\tpaused\t/mnt/ext-fast/musenmingle\tfix #1\trun-1\twait\t0\t0\t\n' > "$ARCHON_RUNS_SNAPSHOT"
+        fi
+        run check_daily_trim
+        [ "$status" -eq 0 ]
+        [[ "$output" == *"daily light trim deferred: archon runs' worktrees unknown this tick"* ]]
+        [ ! -s "$CALLS" ]
+        [ ! -e "$STATE_DIR/daily-trim" ]
+    done
+
+    : > "$ARCHON_RUNS_SNAPSHOT"
+    run check_daily_trim
+    [ "$(grep -cx autoclean_light "$CALLS")" -eq 1 ]
+    [ "$(cat "$STATE_DIR/daily-trim")" = "$(date +%F)" ]
+}
+
 # ── Cargo build-dir config ───────────────────────────────────────────────────
 
 make_cargo_config_sandbox() {
     export HOME="$STATE_DIR/home"
     export BASE_DIR="$STATE_DIR/base"
     mkdir -p "$BASE_DIR/musenmingle" "$BASE_DIR/reli" \
-        "$HOME/.archon/workspaces/alexsiri7/musenmingle" "$HOME/.archon/workspaces/alexsiri7/reli"
+        "$HOME/.archon/workspaces/alexsiri7/musenmingle" "$HOME/.archon/workspaces/alexsiri7/reli" \
+        "$HOME/.archon/workspaces/ext-fast/musenmingle"
     echo '[workspace]' > "$BASE_DIR/musenmingle/Cargo.toml"
+    load_fn archon_workspace_dirs
     load_fn ensure_cargo_build_dir_config
 }
 
@@ -610,6 +658,7 @@ make_cargo_config_sandbox() {
     run ensure_cargo_build_dir_config
     [ "$status" -eq 0 ]
     grep -qxF "build-dir = \"$BASE_DIR/.archon/cargo-build/musenmingle/{workspace-path-hash}\"" "$cfg"
+    cmp "$cfg" "$HOME/.archon/workspaces/ext-fast/musenmingle/.cargo/config.toml"
     [ ! -e "$HOME/.archon/workspaces/alexsiri7/reli/.cargo" ]
     [[ "$output" == *"cargo: $cfg → build-dir"* ]]
 
