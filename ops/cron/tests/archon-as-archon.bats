@@ -299,3 +299,22 @@ STUB
     done
     ! [[ "/home/x/var/backups/dpkg.status.0" =~ $SYSTEM_BACKUPS_RE ]]
 }
+
+@test "worktree-trim drops cargo build dirs idle 2 days, keeps fresh ones; --dry-run removes nothing" {
+    echo notcloned > "$T/noprojects"   # no clone: the worktree half makes no gh calls
+    export ARCHON_AS_PROJECTS_FILE="$T/noprojects"
+    bd="$T/home/.cache/cargo-build"
+    mkdir -p "$bd/ab/old1/debug/deps" "$bd/cd/new1/debug/deps" "$bd/ab/mixed/debug"
+    touch -d '3 days ago' "$bd/ab/old1/debug/deps/libx.rlib" "$bd/ab/old1/debug/deps" "$bd/ab/old1/debug" "$bd/ab/old1"
+    touch "$bd/cd/new1/debug/deps/liby.rlib"
+    touch -d '3 days ago' "$bd/ab/mixed" "$bd/ab/mixed/debug"; touch "$bd/ab/mixed/debug/fresh"
+    run "$W" worktree-trim --dry-run
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"would remove cargo build dir $bd/ab/old1 "* ]]
+    [[ "$output" != *new1* && "$output" != *mixed* ]]
+    [ -d "$bd/ab/old1" ]
+    run "$W" worktree-trim
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"removed 1 idle cargo build dirs"* ]]
+    [ ! -e "$bd/ab/old1" ] && [ -d "$bd/ab/mixed" ] && [ -d "$bd/cd/new1" ]
+}

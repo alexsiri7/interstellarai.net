@@ -13,7 +13,7 @@
 #   6. NodeSource                          node_20.x (EOL) -> node_24.x (current LTS)
 #   7. report whether a reboot is pending
 #   8. safe-reboot                         gate timer (reboot only when idle, 02:30-06:30) + restore at boot
-#   9. systemd-oomd                        user@.service memory-pressure kill limit 50% -> 80%
+#   9. systemd-oomd                        no memory-pressure kills of user@.service (ManagedOOMMemoryPressure=auto)
 #  10. sysctl                              vm.dirty_background_bytes 256M, vm.dirty_bytes 1G
 #
 # Every step is guarded so it can be run again after a partial failure.
@@ -352,7 +352,7 @@ done_ "hold file (veto, as asiri): mkdir -p ~/.config/safe-reboot && touch ~/.co
 [ "$DRY" -eq 0 ] && [ -x "$SAFE_REBOOT_BIN" ] && done_ "gate now: $("$SAFE_REBOOT_BIN" status 2>/dev/null | grep -m1 'decision:' | sed 's/^ *//')"
 
 # ------------------------------------------------------- 9. systemd-oomd ----
-say "9. systemd-oomd: user@.service memory-pressure limit 80% (Ubuntu default 50%)"
+say "9. systemd-oomd: no memory-pressure kills of user@.service (Ubuntu default: kill at 50%)"
 if install_file "$REPO_OOMD_DROPIN" "$OOMD_DROPIN" 0644; then
     # daemon-reload only: restarting user@1000.service would end every session.
     run systemctl daemon-reload && did "daemon-reload"
@@ -361,12 +361,17 @@ if install_file "$REPO_OOMD_DROPIN" "$OOMD_DROPIN" 0644; then
     run systemctl restart systemd-oomd && did "restarted systemd-oomd"
 fi
 if [ "$DRY" -eq 0 ]; then
-    # systemctl shows the limit scaled to 2^32: 50% = 2147483648, 80% = 3435973836.
-    lim=$(systemctl show user@1000.service -p ManagedOOMMemoryPressureLimit --value 2>/dev/null)
-    if [ "${lim:-0}" -ge 3400000000 ] 2>/dev/null; then done_ "user@1000.service ManagedOOMMemoryPressureLimit=$lim (80%)"
-    else fail oomd "user@1000.service ManagedOOMMemoryPressureLimit=${lim:-?} after installing $OOMD_DROPIN (want 80% = 3435973836) — systemd-analyze cat-config user@.service"; fi
-    if oomctl 2>/dev/null | grep -A2 'user@1000.service$' | grep -q 'Memory Pressure Limit: 80'; then done_ "oomctl: user@1000.service limit 80%"
-    else done_ "(oomctl does not show user@1000.service at 80% yet — check: oomctl | grep -A2 user@1000)"; fi
+    mode=$(systemctl show user@1000.service -p ManagedOOMMemoryPressure --value 2>/dev/null)
+    if [ "$mode" = auto ]; then done_ "user@1000.service ManagedOOMMemoryPressure=auto (not monitored)"
+    else fail oomd "user@1000.service ManagedOOMMemoryPressure=${mode:-?} after installing $OOMD_DROPIN (want auto) — systemd-analyze cat-config user@.service"; fi
+    # The monitored list sits between "Memory Pressure Monitored CGroups:" and the end.
+    if ! oomctl_out=$(oomctl 2>/dev/null); then
+        done_ "(oomctl failed — is systemd-oomd running? check: oomctl)"
+    elif printf '%s\n' "$oomctl_out" | sed -n '/Memory Pressure Monitored CGroups:/,$p' | grep -q 'user@1000\.service$'; then
+        fail oomd "oomctl still monitors user@1000.service for memory pressure — systemctl restart systemd-oomd, then: oomctl"
+    else
+        done_ "oomctl: user@1000.service not monitored for memory pressure"
+    fi
 fi
 
 # ------------------------------------------------------- 10. sysctl ---------

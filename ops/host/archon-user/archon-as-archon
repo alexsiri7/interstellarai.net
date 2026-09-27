@@ -27,7 +27,8 @@
 #   doctor                                                        archon doctor
 #   claude-probe [timeout-seconds]   one real `claude -p --model haiku` request
 #   gh-probe                         gh auth + push access per factory repo
-#   worktree-trim [--dry-run]        remove stale task worktrees (no open PR, idle 4h)
+#   worktree-trim [--dry-run]        remove stale task worktrees (no open PR, idle 4h) and
+#                                    cargo build dirs idle 2 days
 #   bun-upgrade                      `bun upgrade` of archon's own bun
 #   ensure-clones                    clone every factory repo that is missing
 #   selftest [abs-path...]           prove what archon can and cannot read; the
@@ -419,7 +420,26 @@ verb_worktree_trim() {
             echo "autoclean: pruned $removed stale worktrees for $p"
         fi
     done
-    [ "$dry" = 1 ] && echo "autoclean: dry run — $candidates stale worktrees, ${total}MB total"
+    # Cargo build dirs ($ARCHON_HOME_DIR/.cargo/config.toml, written by
+    # install.sh step 5: build-dir = .cache/cargo-build/{workspace-path-hash},
+    # laid out <2 hex>/<rest of hash>/). Nothing else removes them; one nothing
+    # wrote to for 2 days goes, and cargo rebuilds it on demand.
+    local bd_root="$ARCHON_HOME_DIR/.cache/cargo-build" bd bd_removed=0 bd_mb=0
+    for bd in "$bd_root"/*/*/; do
+        [ -d "$bd" ] || continue
+        bd=${bd%/}
+        find "$bd" -mmin -2880 -print -quit 2>/dev/null | grep -q . && continue
+        size=$(du -sm "$bd" 2>/dev/null | cut -f1 || true); size=${size:-0}
+        if [ "$dry" = 1 ]; then
+            echo "autoclean: would remove cargo build dir $bd (${size}MB)"
+            candidates=$((candidates + 1)); total=$((total + size)); continue
+        fi
+        if rm -rf "$bd" 2>/dev/null; then bd_removed=$((bd_removed + 1)); bd_mb=$((bd_mb + size))
+        else echo "autoclean: rm -rf $bd failed"; fi
+    done
+    [ "$dry" = 1 ] || find "$bd_root" -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null
+    [ "$bd_removed" -gt 0 ] && echo "autoclean: removed $bd_removed idle cargo build dirs (${bd_mb}MB)"
+    [ "$dry" = 1 ] && echo "autoclean: dry run — $candidates stale worktrees / cargo build dirs, ${total}MB total"
     return 0
 }
 
@@ -523,6 +543,12 @@ verb_selftest() {
                          *) fail "tool missing: $t" ;; esac
         fi
     done
+    # cargo intermediates off / wherever an agent builds, /tmp included (#133)
+    if grep -q '^build-dir = "'"$ARCHON_HOME_DIR"'/' "$ARCHON_HOME_DIR/.cargo/config.toml" 2>/dev/null; then
+        pass "cargo build-dir: $(grep -m1 '^build-dir' "$ARCHON_HOME_DIR/.cargo/config.toml")"
+    else
+        warn "cargo build-dir not set in $ARCHON_HOME_DIR/.cargo/config.toml — builds outside a factory worktree (/tmp) write to / (re-run install.sh)"
+    fi
     if out=$(cd "$ARCHON_HOME_DIR" && timeout 60 env -i "${ENV[@]}" claude mcp list 2>&1); then
         if grep -qi 'claude\.ai' <<<"$out"; then fail "claude.ai connectors visible to factory sessions: $(grep -i 'claude\.ai' <<<"$out" | head -3 | tr '\n' ';')"
         else pass "claude mcp list: no claude.ai connectors"; fi
