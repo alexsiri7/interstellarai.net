@@ -732,3 +732,19 @@ make_cargo_config_sandbox() {
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
+
+@test "ensure_cargo_build_dir_config configures a workspace dir shared through a symlink once, for the first project" {
+    make_cargo_config_sandbox
+    mkdir -p "$BASE_DIR/thaleia"
+    echo '[workspace]' > "$BASE_DIR/thaleia/Cargo.toml"
+    ln -s "$HOME/.archon/workspaces/alexsiri7/musenmingle" "$HOME/.archon/workspaces/alexsiri7/thaleia"
+    local cfg="$HOME/.archon/workspaces/alexsiri7/musenmingle/.cargo/config.toml"
+
+    run ensure_cargo_build_dir_config
+    [ "$status" -eq 0 ]
+    grep -qxF "build-dir = \"$BASE_DIR/.archon/cargo-build/musenmingle/{workspace-path-hash}\"" "$cfg"
+    run ensure_cargo_build_dir_config
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    grep -qxF "build-dir = \"$BASE_DIR/.archon/cargo-build/musenmingle/{workspace-path-hash}\"" "$cfg"
+}

@@ -1592,9 +1592,12 @@ check_daily_trim() {
 # the owner's own clone alone. `{workspace-path-hash}` gives each worktree its
 # own dir: one shared target-dir served a worktree another branch's binary,
 # since cargo judged the other build fresh by mtime. Final binaries still land
-# in the worktree's ./target.
+# in the worktree's ./target. A workspace dir that resolves to one already
+# configured this tick (a project symlinked to another) stays with the first
+# project, so two projects never flip each other's build-dir every tick.
 ensure_cargo_build_dir_config() {
-  local root="$BASE_DIR/.archon/cargo-build" repo_dir project ws want
+  local root="$BASE_DIR/.archon/cargo-build" repo_dir project ws want real
+  local -A configured=()
   for repo_dir in "$BASE_DIR"/*/; do
     [ -f "$repo_dir/Cargo.toml" ] || continue
     project=$(basename "$repo_dir")
@@ -1604,6 +1607,9 @@ ensure_cargo_build_dir_config() {
 build-dir = \"$root/$project/{workspace-path-hash}\""
     while IFS= read -r ws; do
       [ -d "$ws" ] || continue
+      real=$(readlink -f "$ws")
+      [ -n "${configured[$real]:-}" ] && continue
+      configured[$real]=1
       [ "$(cat "$ws/.cargo/config.toml" 2>/dev/null)" = "$want" ] && continue
       if mkdir -p "$ws/.cargo" && printf '%s\n' "$want" > "$ws/.cargo/config.toml"; then
         log "cargo: $ws/.cargo/config.toml → build-dir $root/$project/{workspace-path-hash}"
