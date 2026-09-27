@@ -307,3 +307,24 @@ add_units() {
     [ "$(flag)" = asiri ]
     [ -z "$(ls -A "$T/state")" ]
 }
+
+@test "restore never ran after the reboot: the next gate tick puts the flag back (only the flag) and ntfys" {
+    pending; add_sessions; add_units
+    run "$SCRIPT" gate
+    [ "$(flag)" = drain ]
+    echo boot-2 > "$T/boot_id"; rm -f "$T/reboot-required" "$T/tmux.log" "$T/ntfy.log"
+    run "$SCRIPT" gate
+    [ "$(flag)" = asiri ]
+    grep -q '^high|safe-reboot restore did not run' "$T/ntfy.log"
+    [ ! -e "$T/state/restore" ] && [ -d "$T/state/restored.last" ]
+    [ ! -e "$T/tmux.log" ]
+}
+
+@test "restore skips a session whose directory is gone" {
+    pending; add_sessions
+    run "$SCRIPT" gate
+    rmdir "$T/work"; echo boot-2 > "$T/boot_id"
+    run "$SCRIPT" restore
+    [[ "$output" == *"is gone — not resuming 11111111-2222-3333-4444-555555555555"* ]]
+    ! grep -q 'send-keys' "$T/tmux.log" 2>/dev/null
+}

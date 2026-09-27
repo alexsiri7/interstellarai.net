@@ -168,8 +168,14 @@ check_jobs() {
 runs_count() {
     local st="$1" flag="$2" raw
     if [ "$flag" = archon ]; then
-        # The shape ops/host/archon-user/install.sh --rollback uses; the wrapper validates argv.
-        raw=$(cd / && as_user "$FACTORY_USER" "$WRAPPER" workflow runs --all --status "$st" --json 2>/dev/null) || { echo unknown; return; }
+        # The shape ops/host/archon-user/install.sh --rollback uses; the wrapper
+        # validates argv. As root through runuser; as the owner through the
+        # one sudo rule the cron path (lib/archon-shim) uses.
+        if [ "$IS_ROOT" -eq 1 ] || [ "$ME" = "$FACTORY_USER" ]; then
+            raw=$(cd / && as_user "$FACTORY_USER" "$WRAPPER" workflow runs --all --status "$st" --json 2>/dev/null) || { echo unknown; return; }
+        else
+            raw=$(cd / && sudo -n -u "$FACTORY_USER" "$WRAPPER" workflow runs --all --status "$st" --json 2>/dev/null) || { echo unknown; return; }
+        fi
     else
         # The shape install.sh --cutover's drain check uses, as the owner, clean env.
         raw=$(cd / && as_user "$OWNER" env -i HOME="$OWNER_HOME" PATH="$OWNER_HOME/.bun/bin:/usr/bin:/bin" CLAUDECODE=0 \
@@ -185,7 +191,7 @@ check_archon() {
     for st in running paused; do
         n=$(runs_count "$st" "$flag")
         [ "$n" = 0 ] && continue
-        if [ "$n" = unknown ]; then add "soft:archon $st runs in $who's DB: unknown (query failed$( [ "$IS_ROOT" -eq 0 ] && [ "$ME" != "$who" ] && echo ', needs root'))"
+        if [ "$n" = unknown ]; then add "soft:archon $st runs in $who's DB: unknown (query failed)"
         else add "soft:archon: $n $st run(s) in $who's DB"; fi
     done
     p=$(pgrep -fc -- "$RUNS_PROC_RE" 2>/dev/null || true)
@@ -359,6 +365,23 @@ cmd_gate() {
     fi
 
     local since age overdue=0 pkgs
+    # A restore that never ran (or died) after a safe-reboot leaves the flag on
+    # our drain with nothing pending to notice it: put the flag back from the
+    # meta of the previous boot. Only the flag — services and sessions may be
+    # half-restored, and starting them twice is worse than not at all.
+    if [ "$DRY" -eq 0 ] && [ -r "$STATE/restore/meta" ] && ! grep -qx "boot_id=$b" "$STATE/restore/meta"; then
+        local p w
+        p=$(sed -n 's/^flag_prev=//p' "$STATE/restore/meta"); w=$(sed -n 's/^flag_written=//p' "$STATE/restore/meta")
+        log "state recorded before an earlier reboot was never restored — putting the flag back only"
+        if [ "$w" = 1 ] && [ "$(flag_read)" = drain ] && flag_ours; then
+            flag_write "$p" "# Written by $FLAG_MARK (restore had not run after the reboot) — read by ops/cron/lib/run-as.sh" \
+                && log "flag back to ARCHON_RUN_AS=$p"
+        fi
+        rm -rf "$STATE/restored.last"; mv "$STATE/restore" "$STATE/restored.last"
+        notify "safe-reboot restore did not run on $(hostname)" \
+            "The state recorded before the last reboot was never restored (journalctl -u safe-reboot-restore.service -b -1). Flag: $(flag_read). Services and Claude sessions were NOT restarted: see $STATE/restored.last." high warning
+    fi
+
     if [ ! -e "$REBOOT_REQUIRED" ]; then
         log "no reboot pending ($REBOOT_REQUIRED absent)"
         if [ "$DRY" -eq 0 ]; then rm -f "$STATE/pending-since" "$STATE/force-warned" "$STATE/last-blocked"; return 0; fi
@@ -553,7 +576,8 @@ cmd_restore() {
         while IFS=$'\t' read -r user sid cwd ts _widx wname flags; do
             [ "$flags" = - ] && flags=""
             [ -n "$sid" ] && [ "$user" = "$OWNER" ] || continue
-            [ -d "$cwd" ] || cwd="$OWNER_HOME"
+            # --resume looks the session up by project directory: without it, skip.
+            if [ ! -d "$cwd" ]; then log "WARNING: $cwd is gone — not resuming $sid"; continue; fi
             [[ "$sid" =~ ^[0-9a-f-]+$ ]] || continue
             local cmd="unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SSE_PORT; claude --resume $sid${flags:+ $flags}"
             if [ "$DRY" -eq 1 ]; then line "would resume in tmux $ts ($wname) at $cwd: $cmd"; continue; fi

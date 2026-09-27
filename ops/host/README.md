@@ -136,7 +136,7 @@ window **02:30–06:30**. Then it reboots unless something is busy:
 
 | Blocker | Kind | How it is detected |
 |---|---|---|
-| **hold file** `~asiri/.config/safe-reboot/hold` | hard | exists (any content; its first line is quoted in the ntfy). Touch it to veto reboots, `rm` it to allow them again. It lives in the owner's 0700 config dir, so the `archon` user cannot set or clear it. |
+| **hold file** `~asiri/.config/safe-reboot/hold` | hard | exists (any content; its first line is quoted in the ntfy). Create it to veto reboots (`mkdir -p ~/.config/safe-reboot && touch ~/.config/safe-reboot/hold`), `rm` it to allow them again. It lives in the owner's 0700 config dir, so the `archon` user cannot set or clear it. |
 | a cron job that must not be cut off | hard | `pgrep -f` on `ops/cron/{backup-dbs,restore-test,system-maintenance,archon-update}.sh` and `pipeline-health-cron.sh --trim` (none of them takes a lock). |
 | apt / dpkg | hard | `dpkg`, `apt`, `apt-get`, `aptitude`, `/usr/bin/unattended-upgrade`, `apt.systemd.daily` running (not the `unattended-upgrade-shutdown` daemon). |
 | archon runs | soft | `running` or `paused` runs in the run DB of the user `~asiri/.config/archon-cron/run-as` names: `asiri`/`drain` → asiri's CLI (`bun …/cli.ts workflow runs --all --status …`, as asiri, clean env, `CLAUDECODE=0`, the shape `archon-user/install.sh --cutover` uses); `archon` → `archon-as-archon workflow runs` as archon (the `--rollback` shape). A query that fails counts as busy. Plus any `archon workflow run` process. |
@@ -197,13 +197,16 @@ Commands:
 ```
 safe-reboot status                  # any user: what the gate would do now and why (changes nothing, sends nothing)
 safe-reboot restore --dry-run       # what the restore would do from the recorded state
-touch ~/.config/safe-reboot/hold    # veto (as asiri);  rm it to allow again
+mkdir -p ~/.config/safe-reboot && touch ~/.config/safe-reboot/hold   # veto (as asiri); rm it to allow again
 journalctl -u safe-reboot.service -u safe-reboot-restore.service
 systemctl list-timers safe-reboot.timer
 ```
 
-As asiri, `status` cannot read the archon user's run DB or home and says so ("needs
-root"); `sudo safe-reboot status` sees everything. Window, deadline and paths are
+As asiri, `status` asks archon's run DB through the same `sudo -n -u archon
+archon-as-archon` door the cron scripts use, but cannot read the archon user's
+`~/.claude`; `sudo safe-reboot status` sees everything. If `safe-reboot-restore`
+did not run after a reboot, the next gate tick puts the flag back (only the flag)
+and ntfys. Window, deadline and paths are
 `SAFE_REBOOT_*` variables at the top of the script (e.g. a
 `systemctl edit safe-reboot.service` drop-in with `Environment=SAFE_REBOOT_WINDOW=01:00-05:00`).
 

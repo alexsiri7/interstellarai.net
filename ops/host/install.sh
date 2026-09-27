@@ -322,7 +322,7 @@ esac
 # ------------------------------------------------------- 7. reboot ----------
 say "7. reboot status"
 if [ -f /var/run/reboot-required ]; then
-    done_ "/var/run/reboot-required EXISTS — a reboot is pending$( [ -r /var/run/reboot-required.pkgs ] && printf ' (%s)' "$(sort -u /var/run/reboot-required.pkgs | tr '\n' ' ')" ). safe-reboot reboots in the next idle window ($(/usr/local/sbin/safe-reboot status 2>/dev/null | grep -m1 'decision:' | sed 's/^ *//' || echo 'status unknown')); or: sudo reboot"
+    done_ "/var/run/reboot-required EXISTS — a reboot is pending$( [ -r /var/run/reboot-required.pkgs ] && printf ' (%s)' "$(sort -u /var/run/reboot-required.pkgs | tr '\n' ' ')" ). the safe-reboot gate (step 8) reboots in the next idle 02:30-06:30 window (safe-reboot status says what blocks it); or: sudo reboot"
 else
     done_ "/var/run/reboot-required absent — no reboot pending"
 fi
@@ -348,7 +348,8 @@ if [ "$DRY" -eq 0 ] && systemctl is-enabled -q safe-reboot.timer 2>/dev/null && 
 else
     run systemctl enable --now safe-reboot.timer && did "enabled and started safe-reboot.timer"
 fi
-done_ "hold file (veto, as the owner): touch ~asiri/.config/safe-reboot/hold   — status: safe-reboot status"
+done_ "hold file (veto, as asiri): mkdir -p ~/.config/safe-reboot && touch ~/.config/safe-reboot/hold   — status: safe-reboot status"
+[ "$DRY" -eq 0 ] && [ -x "$SAFE_REBOOT_BIN" ] && done_ "gate now: $("$SAFE_REBOOT_BIN" status 2>/dev/null | grep -m1 'decision:' | sed 's/^ *//')"
 
 # ------------------------------------------------------- 9. systemd-oomd ----
 say "9. systemd-oomd: user@.service memory-pressure limit 80% (Ubuntu default 50%)"
