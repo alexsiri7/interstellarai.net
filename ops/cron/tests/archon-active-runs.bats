@@ -260,3 +260,17 @@ no_running() { export STUB_PAYLOAD='{"runs": []}'; }
     [ "$(snapshot_field 6)" = "" ]
     [ -z "$(archon_parked_runs 1800)" ]
 }
+
+@test "snapshot records the run's worktree as field 9 and archon_worktree_active matches it exactly" {
+    export STUB_PAYLOAD='{"runs": [{"workflow_name": "archon-ship", "status": "running", "user_message": "fix #9",
+      "working_path": "/w/musenmingle/worktrees/archon/task-archon-ship-1",
+      "metadata": {"workflow_source": {"origin": "/mnt/ext-fast/musenmingle"}}}]}'
+    export STUB_PAYLOAD_PAUSED='{"runs": []}'
+    archon_runs_snapshot
+    [ "$(snapshot_field 9)" = "/w/musenmingle/worktrees/archon/task-archon-ship-1" ]
+    archon_worktree_active /w/musenmingle/worktrees/archon/task-archon-ship-1
+    archon_worktree_active /elsewhere /w/musenmingle/worktrees/archon/task-archon-ship-1
+    ! archon_worktree_active /w/musenmingle/worktrees/archon/task-archon-ship-10
+    ! archon_worktree_active /mnt/ext-fast/musenmingle
+    archon_run_active /mnt/ext-fast/musenmingle musenmingle '^archon-ship$' '#9'
+}
