@@ -1523,14 +1523,6 @@ check_disk() {
       clean_body="Stale archon worktrees, the build output (target/, node_modules/, .next/cache) of inactive ones and idle Cargo build dirs were removed but disk still >=85%. Pipeline will stall if this fills. See $LOG_DIR/pipeline-health.log."
     fi
 
-    # Name the biggest /tmp entries when /tmp lives on this filesystem (on /
-    # until ops/host/install.sh step 11 binds it from /mnt/ext-fast, #133).
-    local top
-    top=$(tmp_top_consumers "$mount")
-    [ -n "$top" ] && clean_body="$clean_body
-Top /tmp consumers:
-$top"
-
     local before="$used"
     log "disk $mount at ${before}% — $clean_verb before ntfy"
     "$clean_fn"
@@ -1540,6 +1532,14 @@ $top"
     log "disk $mount ${before}% → ${after}% after cleanup"
     if [ "$after" -ge 85 ]; then
       log "disk $mount still at ${after}% after cleanup — ntfying"
+      # Name the biggest /tmp entries (after the cleanup) when /tmp lives on
+      # this filesystem (/ until ops/host/install.sh step 11 binds it from
+      # /mnt/ext-fast, #133).
+      local top
+      top=$(tmp_top_consumers "$mount")
+      [ -n "$top" ] && clean_body="$clean_body
+Top /tmp consumers:
+$top"
       notify "Disk warning: $mount ${after}% (was ${before}%)" "$clean_body" high warning
     else
       log "disk $mount recovered (${before}% → ${after}%) — no ntfy"
