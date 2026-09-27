@@ -318,6 +318,7 @@ Also written by `install.sh`:
 - `/etc/archon-user/config`, owner opt-ins (`ALLOW_ALL_REPOS_TOKEN=1`), only by `--allow-all-repos-token`
 - `/usr/local/lib/archon-user/bin/archon`, a symlink to the engine's CLI
 - `/mnt/ext-fast/archon-home/{.archon/config.yaml,.archon/.env,.gitconfig,.claude/settings.json}`
+- `/mnt/ext-fast/archon-home/.cargo/config.toml`: `build-dir` under `~/.cache/cargo-build/{workspace-path-hash}` for every cargo build archon runs, including `git worktree add /tmp/x && cargo test`, which the per-worktree config (#131) never reaches; `/tmp` is on the slow root SSD (#133). A worktree's own `.cargo/config.toml` still wins. `worktree-trim` removes build dirs nothing wrote to for 2 days; `verify.sh` (selftest) WARNs if the config is missing.
 - `/mnt/ext-fast/archon-home/.config/archon-user/claude.env`, the token, mode 0600
 
 ## Tests

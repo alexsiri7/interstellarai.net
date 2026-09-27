@@ -23,7 +23,7 @@
 #   4. the NTFS mounts (/mnt/steam-*: DB backups) lose umask=000 in /etc/fstab
 #      (-> umask=077) and are remounted when idle
 #   5. archon's home: ~/.archon (config.yaml, .env, workflows), ~/.gitconfig,
-#      ~/.claude/settings.json, tmp, repos
+#      ~/.claude/settings.json, ~/.cargo/config.toml (build-dir), tmp, repos
 #   6. toolchains copied into archon's home (bun, claude, gh, shellcheck, uv,
 #      JDK, Android SDK, Playwright browsers, rustup/cargo, Flutter SDK)
 #   7. /etc/archon-user/projects, /usr/local/lib/archon-user/bin/archon,
@@ -506,7 +506,7 @@ done
 
 # ------------------------------------------------------------ 5. home -------
 say "5. $ARCHON_USER's home: ~/.archon, ~/.gitconfig, ~/.claude, repos, tmp"
-for d in .archon .config .config/archon-user .claude .local .local/bin .local/opt .local/share .bun .bun/bin .cache repos tmp; do
+for d in .archon .config .config/archon-user .claude .local .local/bin .local/opt .local/share .bun .bun/bin .cache .cargo repos tmp; do
     run install -d -m 0750 -o "$ARCHON_USER" -g "$ARCHON_USER" "$AH/$d"
 done
 run chmod 0700 "$AH/.config/archon-user"
@@ -521,6 +521,16 @@ write_file "$AH/.archon/.env" 0600 "$ARCHON_USER:$ARCHON_USER" "CLAUDE_USE_GLOBA
 DEFAULT_AI_ASSISTANT=claude
 CLAUDE_BIN_PATH=$AH/.local/bin/claude
 "
+# Cargo reads $CARGO_HOME/config.toml for every build, whatever the cwd, so this
+# also covers `git worktree add /tmp/x && cargo test`, which the per-worktree
+# config (pipeline-health-cron.sh, #131) never reaches: /tmp is on the slow
+# root SSD (#133). A worktree's own .cargo/config.toml still wins. Final
+# binaries stay in ./target; worktree-trim drops build dirs idle 2 days.
+write_file "$AH/.cargo/config.toml" 0640 "$ARCHON_USER:$ARCHON_USER" "# Managed by ops/host/archon-user/install.sh (step 5), issue #133.
+[build]
+build-dir = \"$AH/.cache/cargo-build/{workspace-path-hash}\"
+"
+
 # Global workflow overrides: owned by the owner (who edits them without sudo),
 # readable by archon, not writable by it.
 run install -d -m 0755 -o "$OWNER" -g "$ARCHON_USER" "$AH/.archon/workflows"
