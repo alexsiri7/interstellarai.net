@@ -15,8 +15,13 @@
 #   4. Disk >85% on / or /mnt/ext-fast → autoclean, then ntfy only if still
 #      >=85%. For `/` that is the conservative full set (go/bun/npm/uv/pip
 #      caches, user journal, idle Gradle version caches, APK builds >30d,
-#      stale archon worktrees, stale /tmp dirs); for /mnt/ext-fast, where the
-#      worktrees live, only the stale-worktree step; every failing step is logged
+#      stale archon worktrees, build output of worktrees with no active run,
+#      Cargo build dirs idle >2d, stale /tmp dirs); for /mnt/ext-fast, where
+#      the worktrees and Cargo build dirs live, only the three worktree steps;
+#      every failing step is logged
+#  4b. / at 80-84% → the light autoclean, at most once a day
+#  4c. Rust projects: keep <workspace>/.cargo/config.toml pointing each archon
+#      worktree's Cargo build-dir at $BASE_DIR/.archon/cargo-build
 #   5. No pipeline progress in last tick (no commits, no archon completions)
 #      while work is pending (queued/in-progress issues or actionable PRs):
 #        - If token-limit markers in recent logs → wait, retry next tick
@@ -44,8 +49,9 @@
 #
 # `--trim` runs only the always-safe subset of the disk autoclean (uv/pip
 # cache prune, idle Gradle version caches, old APK builds, stale archon
-# worktrees, stale /tmp entries), logs the MB freed and exits. It never runs
-# the >=85%-only steps that wipe hot caches (go clean -cache, bun pm cache rm,
+# worktrees, idle Cargo build dirs, stale /tmp entries), logs the MB freed and
+# exits. It takes no run snapshot, so the build output of inactive worktrees is
+# left to the tick's daily trim. It never runs the >=85%-only steps that wipe hot caches (go clean -cache, bun pm cache rm,
 # npm cache clean), skips the throttle gate and does none of the health checks.
 #
 # `--list-stale-worktrees` is the dry run of the stale-worktree step: it logs
@@ -1022,8 +1028,8 @@ reconcile_zombies() {
 
 # ----------------------------------------------------------------------------
 # Check 3: Disk warning — ntfy if / or /mnt/ext-fast above 85%, after an
-# autoclean attempt: the conservative cache cleanup for `/`, the stale-worktree
-# step alone for /mnt/ext-fast. Only ntfy if still over threshold after
+# autoclean attempt: the conservative cache cleanup for `/`, the worktree
+# steps alone for /mnt/ext-fast. Only ntfy if still over threshold after
 # cleanup. Every step is non-fatal and every failure is logged with its
 # exit code: a step that fails silently is one that never frees anything.
 # ----------------------------------------------------------------------------
@@ -1098,7 +1104,9 @@ autoclean_root() {
 # The cheap, always-safe steps: they only drop what is already unreferenced or
 # idle (uv/pip prune their own unused entries; the rest are 30d-idle Gradle
 # version caches, >30d APK builds nothing points at, worktrees with no open PR,
-# stale /tmp entries). Weekly via `--trim`, and the tail of autoclean_root.
+# build output of worktrees with no active run, Cargo build dirs idle for 2d,
+# stale /tmp entries). Weekly via `--trim`, daily at 80% (check_daily_trim),
+# and the tail of autoclean_root.
 autoclean_light() {
   if command -v uv >/dev/null 2>&1; then
     autoclean_step "uv cache prune" "$(uv cache dir 2>/dev/null)" uv cache prune
@@ -1114,6 +1122,8 @@ autoclean_light() {
   autoclean_gradle_caches
   autoclean_apks
   autoclean_stale_worktrees
+  autoclean_build_output
+  autoclean_cargo_build_dirs
   autoclean_tmp
 }
 
@@ -1208,6 +1218,15 @@ autoclean_apks() {
   return 0
 }
 
+# archon_worktree_bases <project> — the dirs holding asiri's archon task
+# worktrees of <project>, one per line (see autoclean_stale_worktrees).
+archon_worktree_bases() {
+  printf '%s\n' \
+    "$HOME/.archon/workspaces/ext-fast/$1/worktrees/archon" \
+    "$HOME/.archon/workspaces/alexsiri7/$1/worktrees/archon" \
+    "$BASE_DIR/.archon/worktrees/ext-fast/$1/archon"
+}
+
 # autoclean_stale_worktrees [--dry-run] — remove Archon task worktrees whose
 # branch has no open PR and that nothing has touched for 4h. Covers the
 # retry-loop accumulation pattern (hundreds of failed task dirs from a broken
@@ -1238,11 +1257,9 @@ autoclean_stale_worktrees() {
     fi
 
     local removed=0
-    local wt_base
-    for wt_base in \
-      "$HOME/.archon/workspaces/ext-fast/$project/worktrees/archon" \
-      "$HOME/.archon/workspaces/alexsiri7/$project/worktrees/archon" \
-      "$BASE_DIR/.archon/worktrees/ext-fast/$project/archon"; do
+    local wt_base bases
+    mapfile -t bases < <(archon_worktree_bases "$project")
+    for wt_base in "${bases[@]}"; do
       [ -d "$wt_base" ] || continue
       while IFS= read -r wt_path; do
         local wt_name; wt_name=$(basename "$wt_path")
@@ -1291,6 +1308,102 @@ autoclean_stale_worktrees() {
       log "autoclean: archon worktree-trim failed: $(tail -n 1 <<<"$out")"
     fi
   fi
+  return 0
+}
+
+# worktree_has_live_process <dir> — exit 0 when a process this user can see
+# has its cwd at or under <dir>. /proc/*/cwd is the physical path, so <dir>
+# must be too.
+worktree_has_live_process() {
+  local p c
+  for p in /proc/[0-9]*/cwd; do
+    c=$(readlink "$p" 2>/dev/null) || continue
+    if [ "$c" = "$1" ] || [[ "$c" == "$1"/* ]]; then return 0; fi
+  done
+  return 1
+}
+
+# build_output_dirs <worktree> — the rebuildable build output inside it:
+# target/ beside a Cargo.toml, node_modules/ beside a package.json, and
+# .next/cache. A dir with those names but no manifest may be source.
+build_output_dirs() {
+  local d
+  while IFS= read -r d; do
+    case "$(basename "$d")" in
+      target) [ -f "$(dirname "$d")/Cargo.toml" ] && echo "$d" ;;
+      node_modules) [ -f "$(dirname "$d")/package.json" ] && echo "$d" ;;
+      .next) [ -d "$d/cache" ] && echo "$d/cache" ;;
+    esac
+  done < <(find "$1" -maxdepth 4 -name .git -prune -o -type d \
+      \( -name target -o -name node_modules -o -name .next \) -print -prune 2>/dev/null)
+  return 0
+}
+
+# autoclean_build_output — delete the build output (build_output_dirs) of
+# archon worktrees that no running or paused run owns and no live process sits
+# in, keeping the worktree itself. A live worktree is kept for 4h and past
+# that for as long as its PR is open (autoclean_stale_worktrees), and each
+# musenmingle one held 4-15 GB of Rust target/ on / (#123: / went 64% → 100%
+# in a week). An output dir written in the last hour is kept too: a run can
+# start after this tick's snapshot. With no snapshot (the --trim path, or a
+# failed listing) nothing can be told apart, so nothing is removed.
+autoclean_build_output() {
+  if ! archon_runs_known; then
+    log "autoclean: build output skipped — no archon run snapshot this tick"
+    return 0
+  fi
+  local removed=0 total_mb=0
+  local repo_dir project wt_base bases wt real dirs c size rc
+  for repo_dir in "$BASE_DIR"/*/; do
+    [ -d "$repo_dir/.git" ] || continue
+    project=$(basename "$repo_dir")
+    mapfile -t bases < <(archon_worktree_bases "$project")
+    for wt_base in "${bases[@]}"; do
+      [ -d "$wt_base" ] || continue
+      while IFS= read -r wt; do
+        mapfile -t dirs < <(build_output_dirs "$wt")
+        [ "${#dirs[@]}" -gt 0 ] || continue
+        real=$(readlink -f "$wt")
+        if archon_worktree_active "$wt" "$real"; then
+          log "autoclean: build output kept — $wt has an active archon run"
+          continue
+        fi
+        if worktree_has_live_process "$real"; then
+          log "autoclean: build output kept — a live process is in $wt"
+          continue
+        fi
+        for c in "${dirs[@]}"; do
+          if find "$c" -mmin -60 -print -quit 2>/dev/null | grep -q .; then
+            log "autoclean: build output kept — $c written in the last hour"
+            continue
+          fi
+          size=$(dir_size_mb "$c")
+          rc=0; rm -rf "$c" 2>/dev/null || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            log "autoclean: rm -rf $c failed (exit $rc)"
+            continue
+          fi
+          log "autoclean: removed build output $c — freed ${size}MB"
+          removed=$((removed + 1)); total_mb=$((total_mb + size))
+        done
+      done < <(find "$wt_base" -mindepth 1 -maxdepth 1 -type d -name 'task-archon-*' 2>/dev/null)
+    done
+  done
+  [ "$removed" -gt 0 ] && log "autoclean: build output — removed $removed dirs, freed ${total_mb}MB"
+  return 0
+}
+
+# Cargo build dirs (see ensure_cargo_build_dir_config) outlive the worktrees
+# they belong to, and nothing else ever removes them. One nothing has written
+# to for 2 days is dropped; cargo rebuilds it on demand.
+autoclean_cargo_build_dirs() {
+  local root="$BASE_DIR/.archon/cargo-build" d
+  [ -d "$root" ] || return 0
+  for d in "$root"/*/*/*/; do
+    [ -d "$d" ] || continue
+    autoclean_idle_dir "${d%/}" 2
+  done
+  find "$root" -mindepth 2 -maxdepth 2 -type d -empty -delete 2>/dev/null
   return 0
 }
 
@@ -1354,6 +1467,12 @@ autoclean_tmp() {
   return 0
 }
 
+autoclean_worktrees() {
+  autoclean_stale_worktrees
+  autoclean_build_output
+  autoclean_cargo_build_dirs
+}
+
 check_disk() {
   for mount in / /mnt/ext-fast; do
     local used
@@ -1362,16 +1481,17 @@ check_disk() {
     [ "$used" -ge 85 ] || continue
 
     # The caches autoclean_root clears live under $HOME on /; the only
-    # autoclean target on /mnt/ext-fast is the worktrees.
+    # autoclean targets on /mnt/ext-fast are the worktrees and the Cargo
+    # build dirs.
     local clean_fn clean_verb clean_body
     if [ "$mount" = "/" ]; then
       clean_fn=autoclean_root
       clean_verb="running conservative autoclean"
-      clean_body="Autoclean ran (go/bun/npm/uv/pip caches, journal vacuum, idle Gradle caches, old APKs, stale worktrees and /tmp dirs) but disk still >=85%. See $LOG_DIR/pipeline-health.log for per-step results."
+      clean_body="Autoclean ran (go/bun/npm/uv/pip caches, journal vacuum, idle Gradle caches, old APKs, stale worktrees, inactive worktrees' build output, idle Cargo build dirs and /tmp dirs) but disk still >=85%. See $LOG_DIR/pipeline-health.log for per-step results."
     else
-      clean_fn=autoclean_stale_worktrees
-      clean_verb="removing stale worktrees"
-      clean_body="Stale archon worktrees were removed but disk still >=85%. Pipeline will stall if this fills. See $LOG_DIR/pipeline-health.log."
+      clean_fn=autoclean_worktrees
+      clean_verb="removing stale worktrees and inactive build output"
+      clean_body="Stale archon worktrees, the build output (target/, node_modules/, .next/cache) of inactive ones and idle Cargo build dirs were removed but disk still >=85%. Pipeline will stall if this fills. See $LOG_DIR/pipeline-health.log."
     fi
 
     local before="$used"
@@ -1388,6 +1508,52 @@ check_disk() {
       log "disk $mount recovered (${before}% → ${after}%) — no ntfy"
     fi
   done
+}
+
+# At 80-84% on / the light autoclean runs once a day instead of waiting for
+# the weekly --trim; from 85% check_disk runs it as part of autoclean_root.
+# The marker is written first so a failing trim is not retried every tick.
+check_daily_trim() {
+  local used marker="$STATE_DIR/daily-trim" today
+  used=$(disk_used_pct /)
+  { [ -n "$used" ] && [ "$used" -ge 80 ] && [ "$used" -lt 85 ]; } || return 0
+  today=$(date +%F)
+  [ "$(cat "$marker" 2>/dev/null)" = "$today" ] && return 0
+  echo "$today" > "$marker"
+  log "disk / at ${used}% (>=80%) — daily light trim"
+  autoclean_light
+  log "disk / ${used}% → $(disk_used_pct /)% after daily trim"
+}
+
+# Point Cargo's intermediate build output (deps, incremental, build scripts:
+# >95% of a musenmingle target/) of every archon worktree of a Rust project at
+# $BASE_DIR, off / (#123). A config file in the project's workspace dir covers
+# every worktree under it whoever starts the build — a cron launch, a run the
+# archon server resumes, an agent's subshell — with no launcher env, and leaves
+# the owner's own clone alone. `{workspace-path-hash}` gives each worktree its
+# own dir: one shared target-dir served a worktree another branch's binary,
+# since cargo judged the other build fresh by mtime. Final binaries still land
+# in the worktree's ./target.
+ensure_cargo_build_dir_config() {
+  local root="$BASE_DIR/.archon/cargo-build" repo_dir project ws want
+  for repo_dir in "$BASE_DIR"/*/; do
+    [ -f "$repo_dir/Cargo.toml" ] || continue
+    project=$(basename "$repo_dir")
+    want="# Managed by ops/cron/pipeline-health-cron.sh (ensure_cargo_build_dir_config), issue #123.
+# Each archon worktree of this project keeps its intermediate build output under $root.
+[build]
+build-dir = \"$root/$project/{workspace-path-hash}\""
+    for ws in "$HOME/.archon/workspaces/alexsiri7/$project" "$HOME/.archon/workspaces/ext-fast/$project"; do
+      [ -d "$ws" ] || continue
+      [ "$(cat "$ws/.cargo/config.toml" 2>/dev/null)" = "$want" ] && continue
+      if mkdir -p "$ws/.cargo" && printf '%s\n' "$want" > "$ws/.cargo/config.toml"; then
+        log "cargo: $ws/.cargo/config.toml → build-dir $root/$project/{workspace-path-hash}"
+      else
+        log "cargo: writing $ws/.cargo/config.toml failed"
+      fi
+    done
+  done
+  return 0
 }
 
 # ----------------------------------------------------------------------------
@@ -2213,7 +2379,9 @@ for project in "${REPOS[@]}"; do
 done
 reconcile_zombies
 check_parked_runs
+check_daily_trim
 check_disk
+ensure_cargo_build_dir_config
 check_db_backup
 check_system_maintenance
 check_archon_update

@@ -55,6 +55,7 @@ teardown() {
     ! grep -q '^journalctl ' "$CALLS"
     [[ "$output" == *"autoclean: uv cache prune ok"* ]]
     [[ "$output" == *"autoclean: pip cache purge ok"* ]]
+    [[ "$output" == *"build output skipped — no archon run snapshot"* ]]
 }
 
 @test "--trim prunes idle Gradle version caches, old APKs and stale /tmp entries" {
