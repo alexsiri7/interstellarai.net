@@ -506,9 +506,10 @@ if [ -n "$cargo_tmp_owner" ] && [ "$cargo_tmp_owner" != root ]; then
 fi
 run systemd-tmpfiles --create "$TMPFILES_CARGO"
 if [ "$DRY" -eq 0 ]; then
-    if [ "$(stat -c %U /tmp/.cargo 2>/dev/null)" = root ] \
-        && grep -qF 'build-dir = "{cargo-cache-home}/tmp-build/{workspace-path-hash}"' /tmp/.cargo/config.toml 2>/dev/null; then
-        done_ "/tmp/.cargo/config.toml (root-owned) → build-dir {cargo-cache-home}/tmp-build/{workspace-path-hash}"
+    cargo_tmp_build_dir=$(grep -o 'build-dir = "[^"]*"' "$REPO_TMPFILES_CARGO")
+    if [ "$(stat -c %U /tmp/.cargo 2>/dev/null)" = root ] && [ -n "$cargo_tmp_build_dir" ] \
+        && grep -qF "$cargo_tmp_build_dir" /tmp/.cargo/config.toml 2>/dev/null; then
+        done_ "/tmp/.cargo/config.toml (root-owned) → $cargo_tmp_build_dir"
     else
         fail cargo-tmp "/tmp/.cargo/config.toml missing, not root-owned or without the build-dir line after systemd-tmpfiles --create $TMPFILES_CARGO"
     fi
