@@ -15,6 +15,10 @@
 #   8. safe-reboot                         gate timer (reboot only when idle, 02:30-06:30) + restore at boot
 #   9. systemd-oomd                        no memory-pressure kills of user@.service (ManagedOOMMemoryPressure=auto)
 #  10. sysctl                              vm.dirty_background_bytes 256M, vm.dirty_bytes 1G
+#  11. /tmp on the NVMe                    tmp.mount: bind of /mnt/ext-fast/.tmp-root, from the NEXT boot
+#                                          (marks a reboot pending for the safe-reboot gate); once active,
+#                                          empties the old /tmp left hidden on / underneath it
+#  12. tmpfiles                            /tmp entries idle 2 days are removed (Ubuntu: 30 days)
 #
 # Every step is guarded so it can be run again after a partial failure.
 #
@@ -28,7 +32,7 @@ DRY=0
 case "${1:-}" in
     --dry-run|-n) DRY=1 ;;
     "") ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1 (only --dry-run)" >&2; exit 2 ;;
 esac
 
@@ -38,6 +42,8 @@ REPO_SMARTD_NTFY="$SCRIPT_DIR/smartd-ntfy"
 REPO_SAFE_REBOOT="$SCRIPT_DIR/safe-reboot"
 REPO_OOMD_DROPIN="$SCRIPT_DIR/20-oomd-pressure-limit.conf"
 REPO_SYSCTL_DIRTY="$SCRIPT_DIR/60-dirty-bytes.conf"
+REPO_TMP_MOUNT="$SCRIPT_DIR/tmp-on-nvme/tmp.mount"
+REPO_TMPFILES_TMP="$SCRIPT_DIR/tmp-on-nvme/tmpfiles-tmp.conf"
 
 SUDOERS_D="${HOST_INSTALL_SUDOERS_D:-/etc/sudoers.d}"
 SUDOERS_DST="$SUDOERS_D/archon-cron"
@@ -55,6 +61,11 @@ SAFE_REBOOT_STATE=/var/lib/safe-reboot
 UNIT_DIR=/etc/systemd/system
 OOMD_DROPIN=/etc/systemd/system/user@.service.d/20-oomd-pressure-limit.conf
 SYSCTL_DIRTY=/etc/sysctl.d/60-dirty-bytes.conf
+TMP_BASE=/mnt/ext-fast
+TMP_SRC=$TMP_BASE/.tmp-root          # also in tmp-on-nvme/tmp.mount, archon-user/install.sh BASE_ALLOW, archon-as-archon selftest
+TMP_DEFER=/run/tmp-on-nvme.defer     # also in tmp-on-nvme/tmp.mount
+TMPFILES_TMP=/etc/tmpfiles.d/tmp.conf
+REBOOT_REQUIRED=/var/run/reboot-required
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -386,5 +397,91 @@ elif sysctl -q -p "$SYSCTL_DIRTY" && [ "$(sysctl -n vm.dirty_bytes)" = 107374182
 else
     fail sysctl "vm.dirty_bytes is $(sysctl -n vm.dirty_bytes) after sysctl -p $SYSCTL_DIRTY"
 fi
+
+# ------------------------------------------------------- 11. /tmp on NVMe ---
+say "11. /tmp on the NVMe: bind $TMP_SRC onto /tmp (from the next boot)"
+# tmp_bind_active: /tmp is a mount point whose filesystem is the NVMe's and
+# whose root is $TMP_SRC (same device and inode).
+tmp_bind_active() {
+    mountpoint -q /tmp 2>/dev/null && [ -d "$TMP_SRC" ] \
+        && [ "$(stat -c '%d:%i' /tmp 2>/dev/null)" = "$(stat -c '%d:%i' "$TMP_SRC" 2>/dev/null)" ]
+}
+if ! mountpoint -q "$TMP_BASE" 2>/dev/null; then
+    fail tmp-on-nvme "$TMP_BASE is not mounted — /tmp is left on / (re-run once it is)"
+elif grep -qE '^[[:space:]]*[^#[:space:]]+[[:space:]]+/tmp[[:space:]]' /etc/fstab; then
+    fail tmp-on-nvme "/etc/fstab already has a /tmp line (its generated tmp.mount would fight $UNIT_DIR/tmp.mount) — remove it and re-run"
+else
+    # The source dir: root:root 1777 with no ACL entries, i.e. exactly /tmp's
+    # semantics (sticky: nobody lists-and-deletes another user's files). It
+    # must stay out of archon-user/install.sh's deny loop (BASE_ALLOW), which
+    # would otherwise lock archon out of /tmp itself.
+    if [ -d "$TMP_SRC" ] && [ "$(stat -c '%a %U:%G' "$TMP_SRC")" = "1777 root:root" ]; then
+        done_ "$TMP_SRC already root:root 1777"
+    else
+        run install -d -m 1777 -o root -g root "$TMP_SRC" && run chmod 1777 "$TMP_SRC" && did "created $TMP_SRC (root:root 1777)"
+    fi
+    if [ -d "$TMP_SRC" ] && [ -n "$(getfacl -cps --skip-base "$TMP_SRC" 2>/dev/null)" ]; then
+        run setfacl -b "$TMP_SRC" && did "removed ACL entries from $TMP_SRC (plain 1777, like /tmp)"
+    fi
+    if tmp_bind_active; then
+        done_ "/tmp is already the bind of $TMP_SRC ($(df -h --output=avail /tmp | tail -n1 | tr -d ' ') free)"
+        install_file "$REPO_TMP_MOUNT" "$UNIT_DIR/tmp.mount" 0644 && { run systemctl daemon-reload && did "daemon-reload"; }
+        if [ "$DRY" -eq 0 ] && ! systemctl is-enabled -q tmp.mount 2>/dev/null; then
+            run systemctl enable tmp.mount && did "enabled tmp.mount"
+        fi
+        # The old /tmp on / is hidden under the bind: systemd-tmpfiles empties
+        # /tmp at boot only after the bind is up, so whatever sat there at the
+        # switch-over reboot still fills /. Look underneath through a private
+        # non-recursive bind of / (shows the root filesystem only) and empty it.
+        if [ "$DRY" -eq 1 ]; then
+            done_ "DRY-RUN: would bind / at a temp dir under /run, empty its tmp/ (the old /tmp on /, hidden under the bind) and unmount it"
+        elif peek=$(mktemp -d /run/tmp-underlay.XXXXXX); then
+            if mount --bind / "$peek"; then
+                if [ "$(stat -c %d "$peek/tmp")" != "$(stat -c %d /)" ]; then
+                    fail tmp-on-nvme "$peek/tmp is not on the root filesystem — not touching it"
+                elif [ -z "$(find "$peek/tmp" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+                    done_ "old /tmp on / (under the bind) already empty"
+                else
+                    mb=$(du -sxm "$peek/tmp" 2>/dev/null | cut -f1)
+                    if find "$peek/tmp" -xdev -mindepth 1 -delete 2>/dev/null; then
+                        did "emptied the old /tmp on / hidden under the bind (${mb:-?}MB freed on /)"
+                    else
+                        fail tmp-on-nvme "could not empty all of the old /tmp on / (bound at $peek/tmp) — re-run"
+                    fi
+                fi
+                umount "$peek" || fail tmp-on-nvme "umount $peek failed — umount it by hand"
+            else
+                fail tmp-on-nvme "mount --bind / $peek failed — old /tmp on / not reclaimed"
+            fi
+            rmdir "$peek" 2>/dev/null || true
+        fi
+    else
+        # Not active yet. Order matters: the defer file first, so no service
+        # start (PrivateTmp= services Want tmp.mount) can mount it over the live
+        # /tmp between the daemon-reload and the reboot.
+        if [ -e "$TMP_DEFER" ]; then done_ "$TMP_DEFER already there (no live remount before the reboot)"
+        else run touch "$TMP_DEFER" && did "created $TMP_DEFER (tmp.mount skipped until the next boot)"; fi
+        install_file "$REPO_TMP_MOUNT" "$UNIT_DIR/tmp.mount" 0644 && { run systemctl daemon-reload && did "daemon-reload"; }
+        if [ "$DRY" -eq 0 ] && systemctl is-enabled -q tmp.mount 2>/dev/null; then
+            done_ "tmp.mount already enabled"
+        else
+            run systemctl enable tmp.mount && did "enabled tmp.mount (not started: it mounts at the next boot)"
+        fi
+        # A reboot reason the safe-reboot gate acts on (step 8: idle, in its
+        # window). Both files are on tmpfs, so after that boot, with the bind
+        # active, nothing marks it again. Appended, never overwriting apt's lines.
+        if [ -e "$REBOOT_REQUIRED" ]; then done_ "$REBOOT_REQUIRED already there"
+        else run sh -c "echo '*** System restart required ***' > $REBOOT_REQUIRED" && did "created $REBOOT_REQUIRED"; fi
+        if grep -qx tmp-on-nvme "$REBOOT_REQUIRED.pkgs" 2>/dev/null; then done_ "$REBOOT_REQUIRED.pkgs already names tmp-on-nvme"
+        else run sh -c "echo tmp-on-nvme >> $REBOOT_REQUIRED.pkgs" && did "added tmp-on-nvme to $REBOOT_REQUIRED.pkgs"; fi
+        done_ "/tmp moves at the next boot; the safe-reboot gate takes it in its next idle window (safe-reboot status). Re-run this script after that boot to reclaim the old /tmp on /."
+    fi
+fi
+
+# ------------------------------------------------------- 12. tmpfiles -------
+say "12. tmpfiles: /tmp entries idle for 2 days are removed (Ubuntu default: 30 days)"
+# Takes effect at the next systemd-tmpfiles-clean.timer run (daily); nothing
+# is cleaned now.
+install_file "$REPO_TMPFILES_TMP" "$TMPFILES_TMP" 0644 || true
 
 finish

@@ -369,6 +369,7 @@ make_disk_sandbox() {
     autoclean_stale_worktrees() { echo "autoclean_stale_worktrees" >> "$CALLS"; }
     autoclean_worktrees() { echo "autoclean_worktrees" >> "$CALLS"; }
     notify() { echo "notify $1|$2|$3|$4" >> "$CALLS"; }
+    tmp_top_consumers() { [ -n "${TMP_TOP:-}" ] && [ "$1" = "${TMP_TOP_MOUNT:-/}" ] && printf '%s\n' "$TMP_TOP"; return 0; }
     load_fn check_disk
 }
 
@@ -687,4 +688,47 @@ make_cargo_config_sandbox() {
     [[ "${dirs[0]}" == "$BASE_DIR/.archon/cargo-build/musenmingle/"* ]]
     [[ "${dirs[1]}" == "$BASE_DIR/.archon/cargo-build/musenmingle/"* ]]
     [ "${dirs[0]}" != "${dirs[1]}" ]
+}
+
+@test "check_disk names the top /tmp consumers in the ntfy for the mount /tmp lives on" {
+    make_disk_sandbox /=88
+    export TMP_TOP="47G archon /tmp/cargotest-builddir
+3.5G archon /tmp/vam_check"
+    run check_disk
+    [ "$status" -eq 0 ]
+    grep -qF "idle Cargo build dirs and /tmp dirs) but disk still >=85%. See $LOG_DIR/pipeline-health.log for per-step results." "$CALLS"
+    grep -qx "Top /tmp consumers:" "$CALLS"
+    grep -qx "47G archon /tmp/cargotest-builddir" "$CALLS"
+    grep -qx "3.5G archon /tmp/vam_check|high|warning" "$CALLS"
+}
+
+@test "tmp_top_consumers lists the 5 biggest entries with owner, only for the filesystem /tmp is on" {
+    load_fn tmp_top_consumers
+    export PIPELINE_HEALTH_TMP_ROOT="$STATE_DIR/systmp"
+    mkdir -p "$PIPELINE_HEALTH_TMP_ROOT"
+    for i in 1 2 3 4 5 6; do
+        mkdir -p "$PIPELINE_HEALTH_TMP_ROOT/d$i"
+        head -c $((i * 200000)) /dev/zero > "$PIPELINE_HEALTH_TMP_ROOT/d$i/f"
+    done
+    run tmp_top_consumers "$STATE_DIR"
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 5 ]
+    [[ "${lines[0]}" == *" $(id -un) $PIPELINE_HEALTH_TMP_ROOT/d6" ]]
+    [[ "$output" != *"/d1"* ]]
+    run tmp_top_consumers /proc      # another filesystem: nothing
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "check_archon_tmp_trim runs the wrapper's --tmp-only trim as archon, and nothing when not cut over" {
+    load_fn check_archon_tmp_trim
+    runas_wrapper() { echo "wrapper $*"; }
+    runas_archon() { return 0; }
+    run check_archon_tmp_trim
+    [ "$status" -eq 0 ]
+    [[ "$output" == "[archon] wrapper worktree-trim --tmp-only" ]]
+    runas_archon() { return 1; }
+    run check_archon_tmp_trim
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
 }

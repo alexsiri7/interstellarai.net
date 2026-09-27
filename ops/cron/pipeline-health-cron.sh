@@ -1483,6 +1483,25 @@ autoclean_worktrees() {
   autoclean_cargo_build_dirs
 }
 
+# tmp_top_consumers <mount> — the 5 biggest top-level entries of /tmp as
+# "<size> <owner> <path>" lines, when /tmp is on <mount>'s filesystem; nothing
+# otherwise. Sizes count only what this user can read (other users' private
+# dirs show as a lower bound); bounded to 2 minutes.
+tmp_top_consumers() {
+  local tmp_root="${PIPELINE_HEALTH_TMP_ROOT:-/tmp}"
+  [ -d "$tmp_root" ] || return 0
+  [ "$(stat -c %d "$tmp_root" 2>/dev/null)" = "$(stat -c %d "$1" 2>/dev/null)" ] || return 0
+  local size path
+  find "$tmp_root" -mindepth 1 -maxdepth 1 -print0 2>/dev/null \
+    | timeout 120 xargs -0 -r du -sxk 2>/dev/null \
+    | sort -rn | head -n 5 \
+    | while IFS=$'\t' read -r size path; do
+        printf '%s %s %s\n' "$(numfmt --to=iec --from-unit=1024 "$size" 2>/dev/null || echo "${size}K")" \
+          "$(stat -c %U "$path" 2>/dev/null || echo '?')" "$path"
+      done
+  return 0
+}
+
 check_disk() {
   for mount in / /mnt/ext-fast; do
     local used
@@ -1513,11 +1532,33 @@ check_disk() {
     log "disk $mount ${before}% → ${after}% after cleanup"
     if [ "$after" -ge 85 ]; then
       log "disk $mount still at ${after}% after cleanup — ntfying"
+      # Name the biggest /tmp entries (after the cleanup) when /tmp lives on
+      # this filesystem (/ until ops/host/install.sh step 11 binds it from
+      # /mnt/ext-fast, #133).
+      local top
+      top=$(tmp_top_consumers "$mount")
+      [ -n "$top" ] && clean_body="$clean_body
+Top /tmp consumers:
+$top"
       notify "Disk warning: $mount ${after}% (was ${before}%)" "$clean_body" high warning
     else
       log "disk $mount recovered (${before}% → ${after}%) — no ntfy"
     fi
   done
+}
+
+# Every tick: archon's own /tmp and TMPDIR entries nothing wrote to for 12h
+# (archon-as-archon worktree-trim --tmp-only, no gh calls). asiri cannot
+# delete them, and agents build there under arbitrary names (#133).
+check_archon_tmp_trim() {
+  runas_archon || return 0
+  local out
+  if out=$(runas_wrapper worktree-trim --tmp-only 2>&1); then
+    [ -n "$out" ] && printf '%s\n' "$out" | while IFS= read -r l; do log "[archon] $l"; done
+  else
+    log "autoclean: archon worktree-trim --tmp-only failed: $(tail -n 1 <<<"$out")"
+  fi
+  return 0
 }
 
 # At 80-84% on / the light autoclean runs once a day instead of waiting for
@@ -2398,6 +2439,7 @@ reconcile_zombies
 check_parked_runs
 check_daily_trim
 check_disk
+check_archon_tmp_trim
 ensure_cargo_build_dir_config
 check_db_backup
 check_system_maintenance

@@ -193,7 +193,7 @@ tail -f ~/.local/state/archon-cron/logs/issue-pickup.log
   - archon is in no extra groups and has no sudo.
   - Every named secret path is unreachable, e.g. `secrets.env`, `consolidated-db.env`, `~/.config/{personal-ops,gh,opencode,rclone}`, `~/.railway`, `~/.ssh`, `~/.claude*`, `~/.archon`, `~/backups`, `/mnt/nas`, the NAS mirror, `personal-ops`, `archon-playground/security`, `/mnt/steam-slow/backups`, `/etc/shadow`.
   - A sweep of `/home /mnt /media /srv /var/backups`, plus every top-level entry of the mounts (archon cannot list them itself), finds nothing readable outside the allowlist. Debian's own backups in `/var/backups` are skipped by exact name: `dpkg.status*`, `dpkg.arch*`, `dpkg.diversions*`, `dpkg.statoverride*`, `apt.extended_states*`, `alternatives.tar*`. They are world-readable on every Ubuntu host and hold package lists. Anything else there, such as `passwd`/`group`/`shadow` backups, is still flagged. None existed on 2026-09-26.
-  - Leftovers in `/tmp` are listed as WARN.
+  - Leftovers in `/tmp` are listed as WARN. `/mnt/ext-fast/.tmp-root` (the NVMe source of `/tmp`) is exempt from the sweep and the listability probe, and must be a 1777 root:root directory (FAIL otherwise).
   - archon can write its own tree but not the engine or the owner's clones.
   - The environment of every archon process is free of secret-looking variables.
   - All toolchains are present.
@@ -319,6 +319,7 @@ Also written by `install.sh`:
 - `/usr/local/lib/archon-user/bin/archon`, a symlink to the engine's CLI
 - `/mnt/ext-fast/archon-home/{.archon/config.yaml,.archon/.env,.gitconfig,.claude/settings.json}`
 - `/mnt/ext-fast/archon-home/.cargo/config.toml`: `build-dir` under `~/.cache/cargo-build/{workspace-path-hash}` for every cargo build archon runs, including `git worktree add /tmp/x && cargo test`, which the per-worktree config (#131) never reaches; `/tmp` is on the slow root SSD (#133). A worktree's own `.cargo/config.toml` still wins. `worktree-trim` removes build dirs nothing wrote to for 2 days; `verify.sh` (selftest) WARNs if the config is missing.
+- Nothing, but relied on: `/tmp` is a bind of `/mnt/ext-fast/.tmp-root` (root:root 1777) since `ops/host/install.sh` step 11 ([../README.md](../README.md#tmp-on-the-nvme)). `install.sh`'s ACL step skips `.tmp-root` (`BASE_ALLOW`), since a deny ACL there would shut archon out of `/tmp`; the selftest allows exactly that path and FAILs unless it is a 1777 root:root directory. `worktree-trim` also removes archon-owned top-level entries of `/tmp` and `~/tmp` (its `TMPDIR`) that nothing wrote to for 12 hours, skipping any a live archon process has its cwd in, sockets, and `claude-*`/`tmux-*`/`ssh-*`/`pulse-*`/`dbus-*`/`systemd-*`/`snap-*`; `worktree-trim --tmp-only` does only that, with no `gh` calls, and `pipeline-health-cron.sh` runs it every tick (`check_archon_tmp_trim`).
 - `/mnt/ext-fast/archon-home/.config/archon-user/claude.env`, the token, mode 0600
 
 ## Tests

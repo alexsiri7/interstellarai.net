@@ -27,8 +27,11 @@
 #   doctor                                                        archon doctor
 #   claude-probe [timeout-seconds]   one real `claude -p --model haiku` request
 #   gh-probe                         gh auth + push access per factory repo
-#   worktree-trim [--dry-run]        remove stale task worktrees (no open PR, idle 4h) and
-#                                    cargo build dirs idle 2 days
+#   worktree-trim [--dry-run] [--tmp-only]
+#                                    remove stale task worktrees (no open PR, idle 4h),
+#                                    cargo build dirs idle 2 days, and archon's own
+#                                    top-level entries in /tmp and ~/tmp idle 12h;
+#                                    --tmp-only: just the last (no gh calls, every tick)
 #   bun-upgrade                      `bun upgrade` of archon's own bun
 #   ensure-clones                    clone every factory repo that is missing
 #   selftest [abs-path...]           prove what archon can and cannot read; the
@@ -55,6 +58,7 @@ PROJECTS_FILE=/etc/archon-user/projects
 # can read it, never write it, so an agent cannot opt itself in.
 CONFIG_FILE=/etc/archon-user/config
 OWNER_BASE=/mnt/ext-fast
+TMP_ROOT=/tmp
 ARCHON_BIN=/usr/local/lib/archon-user/bin/archon     # symlink -> <archon checkout>/packages/cli/src/cli.ts
 GH_OWNER=alexsiri7
 DRY_EXEC=0
@@ -65,11 +69,15 @@ if [ "${ARCHON_AS_TEST:-}" = 1 ] && [ -z "${SUDO_USER:-}" ]; then
     PROJECTS_FILE="${ARCHON_AS_PROJECTS_FILE:-$PROJECTS_FILE}"
     CONFIG_FILE="${ARCHON_AS_CONFIG_FILE:-$CONFIG_FILE}"
     OWNER_BASE="${ARCHON_AS_OWNER_BASE:-$OWNER_BASE}"
+    TMP_ROOT="${ARCHON_AS_TMP_ROOT:-$TMP_ROOT}"
     ARCHON_BIN="${ARCHON_AS_ARCHON_BIN:-$ARCHON_BIN}"
     DRY_EXEC="${ARCHON_AS_DRY_EXEC:-0}"
 fi
 
 REPOS_DIR="$ARCHON_HOME_DIR/repos"
+# The NVMe dir /tmp is bound from (ops/host/install.sh step 11): root:root
+# 1777, plain /tmp semantics, so the selftest allows exactly this path.
+TMP_BIND_SRC="$OWNER_BASE/.tmp-root"
 CLAUDE_TOKEN_ENV="$ARCHON_HOME_DIR/.config/archon-user/claude.env"
 
 # Debian's daily dpkg/apt/alternatives backups in /var/backups: world-readable
@@ -389,8 +397,11 @@ verb_gh_probe() {
 # own layout: task-archon-* worktrees whose archon/<dir> branch has no open PR
 # and that nothing touched for 4h. A project whose PR listing fails is skipped.
 verb_worktree_trim() {
-    local dry=0
-    case "${1:-}" in --dry-run) dry=1 ;; "") ;; *) refuse "worktree-trim [--dry-run]" ;; esac
+    local dry=0 tmp_only=0 a
+    for a in "$@"; do
+        case "$a" in --dry-run) dry=1 ;; --tmp-only) tmp_only=1 ;; *) refuse "worktree-trim [--dry-run] [--tmp-only]" ;; esac
+    done
+    if [ "$tmp_only" = 1 ]; then trim_tmp "$dry"; return 0; fi
     local p open wt_base wt_path name removed candidates=0 total=0 size
     for p in "${PROJECTS[@]}"; do
         [ -d "$REPOS_DIR/$p/.git" ] || continue
@@ -437,9 +448,50 @@ verb_worktree_trim() {
         if rm -rf "$bd" 2>/dev/null; then bd_removed=$((bd_removed + 1)); bd_mb=$((bd_mb + size))
         else echo "autoclean: rm -rf $bd failed"; fi
     done
-    [ "$dry" = 1 ] || find "$bd_root" -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null
+    [ "$dry" = 1 ] || find "$bd_root" -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null || true
     [ "$bd_removed" -gt 0 ] && echo "autoclean: removed $bd_removed idle cargo build dirs (${bd_mb}MB)"
     [ "$dry" = 1 ] && echo "autoclean: dry run — $candidates stale worktrees / cargo build dirs, ${total}MB total"
+    trim_tmp "$dry"
+    return 0
+}
+
+# trim_tmp <dry 0|1> — archon's own top-level entries in /tmp and in its
+# TMPDIR ($ARCHON_HOME_DIR/tmp) that nothing inside was written to for 12h:
+# review checkouts, venvs and explicit cargo build/target dirs agents create
+# there under arbitrary names (47 GB in /tmp/cargotest-builddir, #133). The
+# same "nothing written recently" test as the cargo build dirs, so an active
+# build is never touched; also kept: anything a live archon process has its
+# cwd in, sockets, and session/runtime dirs (claude-*, tmux-*, ...). Only
+# entries owned by archon, never followed through a symlink.
+trim_tmp() {
+    local dry="$1" root e name size n=0 mb=0 cwds=() c live
+    for c in /proc/[0-9]*/cwd; do
+        c=$(readlink "$c" 2>/dev/null) || continue
+        cwds+=("$c")
+    done
+    for root in "$TMP_ROOT" "$ARCHON_HOME_DIR/tmp"; do
+        [ -d "$root" ] || continue
+        while IFS= read -r -d '' e; do
+            name=${e##*/}
+            case "$name" in claude-*|tmux-*|ssh-*|pulse-*|dbus-*|systemd-*|snap-*) continue ;; esac
+            # find does not follow a starting-point symlink: it tests the link itself.
+            find "$e" -mmin -720 -print -quit 2>/dev/null | grep -q . && continue
+            live=0
+            for c in ${cwds[@]+"${cwds[@]}"}; do
+                if [ "$c" = "$e" ] || [[ "$c" == "$e"/* ]]; then live=1; break; fi
+            done
+            [ "$live" = 1 ] && continue
+            size=$(du -sm "$e" 2>/dev/null | cut -f1 || true); size=${size:-0}
+            if [ "$dry" = 1 ]; then
+                echo "autoclean: would remove tmp entry $e (${size}MB)"
+                n=$((n + 1)); mb=$((mb + size)); continue
+            fi
+            if rm -rf "$e" 2>/dev/null; then n=$((n + 1)); mb=$((mb + size))
+            else echo "autoclean: rm -rf $e failed"; fi
+        done < <(find "$root" -mindepth 1 -maxdepth 1 -user "$ARCHON_USER" \( -type d -o -type f -o -type l \) -print0 2>/dev/null)
+    done
+    if [ "$dry" = 1 ]; then echo "autoclean: dry run — $n idle tmp entries, ${mb}MB total"
+    elif [ "$n" -gt 0 ]; then echo "autoclean: removed $n idle tmp entries (${mb}MB)"; fi
     return 0
 }
 
@@ -483,6 +535,7 @@ verb_selftest() {
              /mnt/steam-slow/backups /mnt/steam-slow /mnt/steam-fast /root /etc/shadow /etc/sudoers \
              "${extra[@]}"; do
         [[ "$p" =~ ^($ARCHON_HOME_DIR|$OWNER_BASE/archon)(/|$) ]] && continue   # allowed trees
+        [ "$p" = "$TMP_BIND_SRC" ] && continue                                   # /tmp's source, checked below
         if [ ! -e "$p" ] && ! ls -d "$p" >/dev/null 2>&1; then
             # -e is false both for "absent" and for "parent not traversable"; either is fine.
             pass "unreachable: $p"
@@ -499,6 +552,7 @@ verb_selftest() {
         while IFS= read -r entry; do
             [[ "$entry" =~ $allow_re ]] && continue
             [ "$entry" = "$top" ] && continue
+            [ "$entry" = "$TMP_BIND_SRC" ] && continue   # /tmp's source (only the dir itself: maxdepth 2), checked below
             [[ "$entry" =~ $SYSTEM_BACKUPS_RE ]] && [ -f "$entry" ] && [ ! -L "$entry" ] && continue
             case "$entry" in /mnt|"$OWNER_BASE") continue ;; esac   # parents of allowed trees
             fail "readable outside the allowlist: $entry"; n=$((n + 1))
@@ -506,6 +560,14 @@ verb_selftest() {
         done < <(find "$top" -maxdepth 2 -mindepth 0 \( -type d -readable -o -type f -readable \) 2>/dev/null | sort)
     done
     [ "$n" -eq 0 ] && pass "sweep: nothing readable under /home /mnt /media /srv /var/backups outside the allowlist (Debian's dpkg/apt/alternatives backups excepted)"
+    # /tmp's NVMe source: listable like /tmp, so it must look exactly like /tmp
+    # (root-owned, sticky, world-writable; no ACL granting more). Its contents
+    # are the /tmp leftovers below.
+    if [ -e "$TMP_BIND_SRC" ] || [ -L "$TMP_BIND_SRC" ]; then
+        local st; st=$(stat -c '%F %a %U:%G' "$TMP_BIND_SRC" 2>/dev/null)
+        if [ "$st" = "directory 1777 root:root" ]; then pass "tmp source $TMP_BIND_SRC: $st (sticky, same as /tmp)"
+        else fail "tmp source $TMP_BIND_SRC is '${st:-unreadable}' (want directory 1777 root:root) — sudo ops/host/install.sh"; fi
+    fi
     n=0
     while IFS= read -r entry; do
         warn "readable in /tmp (owned by $(stat -c %U "$entry" 2>/dev/null)): $entry"; n=$((n + 1))

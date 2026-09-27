@@ -15,7 +15,8 @@
 #   3. archon side (archon-as-archon selftest, as archon): identity, no sudo,
 #      named secrets unreachable, sweep of /home /mnt /media /srv /var/backups
 #      plus every top-level entry of the mounts (archon cannot list them itself),
-#      /tmp leftovers (WARN), write boundaries, process environments free of
+#      /tmp leftovers (WARN), /tmp's NVMe source /mnt/ext-fast/.tmp-root is
+#      1777 root:root (FAIL otherwise), write boundaries, process environments free of
 #      secrets, toolchains, no claude.ai connectors
 #   4. credentials: a real Claude request as archon; gh token fine-grained with
 #      push to every factory repo and none to the Archon fork (WARN instead of
@@ -31,7 +32,7 @@ WRAPPER=/usr/local/bin/archon-as-archon
 UNIT=archon-serve.service
 BASE=/mnt/ext-fast
 LIVE=0
-case "${1:-}" in --live) LIVE=1 ;; "") ;; -h|--help) sed -n '2,25p' "$0"; exit 0 ;; *) echo "usage: $0 [--live]" >&2; exit 2 ;; esac
+case "${1:-}" in --live) LIVE=1 ;; "") ;; -h|--help) sed -n '2,27p' "$0"; exit 0 ;; *) echo "usage: $0 [--live]" >&2; exit 2 ;; esac
 
 FAILS=0 WARNS=0
 pass() { echo "PASS $*"; }
