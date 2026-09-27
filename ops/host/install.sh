@@ -7,11 +7,14 @@
 # What it does (see ops/host/README.md):
 #   1. /etc/sudoers.d/archon-cron          NOPASSWD for the weekly system-maintenance.sh
 #   2. journald                            SystemMaxUse=500M
-#   3. unattended-upgrades                 also take -updates, autoremove, auto-reboot 05:45
+#   3. unattended-upgrades                 also take -updates, autoremove; NO auto-reboot (step 8 reboots)
 #   4. snap                                refresh.retain=2, drop disabled revisions
 #   5. smartmontools                       smartd with ntfy hook, short/long self-tests
 #   6. NodeSource                          node_20.x (EOL) -> node_24.x (current LTS)
 #   7. report whether a reboot is pending
+#   8. safe-reboot                         gate timer (reboot only when idle, 02:30-06:30) + restore at boot
+#   9. systemd-oomd                        user@.service memory-pressure kill limit 50% -> 80%
+#  10. sysctl                              vm.dirty_background_bytes 256M, vm.dirty_bytes 1G
 #
 # Every step is guarded so it can be run again after a partial failure.
 #
@@ -32,6 +35,9 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_SUDOERS="$SCRIPT_DIR/sudoers-archon-cron"
 REPO_SMARTD_NTFY="$SCRIPT_DIR/smartd-ntfy"
+REPO_SAFE_REBOOT="$SCRIPT_DIR/safe-reboot"
+REPO_OOMD_DROPIN="$SCRIPT_DIR/20-oomd-pressure-limit.conf"
+REPO_SYSCTL_DIRTY="$SCRIPT_DIR/60-dirty-bytes.conf"
 
 SUDOERS_D="${HOST_INSTALL_SUDOERS_D:-/etc/sudoers.d}"
 SUDOERS_DST="$SUDOERS_D/archon-cron"
@@ -44,6 +50,11 @@ NODESOURCE=/etc/apt/sources.list.d/nodesource.sources
 NODE_MAJOR=24   # current LTS line (Krypton); node 20 is EOL since 2026-04-30, 22 is maintenance-only
 JOURNAL_MAX=500M
 SNAP_RETAIN=2
+SAFE_REBOOT_BIN=/usr/local/sbin/safe-reboot
+SAFE_REBOOT_STATE=/var/lib/safe-reboot
+UNIT_DIR=/etc/systemd/system
+OOMD_DROPIN=/etc/systemd/system/user@.service.d/20-oomd-pressure-limit.conf
+SYSCTL_DIRTY=/etc/sysctl.d/60-dirty-bytes.conf
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -101,6 +112,14 @@ write_file() {
     fi
     done_ "wrote $path (mode $mode)"
     return 0
+}
+
+# install_file <src> <dst> <mode>: copy a repo file to a root-owned path
+# unless it is already identical. Returns 0 when it (would have) changed.
+install_file() {
+    if [ ! -r "$1" ]; then fail "${2##*/}" "$1 not found"; return 1; fi
+    if [ -r "$2" ] && cmp -s "$1" "$2"; then done_ "$2 already done"; return 1; fi
+    run install -D -m "$3" -o root -g root "$1" "$2" && did "installed $2"
 }
 
 pkg_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'; }
@@ -180,7 +199,7 @@ fi
 [ "$DRY" -eq 1 ] || done_ "journal now: $(journalctl --disk-usage 2>/dev/null || echo '?')"
 
 # ------------------------------------------ 3. unattended-upgrades ----------
-say "3. unattended-upgrades: -updates origin, autoremove, auto-reboot 05:45"
+say "3. unattended-upgrades: -updates origin, autoremove, no automatic reboot"
 if ! pkg_installed unattended-upgrades; then
     run apt-get install -y unattended-upgrades && did "installed unattended-upgrades"
 else
@@ -193,11 +212,10 @@ Unattended-Upgrade::Allowed-Origins {
     "${distro_id}:${distro_codename}-updates";
 };
 Unattended-Upgrade::Remove-Unused-Dependencies "true";
-Unattended-Upgrade::Automatic-Reboot "true";
-// 05:45, not earlier: the Sunday crontab runs system-maintenance at 04:00 (apt can
-// run long), the backup restore test at 04:30 and pipeline-health --trim at 05:00;
-// every one of them has finished before this.
-Unattended-Upgrade::Automatic-Reboot-Time "05:45";
+// No automatic reboot here: it fired at 05:45 on whatever day a reboot became
+// pending, regardless of running sessions or jobs (2026-09-26). The safe-reboot
+// gate (step 8, /usr/local/sbin/safe-reboot) reboots instead, only when idle.
+Unattended-Upgrade::Automatic-Reboot "false";
 '
 write_file "$APT_DROPIN" 0644 "$APT_CONTENT" || true
 if [ "$DRY" -eq 0 ]; then
@@ -205,6 +223,11 @@ if [ "$DRY" -eq 0 ]; then
         done_ "apt-config sees the -updates origin"
     else
         fail unattended-upgrades "apt-config dump does not list the -updates origin after writing $APT_DROPIN"
+    fi
+    if apt-config dump Unattended-Upgrade::Automatic-Reboot | grep -q '"false"'; then
+        done_ "apt-config: Automatic-Reboot false"
+    else
+        fail unattended-upgrades "apt-config still has Unattended-Upgrade::Automatic-Reboot on — another apt.conf.d file sets it after $APT_DROPIN"
     fi
 fi
 for key in Update-Package-Lists Unattended-Upgrade; do
@@ -299,9 +322,64 @@ esac
 # ------------------------------------------------------- 7. reboot ----------
 say "7. reboot status"
 if [ -f /var/run/reboot-required ]; then
-    done_ "/var/run/reboot-required EXISTS — a reboot is pending$( [ -r /var/run/reboot-required.pkgs ] && printf ' (%s)' "$(sort -u /var/run/reboot-required.pkgs | tr '\n' ' ')" ). unattended-upgrades will reboot at 05:45 once it next runs; or: sudo reboot"
+    done_ "/var/run/reboot-required EXISTS — a reboot is pending$( [ -r /var/run/reboot-required.pkgs ] && printf ' (%s)' "$(sort -u /var/run/reboot-required.pkgs | tr '\n' ' ')" ). the safe-reboot gate (step 8) reboots in the next idle 02:30-06:30 window (safe-reboot status says what blocks it); or: sudo reboot"
 else
     done_ "/var/run/reboot-required absent — no reboot pending"
+fi
+
+# ------------------------------------------------------- 8. safe-reboot -----
+say "8. safe-reboot: gate timer every 15 min (window 02:30-06:30) + restore after boot"
+units_changed=0
+install_file "$REPO_SAFE_REBOOT/safe-reboot" "$SAFE_REBOOT_BIN" 0755 || true
+for u in safe-reboot.service safe-reboot.timer safe-reboot-restore.service; do
+    install_file "$REPO_SAFE_REBOOT/$u" "$UNIT_DIR/$u" 0644 && units_changed=1
+done
+if [ -d "$SAFE_REBOOT_STATE" ]; then done_ "$SAFE_REBOOT_STATE already done"
+else run install -d -m 0755 -o root -g root "$SAFE_REBOOT_STATE" && did "created $SAFE_REBOOT_STATE"; fi
+[ "$units_changed" -eq 1 ] && { run systemctl daemon-reload && did "daemon-reload"; }
+if [ "$DRY" -eq 0 ] && systemctl is-enabled -q safe-reboot-restore.service 2>/dev/null; then
+    done_ "safe-reboot-restore.service already enabled"
+else
+    # enabled, not started: it runs once per boot, and does nothing on a boot the gate did not cause
+    run systemctl enable safe-reboot-restore.service && did "enabled safe-reboot-restore.service (runs at next boot)"
+fi
+if [ "$DRY" -eq 0 ] && systemctl is-enabled -q safe-reboot.timer 2>/dev/null && systemctl is-active -q safe-reboot.timer 2>/dev/null; then
+    done_ "safe-reboot.timer already enabled and running"
+else
+    run systemctl enable --now safe-reboot.timer && did "enabled and started safe-reboot.timer"
+fi
+done_ "hold file (veto, as asiri): mkdir -p ~/.config/safe-reboot && touch ~/.config/safe-reboot/hold   — status: safe-reboot status"
+[ "$DRY" -eq 0 ] && [ -x "$SAFE_REBOOT_BIN" ] && done_ "gate now: $("$SAFE_REBOOT_BIN" status 2>/dev/null | grep -m1 'decision:' | sed 's/^ *//')"
+
+# ------------------------------------------------------- 9. systemd-oomd ----
+say "9. systemd-oomd: user@.service memory-pressure limit 80% (Ubuntu default 50%)"
+if install_file "$REPO_OOMD_DROPIN" "$OOMD_DROPIN" 0644; then
+    # daemon-reload only: restarting user@1000.service would end every session.
+    run systemctl daemon-reload && did "daemon-reload"
+    # oomd gets the monitored cgroups from PID 1 when it connects; a restart of
+    # oomd itself kills nothing and makes it re-read them.
+    run systemctl restart systemd-oomd && did "restarted systemd-oomd"
+fi
+if [ "$DRY" -eq 0 ]; then
+    # systemctl shows the limit scaled to 2^32: 50% = 2147483648, 80% = 3435973836.
+    lim=$(systemctl show user@1000.service -p ManagedOOMMemoryPressureLimit --value 2>/dev/null)
+    if [ "${lim:-0}" -ge 3400000000 ] 2>/dev/null; then done_ "user@1000.service ManagedOOMMemoryPressureLimit=$lim (80%)"
+    else fail oomd "user@1000.service ManagedOOMMemoryPressureLimit=${lim:-?} after installing $OOMD_DROPIN (want 80% = 3435973836) — systemd-analyze cat-config user@.service"; fi
+    if oomctl 2>/dev/null | grep -A2 'user@1000.service$' | grep -q 'Memory Pressure Limit: 80'; then done_ "oomctl: user@1000.service limit 80%"
+    else done_ "(oomctl does not show user@1000.service at 80% yet — check: oomctl | grep -A2 user@1000)"; fi
+fi
+
+# ------------------------------------------------------- 10. sysctl ---------
+say "10. sysctl: vm.dirty_background_bytes=256M, vm.dirty_bytes=1G"
+install_file "$REPO_SYSCTL_DIRTY" "$SYSCTL_DIRTY" 0644 || true
+if [ "$DRY" -eq 1 ]; then
+    run sysctl -q -p "$SYSCTL_DIRTY"
+elif [ "$(sysctl -n vm.dirty_background_bytes)" = 268435456 ] && [ "$(sysctl -n vm.dirty_bytes)" = 1073741824 ]; then
+    done_ "vm.dirty_background_bytes / vm.dirty_bytes already 268435456 / 1073741824"
+elif sysctl -q -p "$SYSCTL_DIRTY" && [ "$(sysctl -n vm.dirty_bytes)" = 1073741824 ]; then
+    did "applied $SYSCTL_DIRTY (vm.dirty_ratio now $(sysctl -n vm.dirty_ratio): the *_bytes knobs replace the ratios)"
+else
+    fail sysctl "vm.dirty_bytes is $(sysctl -n vm.dirty_bytes) after sysctl -p $SYSCTL_DIRTY"
 fi
 
 finish
