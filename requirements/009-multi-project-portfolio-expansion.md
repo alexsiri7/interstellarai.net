@@ -1,9 +1,9 @@
 ---
-id: "009"
-title: "Multi-project portfolio expansion"
-status: "in_progress"
 github_issue: 21
-updated: "2026-05-12"
+id: 009
+status: done
+title: Multi-project portfolio expansion
+updated: '2026-09-28'
 ---
 
 ## Why
