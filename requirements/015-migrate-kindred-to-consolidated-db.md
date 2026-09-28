@@ -2,9 +2,9 @@
 created: '2026-05-15'
 github_issue: 29
 id: '015'
-status: in-progress
+status: done
 title: Migrate Kindred to consolidated DB
-updated: '2026-05-16'
+updated: '2026-09-28'
 ---
 
 ## Why
