@@ -121,6 +121,7 @@ declare -A DEPLOY_URLS=(
   ["lachesis"]="https://lachesis.interstellarai.net/healthz"
   ["kindred"]="https://kindred.up.railway.app/healthz"
   ["zoomies"]="https://zoomies.interstellarai.net/"
+  ["catscape"]="https://catscape.interstellarai.net/"
 )
 
 # Staging deploy URLs — subset of projects that have verified staging environments.
