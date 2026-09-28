@@ -1,11 +1,11 @@
 ---
-import Layout from "../layouts/Layout.astro";
-import { projects, shapeGroups } from "../data/projects";
+import Layout from "../../layouts/Layout.astro";
+import { projects, shapeGroups, projectHref } from "../../data/projects";
 ---
 
 <Layout
   title="Projects · InterStellar AI"
-  description="The InterStellar AI portfolio: FilmDuel, Kindred, Reli, Word Coach Annie, Lachesis, Cosmic Match and The Un-Reminder — with the stack and deploy target behind each one."
+  description="The InterStellar AI portfolio: FilmDuel, Kindred, Reli, Word Coach Annie, Lachesis, Muse & Mingle, Zoomies, Cosmic Match and The Un-Reminder — with the stack and deploy target behind each one."
 >
   <section class="pf-hero">
     <div class="wrap">
@@ -23,14 +23,13 @@ import { projects, shapeGroups } from "../data/projects";
           </div>
           <div class="pf-list-row">
             {projects.filter((p) => p.shape === group.shape).map((p) => {
-              const Row = p.href ? "a" : "div";
               return (
-                <Row class="pf-row" href={p.href}>
+                <a class="pf-row" href={projectHref(p)}>
                   <span class="name">{p.namePre}{p.nameEm && <em>{p.nameEm}</em>}{p.namePost}</span>
                   <span class="desc">{p.desc}</span>
                   <span class="stack">{p.stack}</span>
                   <span class="status"><span class={`badge badge-${p.status}`}>{p.status}</span></span>
-                </Row>
+                </a>
               );
             })}
           </div>
