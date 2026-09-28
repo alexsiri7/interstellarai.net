@@ -1,7 +1,7 @@
 ---
 import Layout from "../layouts/Layout.astro";
 import { getCollection } from "astro:content";
-import { projects } from "../data/projects";
+import { projects, projectHref } from "../data/projects";
 
 // Counters are derived at build time so they can never drift from what the
 // page actually shows.
@@ -71,16 +71,15 @@ const mementoCount = (await getCollection("mementos")).length;
       </div>
       <div class="portfolio-grid">
         {projects.map((p) => {
-          const Card = p.href ? "a" : "div";
           return (
-            <Card class="pf-card" href={p.href}>
+            <a class="pf-card" href={projectHref(p)}>
               <div class="row">
                 <p class="name">{p.namePre}{p.nameEm && <em>{p.nameEm}</em>}{p.namePost}</p>
                 <span class={`badge badge-${p.status}`}>{p.status}</span>
               </div>
               <p class="blurb">{p.blurb}</p>
-              <div class="foot"><span>{p.stackShort}</span><span>{p.href ? "↗" : ""}</span></div>
-            </Card>
+              <div class="foot"><span>{p.stackShort}</span><span>→</span></div>
+            </a>
           );
         })}
       </div>
