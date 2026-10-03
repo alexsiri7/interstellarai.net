@@ -24,6 +24,14 @@ runas_may_launch "issue-pickup" || exit 0
 # shellcheck source=lib/archon-active-runs.sh
 source "$SCRIPT_DIR/lib/archon-active-runs.sh"
 archon_runs_snapshot
+# shellcheck source=lib/ship-breaker.sh
+source "$SCRIPT_DIR/lib/ship-breaker.sh"
+# shellcheck source=lib/quota-pause.sh
+source "$SCRIPT_DIR/lib/quota-pause.sh"
+# Checked once per tick: while the Claude account is rate limited no phase
+# below launches archon (label hygiene still runs). See lib/quota-pause.sh.
+QUOTA_HELD=0
+quota_may_launch "issue-pickup" || QUOTA_HELD=1
 
 # Age (seconds) after which an issue labeled archon:in-progress with no
 # corresponding live archon process and no open PR is considered stuck and
@@ -143,6 +151,7 @@ auto_triage() {
   if [ ! -d "$repo_dir/.git" ]; then
     return
   fi
+  [ "$QUOTA_HELD" = 1 ] && return
 
   # Don't stack — skip if any archon workflow is already running for this repo.
   if pgrep -fa "archon workflow run.*--cwd.*$repo_dir" >/dev/null 2>&1; then
@@ -175,8 +184,11 @@ auto_triage() {
   while IFS= read -r stale_num; do
     [ -n "$stale_num" ] || continue
     local labeled_at labeled_sec label_age
-    labeled_at=$(gh api "repos/alexsiri7/$project/issues/$stale_num/events" \
-      --jq '[.[] | select(.event=="labeled" and .label.name=="archon:triage-in-progress") | .created_at] | last' 2>/dev/null || echo "")
+    # --paginate: the API lists events oldest first, 30 to a page, so on a long
+    # thread page one ends days before the label was last added (see
+    # unstick_stale). Each page prints its matches; the last line is the newest.
+    labeled_at=$(gh api --paginate "repos/alexsiri7/$project/issues/$stale_num/events" \
+      --jq '.[] | select(.event=="labeled" and .label.name=="archon:triage-in-progress") | .created_at' 2>/dev/null | tail -n 1)
     [ -z "$labeled_at" ] || [ "$labeled_at" = "null" ] && continue
     labeled_sec=$(date -d "$labeled_at" +%s 2>/dev/null || echo 0)
     label_age=$((now_sec - labeled_sec))
@@ -406,15 +418,15 @@ unstick_stale() {
       continue
     fi
 
-    # Find when archon:in-progress was last added via issue events.
-    # Use the /events API (issue-only events: labels, assignments) instead of
-    # /timeline (all events) because timeline results can exceed one page, pushing
-    # the labeled event past what a non-paginated call returns and causing
-    # labeled_at to come back empty, silently skipping the re-queue. The events
-    # endpoint is always short enough to fit on one page. Fixes #50.
+    # Find when archon:in-progress was last added via issue events (the
+    # /events API: labels, assignments — not the much longer /timeline, #50).
+    # It must be paginated: events come oldest first, 30 to a page, and an issue
+    # the pipeline has cycled has hundreds (lachesis #174: 249). Unpaginated,
+    # `last` read a days-old label, every stale check passed the moment a run
+    # ended, and the issue was relaunched every tick (2026-10-02/03: 52 runs).
     local labeled_at
-    labeled_at=$(gh api "repos/alexsiri7/$project/issues/$num/events" \
-      --jq '[.[] | select(.event=="labeled" and .label.name=="archon:in-progress") | .created_at] | last' 2>/dev/null || echo "")
+    labeled_at=$(gh api --paginate "repos/alexsiri7/$project/issues/$num/events" \
+      --jq '.[] | select(.event=="labeled" and .label.name=="archon:in-progress") | .created_at' 2>/dev/null | tail -n 1)
     [ -z "$labeled_at" ] || [ "$labeled_at" = "null" ] && continue
 
     local labeled_sec; labeled_sec=$(date -d "$labeled_at" +%s 2>/dev/null || echo 0)
@@ -636,16 +648,33 @@ pick_and_fire() {
     return
   fi
 
+  if [ "$QUOTA_HELD" = 1 ]; then
+    SUMMARY_ACTION="skip-quota"
+    SUMMARY_NOTE="Claude rate limit in effect"
+    return
+  fi
+
   # First candidate whose thread is trusted end to end. Skip, never stop: an
   # issue a stranger commented on stays queued (owner ntfy'd once) without
-  # wedging the rest of the queue behind it.
-  local issue="" cand
+  # wedging the rest of the queue behind it. The same for the ship circuit
+  # breaker (lib/ship-breaker.sh): an issue whose recent runs keep failing is
+  # parked for a human instead of relaunched, and the next candidate is tried.
+  local issue="" cand rc
   for cand in "${candidates[@]}"; do
-    if trust_comments_ok "$project" issue "$cand"; then
-      issue="$cand"
-      break
+    if ! trust_comments_ok "$project" issue "$cand"; then
+      log "$project: #$cand has comments by untrusted authors (or they could not be read) — not starting archon on it"
+      continue
     fi
-    log "$project: #$cand has comments by untrusted authors (or they could not be read) — not starting archon on it"
+    rc=0; ship_breaker_check "$project" "$cand" || rc=$?
+    if [ "$rc" = 1 ]; then
+      log "$project: #$cand — parked by the ship circuit breaker, not relaunching"
+      continue
+    elif [ "$rc" != 0 ]; then
+      log "$project: #$cand — could not read its run history from the archon DB ($(ship_breaker_db)); not launching blind"
+      continue
+    fi
+    issue="$cand"
+    break
   done
 
   if [ -z "$issue" ]; then

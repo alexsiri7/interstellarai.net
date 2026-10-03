@@ -319,6 +319,54 @@ STUB
     [ ! -e "$bd/ab/old1" ] && [ -d "$bd/ab/mixed" ] && [ -d "$bd/cd/new1" ]
 }
 
+# 2026-10-02/03: pipeline-health ran worktree-trim from asiri's home, which
+# archon cannot enter. The host's find (bfs) fails outright from there, every
+# freshness test read "idle", and live run worktrees were deleted. The stub find
+# fails the same way from $T/no-entry and is the real find anywhere else.
+stub_find_failing_in() {
+    mkdir -p "$T/fbin"
+    cat > "$T/fbin/find" <<STUB
+#!/usr/bin/env bash
+case "\$(pwd -P)" in $1|$1/*) echo "find: cannot open working directory" >&2; exit 1 ;; esac
+exec $(command -v find) "\$@"
+STUB
+    chmod +x "$T/fbin/find"
+    export PATH="$T/fbin:$PATH"
+}
+
+@test "worktree-trim started from a directory find cannot work in removes nothing fresh" {
+    echo testproj > "$T/projects"
+    mkdir -p "$T/home/repos/testproj/.git" "$T/no-entry"
+    wt="$T/home/.archon/workspaces/alexsiri7/testproj/worktrees/archon"
+    mkdir -p "$wt/task-archon-ship-1" "$wt/task-archon-ship-2"
+    touch -d '5 hours ago' "$wt/task-archon-ship-1"
+    bd="$T/home/.cache/cargo-build"
+    mkdir -p "$bd/cd/new1/debug"; touch "$bd/cd/new1/debug/x"
+    stub_find_failing_in "$T/no-entry"
+    # gh runs in the wrapper's own environment (archon's PATH): no open PRs.
+    mkdir -p "$T/home/.local/bin"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$T/home/.local/bin/gh"; chmod +x "$T/home/.local/bin/gh"
+    cd "$T/no-entry"
+    run "$W" worktree-trim
+    cd /
+    [ "$status" -eq 0 ]
+    [ ! -e "$wt/task-archon-ship-1" ]      # idle 5h: still trimmed
+    [ -d "$wt/task-archon-ship-2" ]        # fresh: a live run's
+    [ -d "$bd/cd/new1" ]
+}
+
+@test "worktree-trim keeps whatever find cannot vouch for" {
+    echo notcloned > "$T/noprojects"
+    export ARCHON_AS_PROJECTS_FILE="$T/noprojects"
+    bd="$T/home/.cache/cargo-build"
+    mkdir -p "$bd/ab/old1/debug"
+    touch -d '3 days ago' "$bd/ab/old1/debug" "$bd/ab/old1"
+    stub_find_failing_in ""     # fails everywhere
+    run "$W" worktree-trim
+    [ "$status" -eq 0 ]
+    [ -d "$bd/ab/old1" ]
+}
+
 # ── worktree-trim: /tmp and archon's own TMPDIR (#133) ──────────────────────
 # make_tmp_sandbox: an idle dir, an idle file, a dir idle on the outside with a
 # fresh file inside, a fresh dir and an idle session dir, in the /tmp stand-in

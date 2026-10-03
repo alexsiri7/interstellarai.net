@@ -65,6 +65,12 @@ STUB
     # so there is nothing to synchronize on. The label edit and the log line
     # that precede it are the synchronous evidence a launch happened.
     nohup() { :; }
+    # The ship circuit breaker and the quota hold have suites of their own
+    # (ship-breaker.bats, quota-pause.bats): here every issue may launch unless
+    # a test says otherwise.
+    ship_breaker_check() { return 0; }
+    ship_breaker_db() { echo "$T/archon.db"; }
+    QUOTA_HELD=0
 
     LOGGED="$T/logged"
     log() { echo "$*" >> "$LOGGED"; }
@@ -392,6 +398,24 @@ STUB
     grep -q -- "issue edit 73 --repo alexsiri7/testproj --remove-label archon:in-progress --add-label archon:queued" "$GH_ARGV"
 }
 
+# 2026-10-02/03: /events lists oldest first, 30 to a page. Unpaginated, a long
+# thread's newest in-progress label was off page one, `last` read a days-old
+# one, and the issue was re-queued the moment each run ended (lachesis #174,
+# 52 runs in a day). The stub prints what `gh api --paginate --jq` prints: one
+# line per matching event, oldest first.
+@test "unstick_stale reads the newest in-progress label across every events page" {
+    echo '[{"number":74}]' > "$T/fixtures/in-progress.json"
+    { echo '2026-01-01T00:00:00Z'; date -u +%Y-%m-%dT%H:%M:%SZ; } > "$T/fixtures/events-74"
+    echo '["bug","archon:in-progress"]' > "$T/fixtures/labels-74"
+    load_fn unstick_stale
+
+    unstick_stale testproj
+
+    grep -q -- "api --paginate repos/alexsiri7/testproj/issues/74/events" "$GH_ARGV"
+    [ "$(gh_calls -- '--add-label archon:queued')" -eq 0 ]
+    [ "$SUMMARY_STALE" -eq 0 ]
+}
+
 @test "unstick_stale leaves an issue alone while its in-progress label is young" {
     echo '[{"number":73}]' > "$T/fixtures/in-progress.json"
     date -u +%Y-%m-%dT%H:%M:%SZ > "$T/fixtures/events-73"
@@ -561,6 +585,41 @@ JSON
     [ "$SUMMARY_QUEUED" -eq 1 ]
     [ "$SUMMARY_ACTION" = "pickup #20" ]
     grep -q -- "issue edit 20 --repo alexsiri7/testproj --remove-label archon:queued --add-label archon:in-progress" "$GH_ARGV"
+}
+
+@test "pick_and_fire passes over an issue the ship circuit breaker parks" {
+    echo '[{"number":20},{"number":21}]' > "$T/fixtures/queued.json"
+    ship_breaker_check() { [ "$2" != 20 ] || return 1; }
+    load_fn pick_and_fire
+
+    pick_and_fire testproj
+
+    [ "$SUMMARY_ACTION" = "pickup #21" ]
+    [ "$(gh_calls 'issue edit 20 ')" -eq 0 ]
+    grep -q "#20 — parked by the ship circuit breaker" "$LOGGED"
+}
+
+@test "pick_and_fire launches nothing when the run history cannot be read" {
+    echo '[{"number":20}]' > "$T/fixtures/queued.json"
+    ship_breaker_check() { return 2; }
+    load_fn pick_and_fire
+
+    pick_and_fire testproj
+
+    [ "$SUMMARY_ACTION" = "none" ]
+    [ "$(gh_calls 'issue edit 20 ')" -eq 0 ]
+    grep -q "#20 — could not read its run history" "$LOGGED"
+}
+
+@test "pick_and_fire launches nothing while the Claude rate limit holds" {
+    echo '[{"number":20}]' > "$T/fixtures/queued.json"
+    QUOTA_HELD=1
+    load_fn pick_and_fire
+
+    pick_and_fire testproj
+
+    [ "$SUMMARY_ACTION" = "skip-quota" ]
+    [ "$(gh_calls 'issue edit 20 ')" -eq 0 ]
 }
 
 @test "pick_and_fire picks an issue promoted this tick that the search misses" {

@@ -27,6 +27,14 @@ load_archon_projects DEFAULT_PROJECTS
 source "$SCRIPT_DIR/lib/throttle.sh"
 should_tick "pr-maintenance" || exit 0
 runas_may_launch "pr-maintenance" || exit 0
+# shellcheck source=lib/ship-breaker.sh
+source "$SCRIPT_DIR/lib/ship-breaker.sh"
+# shellcheck source=lib/quota-pause.sh
+source "$SCRIPT_DIR/lib/quota-pause.sh"
+# Merging green PRs costs no tokens and still runs while the Claude account
+# is rate limited; only the archon launch below is held.
+QUOTA_HELD=0
+quota_may_launch "pr-maintenance" || QUOTA_HELD=1
 # shellcheck source=lib/ci-skip.sh
 source "$SCRIPT_DIR/lib/ci-skip.sh"
 # shellcheck source=lib/archon-active-runs.sh
@@ -309,6 +317,10 @@ for PROJECT in "${PROJECTS[@]}"; do
     continue
   fi
 
+  if [ "$QUOTA_HELD" = 1 ]; then
+    log "$PROJECT: PR #$ACTIONABLE needs maintenance — held, Claude rate limit in effect"
+    continue
+  fi
   log "$PROJECT: PR #$ACTIONABLE needs maintenance — launching archon"
   archon workflow run archon-pr-maintenance --cwd "$REPO_DIR" "PR #$ACTIONABLE" &
 
