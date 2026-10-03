@@ -88,6 +88,10 @@ ensure_labels() {
     gh label create "$label" --repo "alexsiri7/$repo" \
       --color "c2e0c6" --description "Archon pipeline state" 2>/dev/null || true
   done
+  # The ship circuit breaker parks with it (lib/ship-breaker.sh); a missing
+  # label fails its whole `gh issue edit`.
+  gh label create "manual-review" --repo "alexsiri7/$repo" \
+    --color "d93f0b" --description "Needs a human before the factory touches it" 2>/dev/null || true
   gh label create "$TRUST_APPROVED_LABEL" --repo "alexsiri7/$repo" \
     --color "0e8a16" --description "Owner vetted: the factory may work this bridge-filed issue" 2>/dev/null || true
   gh label create "$SCREEN_AUTO_LABEL" --repo "alexsiri7/$repo" \

@@ -26,6 +26,7 @@ setup() {
 printf '%s\n' "$*" >> "$GH_ARGV"
 case "$*" in
   *"/comments"*) cat "$GH_COMMENTS" 2>/dev/null || true ;;
+  *"issue edit"*) exit "${GH_EDIT_RC:-0}" ;;
 esac
 STUB
     chmod +x "$T/bin/gh"
@@ -75,6 +76,15 @@ run_row() {
     grep -q -- "issue edit 5 --repo alexsiri7/testproj .*--add-label manual-review --add-label archon:skipped" "$GH_ARGV"
     grep -q -- "issue comment 5 " "$GH_ARGV"
     [[ "$output" == *"circuit open (failed:3)"* ]]
+}
+
+@test "a park whose relabel fails posts no marker comment (it would reset the count)" {
+    run_row failed 50
+    run_row failed 30
+    run_row failed 10
+    GH_EDIT_RC=1 run ship_breaker_check testproj 5
+    [ "$status" -eq 1 ]
+    [ "$(grep -c 'issue comment' "$GH_ARGV")" -eq 0 ]
 }
 
 @test "a completed run resets the count" {

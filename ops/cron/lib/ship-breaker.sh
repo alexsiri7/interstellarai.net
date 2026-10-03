@@ -115,10 +115,15 @@ ship_breaker_check() {
       why="its last ${verdict#failed:} archon-ship runs all failed (rate-limit failures not counted). Read the run logs under .archon-logs/cron-issue-$issue-* before re-queuing." ;;
   esac
   echo "$(date -Is) [ship-breaker] $project: #$issue — circuit open ($verdict), parking as manual-review + archon:skipped"
-  gh issue edit "$issue" --repo "alexsiri7/$project" \
-    --remove-label "archon:queued" --remove-label "archon:in-progress" \
-    --add-label "manual-review" --add-label "archon:skipped" >/dev/null 2>&1 \
-    || echo "$(date -Is) [ship-breaker] $project: #$issue — could not relabel; not launching anyway"
+  # The marker comment resets the count, so it is only posted once the park
+  # holds: posted after a failed relabel, the next tick would count no runs
+  # and launch again. Not launching either way.
+  if ! gh issue edit "$issue" --repo "alexsiri7/$project" \
+      --remove-label "archon:queued" --remove-label "archon:in-progress" \
+      --add-label "manual-review" --add-label "archon:skipped" >/dev/null 2>&1; then
+    echo "$(date -Is) [ship-breaker] $project: #$issue — could not relabel; not launching, will retry next tick"
+    return 1
+  fi
   gh issue comment "$issue" --repo "alexsiri7/$project" --body "Parked by the archon-ship circuit breaker: ${why}
 
 Remove \`manual-review\` and \`archon:skipped\` and add \`archon:queued\` to run it again; only runs after this comment will count.
