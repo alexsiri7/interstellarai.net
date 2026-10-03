@@ -396,11 +396,26 @@ verb_gh_probe() {
 # Port of pipeline-health-cron.sh autoclean_stale_worktrees for the factory's
 # own layout: task-archon-* worktrees whose archon/<dir> branch has no open PR
 # and that nothing touched for 4h. A project whose PR listing fails is skipped.
+# recently_written <path> <find tests...> — true when find reports a match,
+# and also when find cannot run cleanly: every caller deletes on false, so a
+# doubt must read as "keep". 2026-10-02/03: cron called this verb from asiri's
+# home, which archon cannot enter; GNU find failed on every path before testing
+# it, every freshness test read "idle", and the trim deleted the worktrees of
+# live runs (their next node failed "'uv' / 'bash' executable not found": the
+# spawn's cwd was gone) along with active cargo build dirs.
+recently_written() {
+    local out
+    out=$(find "$@" -print -quit 2>/dev/null) || return 0
+    [ -n "$out" ]
+}
+
 verb_worktree_trim() {
     local dry=0 tmp_only=0 a
     for a in "$@"; do
         case "$a" in --dry-run) dry=1 ;; --tmp-only) tmp_only=1 ;; *) refuse "worktree-trim [--dry-run] [--tmp-only]" ;; esac
     done
+    # A directory archon can always enter (see recently_written).
+    cd "$ARCHON_HOME_DIR" 2>/dev/null || cd / || exit 1
     if [ "$tmp_only" = 1 ]; then trim_tmp "$dry"; return 0; fi
     local p open wt_base wt_path name removed candidates=0 total=0 size
     for p in "${PROJECTS[@]}"; do
@@ -415,7 +430,7 @@ verb_worktree_trim() {
             while IFS= read -r wt_path; do
                 name=$(basename "$wt_path")
                 grep -qxF "archon/$name" <<<"$open" && continue
-                find "$wt_path" -maxdepth 0 -mmin -240 2>/dev/null | grep -q . && continue
+                recently_written "$wt_path" -maxdepth 0 -mmin -240 && continue
                 if [ "$dry" = 1 ]; then
                     size=$(du -sm "$wt_path" 2>/dev/null | cut -f1 || true); size=${size:-0}
                     echo "autoclean: would remove $wt_path (${size}MB)"
@@ -439,7 +454,7 @@ verb_worktree_trim() {
     for bd in "$bd_root"/*/*/; do
         [ -d "$bd" ] || continue
         bd=${bd%/}
-        find "$bd" -mmin -2880 -print -quit 2>/dev/null | grep -q . && continue
+        recently_written "$bd" -mmin -2880 && continue
         size=$(du -sm "$bd" 2>/dev/null | cut -f1 || true); size=${size:-0}
         if [ "$dry" = 1 ]; then
             echo "autoclean: would remove cargo build dir $bd (${size}MB)"
@@ -475,7 +490,7 @@ trim_tmp() {
             name=${e##*/}
             case "$name" in claude-*|tmux-*|ssh-*|pulse-*|dbus-*|systemd-*|snap-*) continue ;; esac
             # find does not follow a starting-point symlink: it tests the link itself.
-            find "$e" -mmin -720 -print -quit 2>/dev/null | grep -q . && continue
+            recently_written "$e" -mmin -720 && continue
             live=0
             for c in ${cwds[@]+"${cwds[@]}"}; do
                 if [ "$c" = "$e" ] || [[ "$c" == "$e"/* ]]; then live=1; break; fi

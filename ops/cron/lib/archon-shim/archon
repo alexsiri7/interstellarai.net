@@ -20,6 +20,22 @@ if [ -z "$mode" ]; then
     [ -r "$f" ] && mode=$(sed -nE 's/^[[:space:]]*ARCHON_RUN_AS=["'\'']?([a-z]+)["'\'']?[[:space:]]*(#.*)?$/\1/p' "$f" | tail -n 1)
 fi
 real="${ARCHON_REAL_BIN:-/mnt/ext-fast/archon/packages/cli/src/cli.ts}"
+# Every cron launch goes through here, so this is the one gate no launch site
+# can miss: while the Claude account is rate limited (lib/quota-pause.sh)
+# `workflow run` is refused like a drain (exit 75). The launching scripts check
+# quota_may_launch themselves first; this catches the rest (pipeline-health's
+# fixers). ARCHON_QUOTA_OVERRIDE=1 lets the owner start a run by hand anyway.
+if [ "$mode" = archon ] && [ "${1:-}" = workflow ] && [ "${2:-}" = run ] \
+        && [ "${ARCHON_QUOTA_OVERRIDE:-}" != 1 ]; then
+    shim_lib="$(dirname "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")")"
+    if ARCHON_RUN_AS=archon source "$shim_lib/ship-breaker.sh" 2>/dev/null \
+            && source "$shim_lib/quota-pause.sh" 2>/dev/null; then
+        if ! held=$(ARCHON_RUN_AS=archon quota_may_launch "archon workflow run"); then
+            echo "archon: refusing 'workflow run' — ${held#*: }" >&2
+            exit 75
+        fi
+    fi
+fi
 case "$mode" in
     archon)
         exec sudo -n -u "${ARCHON_AS_USER:-archon}" "${ARCHON_AS_WRAPPER:-/usr/local/bin/archon-as-archon}" "$@" ;;
