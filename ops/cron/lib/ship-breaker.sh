@@ -6,10 +6,13 @@
 #
 # 2026-10-02/03: one weekly Claude quota went in a day on the same seven issues
 # relaunched every 15-30 minutes (lachesis #174: 52 runs, annie #1157: 23), each
-# run failing the same way: the factory token cannot push .github/workflows/**
-# (no Workflows permission, ops/host/archon-user/README.md "Decisions"), so the
-# PR node returned no PR and the rest of the tail spent the tokens anyway.
-# Nothing upstream of the launch remembered that the last runs had failed.
+# run failing the same way: the factory token could not push .github/workflows/**
+# (it had no Workflows permission then), so the PR node returned no PR and the
+# rest of the tail spent the tokens anyway. Nothing upstream of the launch
+# remembered that the last runs had failed. Since 2026-10-04 the token has
+# "Workflows: Read and write" (ops/host/archon-user/README.md "Decisions"), so
+# the workflow-scope verdict below should stay dormant; it is kept because a
+# token regenerated without that permission brings the loop straight back.
 #
 # Before every archon-ship launch on an issue this looks at that issue's runs:
 #   - the newest counted run hit GitHub's workflow-permission push refusal:
@@ -110,7 +113,7 @@ ship_breaker_check() {
   local why
   case "$verdict" in
     workflow-scope)
-      why="its last archon-ship run could not push: the branch changes .github/workflows/**, and the factory token has no Workflows permission (ops/host/archon-user/README.md). Another run cannot push it either. Push the change by hand, or grant the token Workflows: Read and write." ;;
+      why="its last archon-ship run could not push: the branch changes .github/workflows/**, and GitHub refused the factory token for lack of the Workflows permission. The token should have \"Workflows: Read and write\" (ops/host/archon-user/README.md, step (a)); check it was not regenerated without it. Until then another run cannot push it either: push the change by hand." ;;
     *)
       why="its last ${verdict#failed:} archon-ship runs all failed (rate-limit failures not counted). Read the run logs under .archon-logs/cron-issue-$issue-* before re-queuing." ;;
   esac

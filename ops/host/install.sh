@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # ops/host/install.sh — one-time host setup for the archon build machine.
 #
-#   sudo ops/host/install.sh            # apply (idempotent: re-runs say "already done")
+#   sudo -n /usr/local/sbin/archon-host-install   # apply, from the root-owned ops snapshot, no password
+#                                       # (ops/host/archon-ops; set up by archon-user/install.sh --install-sudo-ops)
+#   sudo ops/host/install.sh            # apply from the checkout (needs the password)
 #   ops/host/install.sh --dry-run       # print every command and file it would write, as any user
 #
 # What it does (see ops/host/README.md):
@@ -25,6 +27,7 @@
 # Test hook (ops/cron/tests/host-install.bats): HOST_INSTALL_SUDOERS_D=<dir>
 # points step 1 at <dir> instead of /etc/sudoers.d, skips the root check and
 # stops after step 1, so the sudoers logic runs against a stubbed visudo.
+# Ignored when running as root.
 
 set -uo pipefail
 
@@ -32,11 +35,16 @@ DRY=0
 case "${1:-}" in
     --dry-run|-n) DRY=1 ;;
     "") ;;
-    -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1 (only --dry-run)" >&2; exit 2 ;;
 esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd / || exit 1   # root never works from a cwd someone else picked
+if [ "$(id -u)" -eq 0 ] && [ -n "${HOST_INSTALL_SUDOERS_D:-}" ]; then
+    echo "ignoring HOST_INSTALL_SUDOERS_D (test hook) as root" >&2
+    unset HOST_INSTALL_SUDOERS_D
+fi
 REPO_SUDOERS="$SCRIPT_DIR/sudoers-archon-cron"
 REPO_SMARTD_NTFY="$SCRIPT_DIR/smartd-ntfy"
 REPO_SAFE_REBOOT="$SCRIPT_DIR/safe-reboot"

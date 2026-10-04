@@ -21,6 +21,16 @@ cron (asiri, secrets.env) ──sudo -n -u archon──▶ /usr/local/bin/archon
 archon-serve.service (system unit, User=archon, NoNewPrivileges, ProtectHome)
 ```
 
+**Running the installers (since 2026-10-04): no password.** After a one-time
+`sudo ops/host/archon-user/install.sh --install-sudo-ops` (with the password; see
+"Passwordless sudo" below), the owner and the assistant run every `install.sh`
+form in this file as `sudo -n /usr/local/sbin/archon-user-install <args>`, and
+`ops/host/install.sh` as `sudo -n /usr/local/sbin/archon-host-install`. Both run
+a root-owned snapshot of `ops/`, not the checkout; after an approved ops update,
+refresh it first with `sudo -n /usr/local/sbin/archon-ops-promote`. Anything as
+archon is `sudo -n -u archon -H bash -c '…'`, also without a password.
+The commands below use the entrypoints; `sudo ops/host/archon-user/install.sh …` from the checkout still works, with the password.
+
 Nothing changes until the owner runs `install.sh --cutover`. The flag
 (`ARCHON_RUN_AS`, default `asiri`) keeps every cron script byte-for-byte on today's
 path. `install.sh --rollback` goes back in one step.
@@ -46,8 +56,8 @@ archon gets its own GitHub token, not a copy of yours. To create it:
    | Expiration | 1 year. Put a reminder in your calendar; `verify.sh` fails once it expires. |
    | Resource owner | `alexsiri7` |
    | Repository access | **Only select repositories**: `un-reminder`, `cosmic-match`, `word-coach-annie`, `filmduel`, `reli`, `kindred`, `lachesis`, `interstellarai.net`, `musenmingle`, `zoomies`, `catscape`, `dibs`, `kith`. This is the list in `ops/cron/archon-projects.txt`. **Not `Archon`**: `archon-update.sh` pushes its upstream-sync branches to that fork. Alternatively **All repositories**, so new projects need no token edit; then opt in, see "An all-repositories token" below. |
-   | Permissions → Repository permissions | **Contents: Read and write** · **Pull requests: Read and write** · **Issues: Read and write** · Actions: Read-only · Checks: Read-only · Commit statuses: Read-only · Metadata: Read-only (mandatory, preselected) · everything else: No access |
-   | Workflows (a repository permission) | **No access** (see "Decisions" below) |
+   | Permissions → Repository permissions | **Contents: Read and write** · **Pull requests: Read and write** · **Issues: Read and write** · **Workflows: Read and write** · Actions: Read-only · Checks: Read-only · Commit statuses: Read-only · Metadata: Read-only (mandatory, preselected) · everything else: No access |
+   | Workflows (a repository permission) | **Read and write** since 2026-10-04 (see "Decisions" below). Without it every push that touches `.github/workflows/` is refused. |
    | Permissions → Account permissions | none |
 
 3. Click **Generate token**. The page shows the token once, starting `github_pat_`.
@@ -61,8 +71,8 @@ With **All repositories** the token can also write `alexsiri7/Archon`, and `veri
 repos need no token edit), record the decision once:
 
 ```bash
-sudo ops/host/archon-user/install.sh --allow-all-repos-token      # writes ALLOW_ALL_REPOS_TOKEN=1 to /etc/archon-user/config
-sudo ops/host/archon-user/install.sh --no-allow-all-repos-token   # undo: the fork check FAILs again
+sudo -n /usr/local/sbin/archon-user-install --allow-all-repos-token      # writes ALLOW_ALL_REPOS_TOKEN=1 to /etc/archon-user/config
+sudo -n /usr/local/sbin/archon-user-install --no-allow-all-repos-token   # undo: the fork check FAILs again
 ```
 
 The check then reports WARN: "owner opted in to an all-repositories token; a hijacked
@@ -78,7 +88,7 @@ change it.
 
 ```bash
 ops/host/archon-user/install.sh --dry-run        # preview, as asiri
-sudo ops/host/archon-user/install.sh
+sudo -n /usr/local/sbin/archon-user-install
 ```
 
 This creates the user and tightens permissions (home 0750, secret dirs 0700, ACL deny on
@@ -104,7 +114,7 @@ prompt and press Enter. Nothing is echoed while you paste. It logs archon's `gh`
 the token and runs gh-probe, which should print PASS for every factory repo:
 
 ```bash
-sudo ops/host/archon-user/install.sh --set-gh-token
+sudo -n /usr/local/sbin/archon-user-install --set-gh-token
 ```
 
 **Claude.** First create a token for archon, then hand it over:
@@ -122,7 +132,7 @@ sudo ops/host/archon-user/install.sh --set-gh-token
    archon's) and runs one real `claude -p` request as archon:
 
    ```bash
-   sudo ops/host/archon-user/install.sh --set-claude-token
+   sudo -n /usr/local/sbin/archon-user-install --set-claude-token
    ```
 
 `claude setup-token` prints a one-year token that can only make model requests. It
@@ -146,10 +156,10 @@ ops/host/archon-user/verify.sh --live
 ### (d) Cut over
 
 ```bash
-sudo ops/host/archon-user/install.sh --drain      # launching crons skip their ticks; runs in flight finish as asiri
+sudo -n /usr/local/sbin/archon-user-install --drain      # launching crons skip their ticks; runs in flight finish as asiri
 ARCHON_RUN_AS=asiri archon workflow runs --all --status running    # repeat until empty
 ARCHON_RUN_AS=asiri archon workflow runs --all --status paused     # CI waits clear on their own in minutes
-sudo ops/host/archon-user/install.sh --cutover
+sudo -n /usr/local/sbin/archon-user-install --cutover
 ```
 
 `--cutover` does the following, in order:
@@ -179,7 +189,7 @@ practice.
 ```bash
 ops/host/archon-user/verify.sh            # exit 0 = all PASS
 ops/host/archon-user/verify.sh --live     # plus one real one-line Claude run through the factory path
-sudo ops/host/archon-user/install.sh --status
+sudo -n /usr/local/sbin/archon-user-install --status
 systemctl status archon-serve.service     # Main PID … bun, user archon
 ps -o user,pid,cmd -C bun                 # factory runs: user archon
 tail -f ~/.local/state/archon-cron/logs/issue-pickup.log
@@ -187,7 +197,7 @@ tail -f ~/.local/state/archon-cron/logs/issue-pickup.log
 
 `verify.sh` checks the following:
 
-- **Host.** The flag. The server unit runs as archon, asiri's unit is stopped, the server answers 200. The shim link and the crontab line. sudo lets asiri run the wrapper as archon and nothing else without a password. The probes use `sudo -k`, which ignores a cached `sudo` password for that call, so a recent `sudo` in the same terminal cannot make them pass or fail.
+- **Host.** The flag. The server unit runs as archon, asiri's unit is stopped, the server answers 200. The shim link and the crontab line. sudo lets asiri run the wrapper, and anything else, as archon without a password, but never with `-E`. As root it allows only the three ops entrypoints, and `sudo -n /bin/true` as root is refused. The entrypoints are root 0755, and the ops snapshot is root-only and not behind the live checkout's `ops/` (WARN if it is). The probes use `sudo -k`, which ignores a cached `sudo` password for that call, so a recent `sudo` in the same terminal cannot make them pass or fail.
 - **Owner side.** The modes of the home, the secret dirs and the secret files. asiri is in group `archon`. A warning for `safe.directory = *`.
 - **Archon side** (`archon-as-archon selftest`, run as archon):
   - archon is in no extra groups and has no sudo.
@@ -204,7 +214,7 @@ tail -f ~/.local/state/archon-cron/logs/issue-pickup.log
 ### (f) Roll back (one step)
 
 ```bash
-sudo ops/host/archon-user/install.sh --rollback
+sudo -n /usr/local/sbin/archon-user-install --rollback
 ```
 
 This sets the flag to `asiri`, restores `~/.bun/bin/archon`, and stops the system unit.
@@ -221,19 +231,20 @@ sudo systemctl disable --now archon-serve.service && systemctl --user enable --n
 Removing it entirely:
 
 - `sudo rm /etc/sudoers.d/archon-user /usr/local/bin/archon-as-archon /etc/systemd/system/archon-serve.service`
+- `sudo rm -r /usr/local/sbin/archon-{user-install,host-install,ops-promote} /usr/local/lib/archon-ops`
 - `sudo userdel archon` (its home `/mnt/ext-fast/archon-home` is kept until you delete it)
 - `sudo setfacl -x u:archon <paths>` (or leave the ACLs; they name a user that no longer exists)
 
 ## Living with it
 
-- **Running archon by hand.** `archon workflow …` as asiri goes through the shim to the factory user; the wrapper refuses anything outside the verbs in its header. Anything else: `sudo -u archon -H bash -c '…'` (with your password). Do not use the `CLAUDECODE=0 bun /mnt/ext-fast/archon/packages/cli/src/cli.ts workflow run …` form from `archon-playground/AGENTS.md` after the cutover. It runs the agent as asiri, with every secret in reach, against the old DB.
+- **Running archon by hand.** `archon workflow …` as asiri goes through the shim to the factory user; the wrapper refuses anything outside the verbs in its header. Anything else: `sudo -n -u archon -H bash -c '…'`, no password since `--install-sudo-ops` (for instance `sudo -n -u archon -H bash -c 'cd ~/repos/reli && ~/.bun/bin/archon workflow list'`). That shell gets sudo's reset environment, not the wrapper's allowlist, so do not start factory runs that way; use `archon workflow run …` (the shim) for those. Do not use the `CLAUDECODE=0 bun /mnt/ext-fast/archon/packages/cli/src/cli.ts workflow run …` form from `archon-playground/AGENTS.md` after the cutover. It runs the agent as asiri, with every secret in reach, against the old DB.
 - **Global workflow overrides** live in `/mnt/ext-fast/archon-home/.archon/workflows/`. They are owned by asiri, readable by archon and not writable by it. `~/.archon/workflows` is no longer read.
 - **Adding a project.**
   1. Add it to `ops/cron/archon-projects.txt`.
   2. Add the repo to the PAT (GitHub → the token → Edit). Not needed with an all-repositories token.
-  3. Run `sudo ops/host/archon-user/install.sh` (rewrites `/etc/archon-user/projects`, the list the wrapper accepts).
+  3. Once the change is on main and approved (`ops/cron/ops-self-update.sh --approve`), run `sudo -n /usr/local/sbin/archon-ops-promote`, then `sudo -n /usr/local/sbin/archon-user-install` (rewrites `/etc/archon-user/projects`, the list the wrapper accepts, from the promoted snapshot).
   4. The wrapper clones it on first use.
-- **Toolchains.** Toolchains are copies, owned by archon, so the factory cannot alter the owner's. Claude updates itself as archon, and bun is upgraded for both users by `tool-freshness.sh --apply`. Everything else (gh, JDK, Android SDK, rustup, Flutter, Playwright, uv): re-run `sudo ops/host/archon-user/install.sh` after upgrading the owner's copy.
+- **Toolchains.** Toolchains are copies, owned by archon, so the factory cannot alter the owner's. Claude updates itself as archon, and bun is upgraded for both users by `tool-freshness.sh --apply`. Everything else (gh, JDK, Android SDK, rustup, Flutter, Playwright, uv): re-run `sudo -n /usr/local/sbin/archon-user-install` after upgrading the owner's copy. The copy is written *by archon* (`runuser`; rsync's receiving side runs as archon), so a symlink archon planted in its home cannot redirect a root write.
 - **Never run git as asiri inside `/mnt/ext-fast/archon-home`.** git executes hooks and config (`core.fsmonitor`, `core.hooksPath`) from the repository, which archon controls. asiri's `~/.gitconfig` has `safe.directory = *`, which switches off git's own guard against exactly that; `verify.sh` warns about it. Read files there, but run git as archon: `sudo -u archon -H git -C … log`.
 - **Logs.** Cron logs are unchanged (`~/.local/state/archon-cron/logs`, and `.archon-logs/` in the owner's clones, written by the cron's own redirect). Archon's own run logs and artifacts are under `/mnt/ext-fast/archon-home/.archon/workspaces/`. They are group-readable to asiri, who is in group `archon`.
 
@@ -261,11 +272,80 @@ gates apply:
 - **The wrapper runs as archon, not root.** A bug in it therefore costs at most what archon already has. It is root-owned so neither side can change it. Arguments are never evaluated as shell; each verb has a fixed grammar. `--workflow-source`, `--config`, `--stubs`, `--folder`, `--exec-code` and unknown flags are refused. The directory must be a listed project. The environment is `env -i` plus an allowlist. `--cwd` is dropped after mapping, so archon's process reads `archon workflow run <name> …` exactly like before. Together with the sudo parent's argv, every `pgrep` guard in the cron scripts matches unchanged; `archon-as-archon.bats` tests each pattern.
 - **Fresh run DB for archon.** asiri's `archon.db` holds absolute worktree paths in asiri's home, and `credential-key` encrypts whatever the old DB stored. Neither is carried over, which is why the cutover drains first.
 - **Claude: `setup-token`, not a copy of `~/.claude/.credentials.json`.** A fresh credential can be revoked on its own and carries no connectors.
-- **GitHub: no Workflows permission.** Without it the factory cannot push changes under `.github/workflows/`, so an injected agent cannot add a workflow that dumps the repos' Actions secrets (Railway and deploy tokens). The cost: CI-file fixes fail to push and land on the owner. Grant "Workflows: Read and write" if that happens too often; it reopens that path. Likewise, "Actions: Read and write" would let `archon-assist` re-run jobs itself. pipeline-health already re-runs failed CI as asiri.
+- **GitHub: Workflows: Read and write (since 2026-10-04).** Until then the token had no Workflows permission, so the factory could not push changes under `.github/workflows/`. The cost was too high: 130 of 199 recent factory runs failed when their pushes were refused, and every CI-file fix landed on the owner. What granting it reopens: a hijacked agent can push a branch whose workflow runs on `push`/`pull_request` with the repo's Actions secrets (Railway and deploy tokens) and send them out. No merge is needed for that, so branch protection and the human-merge gate for `ops/**` and `.github/**` (which covers `interstellarai.net` only) do not stop it. Narrow it per repo with environment-scoped secrets and required reviewers on deploy environments. `lib/ship-breaker.sh` still parks an issue at once on GitHub's workflow-scope push refusal; that should now stay dormant, and it is kept for a token regenerated without the permission. "Actions: Read and write" would also let `archon-assist` re-run jobs itself; it stays read-only, since pipeline-health already re-runs failed CI as asiri.
+- **Passwordless sudo for the owner, never a writable path for root.** See "Passwordless sudo" below.
 - **Merging stays with asiri's gh** (`pr-maintenance-cron.sh`). The factory's PAT could merge as well, since contents and pull-requests write allow it; the ops-repo gates above are local for that reason.
 - **Home on `/mnt/ext-fast`.** `/` is small and was 100% full on 2026-09-26. Toolchains are non-snap copies (uv binary, Flutter SDK checkout): snaps refuse homes outside `/home` without `snap set system homedirs`, and fail under `no_new_privs`.
 - **NTFS `umask=077`.** Checked on 2026-09-26: no service user reads `/mnt/steam-*`. Ollama's models are in `/usr/share/ollama`, no dolt server is running, and the mounts hold the DB backups plus personal files. `uid=1000`, i.e. asiri, keeps full access.
 - **ACL deny (`u:archon:---`) rather than `chmod o-rwx`** on the mount entries. It shuts out exactly one user, changes nothing for asiri or anything else that reads those paths, and `setfacl -x u:archon` undoes it. `/mnt/ext-fast` itself becomes traverse-only for archon, so it cannot list names it was not told. The NTFS mounts (`fuseblk`, no ACLs) get `umask=077` in fstab instead.
+
+## Passwordless sudo
+
+Installed by `install.sh --install-sudo-ops` (also part of step 7 of a plain
+`install.sh`). The owner runs it once with the password, from the live checkout:
+
+```bash
+sudo /mnt/ext-fast/interstellarai.net/ops/host/archon-user/install.sh --install-sudo-ops
+```
+
+It installs the three entrypoints, bootstraps the snapshot from the live
+checkout (the same checks as a promote), then installs the sudoers drop-in
+(`visudo -c`, rolled back on failure). After that:
+
+| As asiri, no password | Runs |
+|---|---|
+| `sudo -n -u archon -H <anything>` | anything as archon (NOSETENV: `sudo -E` is refused, sudo's env_reset always applies) |
+| `sudo -n /usr/local/sbin/archon-user-install [args]` | the snapshot's `ops/host/archon-user/install.sh` as root |
+| `sudo -n /usr/local/sbin/archon-host-install [args]` | the snapshot's `ops/host/install.sh` as root |
+| `sudo -n /usr/local/sbin/archon-ops-promote [--status]` | refreshes the snapshot from the live checkout |
+| `sudo -n systemctl restart archon-serve.service` | (as before) |
+
+**Why a snapshot.** archon can push to this repo. ops-self-update pulls
+`origin/main` into the live checkout and holds `ops/**` changes for review. A
+NOPASSWD rule that ran anything under `/mnt/ext-fast/interstellarai.net`, or
+anything else asiri or archon can write, would let the factory reach root. So
+root only runs `/usr/local/lib/archon-ops/releases/<sha>/ops/…`:
+
+- The snapshot is root:root, with dirs 0755 and files 0644/0755, and has no symlinks or ACLs.
+- `current` is a root-owned symlink to the promoted release.
+- Each entrypoint checks every path component from `/` to every file of `current`, and every directory on the PATH it hands over. Then it `exec`s the installer from `/` under `env -i` with a fixed PATH. So test hooks like `ARCHON_USER_INSTALL_SANDBOX` or `HOST_INSTALL_SUDOERS_D` cannot reach it. The scripts also ignore those hooks whenever they run as root.
+
+**Promotion.** `archon-ops-promote`:
+
+- writes `git archive HEAD ops/` (the committed content, not the working tree) into a new `releases/<sha>`;
+- flips `current` atomically;
+- keeps the last 5 releases.
+
+It refuses unless both of these hold:
+
+- nothing under `ops/` is modified or untracked in the live checkout;
+- `HEAD` is reachable from `refs/remotes/origin/main`. That means HEAD is what ops-self-update fast-forwarded to, which for an `ops/**` change means you approved it.
+
+git never runs as root. It runs as the checkout's owner, with `env -i`, `GIT_CONFIG_NOSYSTEM`, no global config, `core.hooksPath=/dev/null`, `core.fsmonitor=false` and `safe.directory`. Root checks the tar stream before extracting it: only regular files and directories under `ops/`. The usual sequence after an ops PR merges:
+
+```bash
+ops/cron/ops-self-update.sh --approve            # as asiri: review, fast-forward the live checkout
+sudo -n /usr/local/sbin/archon-ops-promote       # snapshot that commit
+sudo -n /usr/local/sbin/archon-user-install      # (or archon-host-install) if the change needs installing
+```
+
+`--status` shows the promoted sha, the releases, the live HEAD and whether it can
+be promoted. It also warns when `ARCHON_RUN_AS` is not `archon`, since the review
+gate in ops-self-update only holds `ops/**` changes under archon.
+
+**What a root run of the installers still trusts.** The audit of 2026-10-04 found these. None of them is writable by archon.
+
+- **The owner's files under `/home/asiri`**, all of them asiri's. As root, the installers:
+  - read `~/.archon/config.yaml` and `~/.archon/workflows/*.yaml`, as data;
+  - read the toolchain sources (`~/.bun`, `~/.local/bin`, `~/.rustup`, `~/Android/Sdk`, …), and copy them for archon;
+  - write the run-as flag, `~/.bun/bin/archon` and `archon-link.prev`;
+  - chmod the secret dirs and files.
+
+  A compromised asiri could swap these, but it can already promote.
+- **`/mnt/ext-fast/archon` (the engine) and `/mnt/ext-fast/.tmp-root`.** Root only links to the engine (`/usr/local/lib/archon-user/bin/archon`, archon's `~/.bun/bin/archon`) and never executes it. Factory runs execute it as archon, and the cutover's drain check runs it as asiri. Root creates and chmods `.tmp-root` in asiri-owned `/mnt/ext-fast`.
+- **Archon's home.** Every write there (steps 5 and 6, `--set-claude-token`) is done *as archon*. Root only reads and stats there, and compares toolchain copies after checking they are regular files, not symlinks. The one exception is `~/.archon/workflows`, which is asiri-owned by design. Root creates that directory and copies an owner's override into it only when the target does not exist yet, and refuses when it sees a symlink on the way. A race between that check and the write remains. That directory was only nominally protected anyway, since archon owns its parent and can rename it.
+- **Output of commands run as archon** (gh-probe, `workflow runs --json`, the smoke run). Root only greps it or parses it as JSON with `python3 -c`, always from `/`, so the cwd cannot plant a module.
+- **The root-owned wrapper and `safe-reboot`.** They run as root (`safe-reboot status`) or as archon via `runuser`, as before.
 
 ## What the workflows needed secrets for (audit)
 
@@ -285,6 +365,9 @@ These were grepped for `secrets.env|railway|psql|SUPABASE|CLOUDFLARE|wrangler|DA
 | Project `.env` files | None exist in the owner's clones. Worktrees never had them, and Archon strips a target repo's `.env` anyway. | Nothing to do |
 
 ## Residual risks (not closed here)
+
+- **The factory token can change CI workflows** (Workflows: Read and write, see "Decisions"). A pushed branch can run a modified workflow with the repo's Actions secrets before any human looks.
+- **A fully compromised asiri session can still reach root.** It can commit to the live checkout, move `refs/remotes/origin/main` locally (or push), and promote. The snapshot protects root from *archon*, which cannot write the live checkout, not from asiri.
 
 - **The factory token can merge and push to every factory repo.** That is what the factory is for, and a merge there deploys to prod through CI. Branch protection, required checks and the trust gate (`lib/trust.sh`) remain the controls.
 - **Network egress is open.** archon can send out what it can read: its repos, its own two tokens.
@@ -306,7 +389,8 @@ These were grepped for `secrets.env|railway|psql|SUPABASE|CLOUDFLARE|wrangler|DA
 |---|---|---|
 | `install.sh` | — | prepare / `--set-gh-token` / `--set-claude-token` / `--[no-]allow-all-repos-token` / `--drain` / `--cutover` / `--rollback` / `--status` / `--dry-run` |
 | `archon-as-archon` | `/usr/local/bin/archon-as-archon` (root 0755) | the wrapper |
-| `sudoers-archon-user` | `/etc/sudoers.d/archon-user` (0440) | `asiri ALL=(archon) NOPASSWD: /usr/local/bin/archon-as-archon` and `asiri ALL=(root) NOPASSWD: /usr/bin/systemctl restart archon-serve.service` |
+| `sudoers-archon-user` | `/etc/sudoers.d/archon-user` (0440) | asiri → archon: the wrapper, and `NOPASSWD:NOSETENV: ALL`; asiri → root: `systemctl restart archon-serve.service` and the three entrypoints below |
+| `../archon-ops/archon-ops` | `/usr/local/sbin/archon-{user-install,host-install,ops-promote}` (root 0755, three copies) | run the snapshot's installers; promote the snapshot (`/usr/local/lib/archon-ops`) |
 | `archon-serve.service` | `/etc/systemd/system/archon-serve.service` | the server as archon |
 | `verify.sh` | — | the checks above |
 | `../../cron/lib/run-as.sh`, `../../cron/lib/archon-shim/archon` | — | the flag and the owner-side `archon` |
@@ -325,8 +409,8 @@ Also written by `install.sh`:
 ## Tests
 
 ```bash
-bunx bats ops/cron/tests/archon-as-archon.bats ops/cron/tests/run-as.bats ops/cron/tests/archon-user-install.bats
+bunx bats ops/cron/tests/archon-as-archon.bats ops/cron/tests/run-as.bats ops/cron/tests/archon-user-install.bats ops/cron/tests/archon-ops.bats
 bunx bats ops/cron/tests/                   # whole suite: flag off must change nothing
-shellcheck -x -P SCRIPTDIR ops/host/archon-user/{install.sh,verify.sh,archon-as-archon} ops/cron/lib/run-as.sh ops/cron/ops-self-update.sh
+shellcheck -x -P SCRIPTDIR ops/host/archon-user/{install.sh,verify.sh,archon-as-archon} ops/host/archon-ops/archon-ops ops/cron/lib/run-as.sh ops/cron/ops-self-update.sh
 visudo -c -f ops/host/archon-user/sudoers-archon-user     # works without root
 ```
