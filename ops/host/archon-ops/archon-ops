@@ -1,0 +1,274 @@
+#!/bin/bash
+# archon-ops — root-owned entrypoints that let the owner (asiri) run the host
+# installers without a password, without ever giving root to a file that asiri
+# or the factory user (archon) can write. See ops/host/archon-user/README.md,
+# "Passwordless sudo".
+#
+# Installed by ops/host/archon-user/install.sh (step 7, or --install-sudo-ops)
+# as three root:root 0755 copies, dispatched on the name they are called by:
+#
+#   sudo -n /usr/local/sbin/archon-user-install [args]   # snapshot's ops/host/archon-user/install.sh
+#   sudo -n /usr/local/sbin/archon-host-install [args]   # snapshot's ops/host/install.sh
+#   sudo -n /usr/local/sbin/archon-ops-promote           # refresh the snapshot from the live checkout
+#   sudo -n /usr/local/sbin/archon-ops-promote --status  # what is promoted, what would be
+#
+# The snapshot: /usr/local/lib/archon-ops/releases/<sha>/ops/ holds the ops/
+# tree of one commit of the live checkout (/mnt/ext-fast/interstellarai.net),
+# root:root, dirs 0755, files 0644/0755, no symlinks; `current` is a root-owned
+# symlink to the promoted release. The installer entrypoints check that every
+# path component from / down to each file of the release is root-owned and not
+# group/other-writable, then exec it with a fixed environment (env -i) from /.
+#
+# Promotion copies `git archive HEAD ops/` of the live checkout (the committed
+# content, not the working tree), and only when
+#   - nothing under ops/ is modified or untracked in the live checkout, and
+#   - HEAD is reachable from refs/remotes/origin/main,
+# i.e. HEAD is what ops/cron/ops-self-update.sh fast-forwarded to, which for
+# ops/** changes means the owner approved it (--approve). git never runs as
+# root: it runs as the checkout's owner (env -i, no system/global config, no
+# hooks, no fsmonitor) and only its tar stream reaches root, which is checked
+# (regular files and directories under ops/, nothing else) before extraction.
+# This protects root against the archon user, which can push to the repo but
+# cannot write the live checkout; a fully compromised asiri session could
+# still commit locally, move origin/main and promote.
+#
+# Test hook (ops/cron/tests/archon-ops.bats): ARCHON_OPS_TEST=1, honoured only
+# when not root and not started by sudo, lets the tests point ARCHON_OPS_ROOT,
+# ARCHON_OPS_LIVE and ARCHON_OPS_FLAG_FILE at a sandbox, with the test user in
+# place of root and of asiri (the PATH-directory check is skipped).
+set -euo pipefail
+umask 022
+
+OPS_ROOT=/usr/local/lib/archon-ops
+LIVE=/mnt/ext-fast/interstellarai.net
+OWNER=asiri
+FLAG_FILE=/home/asiri/.config/archon-cron/run-as
+KEEP=5
+ROOT_UID=0
+CHAIN_STOP=/              # check path components up to (and including) this
+TEST=0
+SAFE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+if [ "${ARCHON_OPS_TEST:-}" = 1 ] && [ "$(id -u)" -ne 0 ] && [ -z "${SUDO_USER:-}" ]; then
+    TEST=1
+    OPS_ROOT="${ARCHON_OPS_ROOT:?}"
+    LIVE="${ARCHON_OPS_LIVE:-$LIVE}"
+    FLAG_FILE="${ARCHON_OPS_FLAG_FILE:-$FLAG_FILE}"
+    OWNER=$(id -un)
+    ROOT_UID=$(id -u)
+    CHAIN_STOP="$OPS_ROOT"
+fi
+
+RELEASES="$OPS_ROOT/releases"
+CURRENT="$OPS_ROOT/current"
+NAME=$(basename "$0")
+
+die() { printf '%s: %s\n' "$NAME" "$*" >&2; exit 1; }
+need_root() { [ "$TEST" = 1 ] || [ "$(id -u)" -eq 0 ] || die "run as root: sudo -n $0 ..."; }
+
+cd /
+
+# ------------------------------------------------------------ permissions ---
+# path_chain_ok <path> [uid] [stop] — every component from <path> up to <stop>
+# (default $CHAIN_STOP) is owned by <uid> (default $ROOT_UID) and not
+# group/other-writable. Symlinks fail (their lstat mode is 0777): pass
+# resolved paths.
+path_chain_ok() {
+    local p="$1" uid="${2:-$ROOT_UID}" stop="${3:-$CHAIN_STOP}" o m
+    while :; do
+        read -r o m < <(stat -c '%u %a' "$p" 2>/dev/null) || { echo "cannot stat $p"; return 1; }
+        [ "$o" = "$uid" ] || { echo "$p is owned by uid $o, not $uid"; return 1; }
+        [ $(( 8#$m & 8#022 )) -eq 0 ] || { echo "$p is group/other-writable (mode $m)"; return 1; }
+        if [ "$p" = "$stop" ] || [ "$p" = / ]; then return 0; fi
+        p=$(dirname "$p")
+    done
+}
+
+# release_ok <dir> — <dir> and its parents pass path_chain_ok, and nothing in
+# it is a symlink, a special file, someone else's, group/other-writable, or
+# carries an extended ACL.
+release_ok() {
+    local d="$1" bad
+    path_chain_ok "$d" || return 1
+    bad=$(find "$d" \( ! -type f ! -type d \) -o ! -uid "$ROOT_UID" -o -perm /022 2>&1 | head -n 3) || true
+    [ -z "$bad" ] || { echo "not root-only in $d: $bad"; return 1; }
+    if command -v getfacl >/dev/null; then
+        bad=$(getfacl -R -s -p "$d" 2>/dev/null | sed -n 's/^# file: //p' | head -n 3)
+        [ -z "$bad" ] || { echo "extended ACL in $d: $bad"; return 1; }
+    fi
+}
+
+# current_release — the release `current` points at, checked; prints its path.
+current_release() {
+    local t
+    [ -L "$CURRENT" ] || { echo "no snapshot at $CURRENT — run: sudo -n /usr/local/sbin/archon-ops-promote" >&2; return 1; }
+    t=$(readlink "$CURRENT")
+    [[ "$t" =~ ^releases/[0-9a-f]{40}$ ]] || { echo "$CURRENT -> '$t' is not releases/<sha>" >&2; return 1; }
+    local msg
+    # a symlink's own mode is always 0777 and means nothing: check its owner,
+    # and the directory it lives in
+    [ "$(stat -c %u "$CURRENT")" = "$ROOT_UID" ] || { echo "$CURRENT is not owned by uid $ROOT_UID" >&2; return 1; }
+    msg=$(path_chain_ok "$OPS_ROOT") || { echo "$msg" >&2; return 1; }
+    msg=$(release_ok "$OPS_ROOT/$t") || { echo "$msg" >&2; return 1; }
+    printf '%s\n' "$OPS_ROOT/$t"
+}
+
+# ------------------------------------------------------------ installers ----
+run_installer() {  # run_installer <path inside release> <args...>
+    need_root
+    local rel script d
+    rel=$(current_release) || exit 1
+    script="$rel/$1"; shift
+    [ -f "$script" ] || die "$script missing in the snapshot"
+    # every directory on the PATH the installer gets must be root's alone
+    # (resolved: /bin and /sbin are symlinks into /usr on merged-/usr hosts)
+    local dirs msg
+    IFS=: read -r -a dirs <<<"$SAFE_PATH"
+    for d in "${dirs[@]}"; do
+        [ -e "$d" ] || continue
+        msg=$(path_chain_ok "$(readlink -f "$d")" 0 /) || die "PATH directory $d is not root-only: $msg"
+    done
+    echo "$NAME: running $(basename "$rel") ${script#"$rel"/}" >&2
+    exec env -i PATH="$SAFE_PATH" HOME=/root LANG=C.UTF-8 TERM="${TERM:-dumb}" /bin/bash "$script" "$@"
+}
+
+# ------------------------------------------------------------ git -----------
+# git, as the checkout's owner (never as root), with nothing from the system
+# or global config, no hooks, no fsmonitor, no optional locks.
+gitl() {
+    local cmd=(env -i PATH=/usr/bin:/bin HOME=/nonexistent LANG=C
+               GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ATTR_NOSYSTEM=1
+               GIT_NO_REPLACE_OBJECTS=1 GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0
+               git -C "$LIVE" -c safe.directory="$LIVE" -c core.fsmonitor=false
+               -c core.hooksPath=/dev/null -c core.untrackedCache=false
+               -c protocol.allow=never -c tar.umask=022 "$@")
+    if [ "$(id -u)" -eq 0 ]; then runuser -u "$OWNER" -- "${cmd[@]}"; else "${cmd[@]}"; fi
+}
+
+# live_checks — sets HEAD_SHA; returns 1 with the reason in WHY when the live
+# checkout may not be promoted. (Not called in $(...): it sets globals.)
+live_checks() {
+    HEAD_SHA="" WHY=""
+    if [ ! -d "$LIVE" ] || [ -L "$LIVE" ]; then WHY="$LIVE is not a directory"; return 1; fi
+    if [ ! -d "$LIVE/.git" ] || [ -L "$LIVE/.git" ]; then WHY="$LIVE/.git is not a plain directory (gitfile or symlink)"; return 1; fi
+    local o sha dirty odd
+    o=$(stat -c %U "$LIVE")
+    [ "$o" = "$OWNER" ] || { WHY="$LIVE is owned by $o, not $OWNER"; return 1; }
+    sha=$(gitl rev-parse --verify -q 'HEAD^{commit}') && [[ "$sha" =~ ^[0-9a-f]{40}$ ]] \
+        || { WHY="cannot resolve HEAD in $LIVE"; return 1; }
+    HEAD_SHA=$sha
+    dirty=$(gitl status --porcelain=v1 --untracked-files=all --ignore-submodules=none -- ops/) \
+        || { WHY="git status failed in $LIVE"; return 1; }
+    if [ -n "$dirty" ]; then
+        WHY="ops/ has local changes in $LIVE (land them through a PR, or discard them):
+$(printf '%s\n' "$dirty" | head -n 10 | sed 's/^/    /')"
+        return 1
+    fi
+    gitl rev-parse --verify -q 'refs/remotes/origin/main^{commit}' >/dev/null \
+        || { WHY="no refs/remotes/origin/main in $LIVE"; return 1; }
+    gitl merge-base --is-ancestor "$sha" refs/remotes/origin/main \
+        || { WHY="HEAD $sha is not on origin/main — only what ops-self-update fast-forwarded to may be promoted"; return 1; }
+    odd=$(gitl ls-tree -r "$sha" -- ops/ | awk '$1 != "100644" && $1 != "100755"' | head -n 3)
+    [ -z "$odd" ] || { WHY="ops/ at $sha has entries that are not plain files (symlink/submodule): $odd"; return 1; }
+}
+
+# tar_ok <tarfile> — only regular files and directories, all under ops/, no ..
+tar_ok() {
+    tar -tvf "$1" | awk '
+        { t = substr($1, 1, 1); n = $NF }
+        t != "-" && t != "d" { print "entry type " t ": " n; bad = 1 }
+        n !~ /^ops\// || n ~ /(^|\/)\.\.(\/|$)/ { print "path outside ops/: " n; bad = 1 }
+        END { exit bad }'
+}
+
+prune() {
+    local keep cur n=0 d
+    cur=$(readlink "$CURRENT" 2>/dev/null || true)
+    # newest first; the current one always stays
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        if [ "releases/$(basename "$d")" = "$cur" ]; then continue; fi
+        n=$((n + 1))
+        keep=$((KEEP - 1))
+        if [ "$n" -gt "$keep" ]; then rm -rf -- "$d" && echo "pruned $(basename "$d")"; fi
+    done < <(find "$RELEASES" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended \
+                 -regex '.*/[0-9a-f]{40}' -printf '%T@ %p\n' | sort -rn | cut -d' ' -f2-)
+    find "$RELEASES" -mindepth 1 -maxdepth 1 -name '.staging.*' -mmin +60 -exec rm -rf -- {} + 2>/dev/null || true
+}
+
+flag_now() { sed -nE 's/^ARCHON_RUN_AS=([a-z]+).*/\1/p' "$FLAG_FILE" 2>/dev/null | tail -n 1; }
+
+promote() {
+    need_root
+    local why prev rel staging
+    install -d -m 0755 "$OPS_ROOT" "$RELEASES"
+    [ "$TEST" = 1 ] || chown root:root "$OPS_ROOT" "$RELEASES"
+    why=$(path_chain_ok "$RELEASES") || die "$why"
+    live_checks || die "refusing to promote: $WHY"
+    prev=$(readlink "$CURRENT" 2>/dev/null || true); prev=${prev#releases/}
+    rel="$RELEASES/$HEAD_SHA"
+    if [ -d "$rel" ] && why=$(release_ok "$rel"); then
+        echo "release $HEAD_SHA already present"
+        touch "$rel"
+    else
+        [ -e "$rel" ] && { echo "release $HEAD_SHA is not clean ($why) — rebuilding"; rm -rf -- "$rel"; }
+        staging=$(mktemp -d "$RELEASES/.staging.XXXXXX")
+        trap 'rm -rf -- "$staging" "$staging.tar"' EXIT
+        gitl archive --format=tar "$HEAD_SHA" -- ops/ > "$staging.tar" || die "git archive failed"
+        why=$(tar_ok "$staging.tar") || die "refusing the archive of $HEAD_SHA: $why"
+        tar -x --no-same-owner --no-same-permissions -f "$staging.tar" -C "$staging" || die "tar -x failed"
+        rm -f -- "$staging.tar"
+        [ "$TEST" = 1 ] || chown -R root:root "$staging"
+        find "$staging" -type d -exec chmod 0755 {} +
+        find "$staging" -type f -perm /u=x -exec chmod 0755 {} +
+        find "$staging" -type f ! -perm /u=x -exec chmod 0644 {} +
+        [ -f "$staging/ops/host/archon-user/install.sh" ] && [ -f "$staging/ops/host/install.sh" ] \
+            || die "the archive of $HEAD_SHA has no ops/host installers"
+        mv -T -- "$staging" "$rel"
+        trap - EXIT
+        why=$(release_ok "$rel") || die "release $HEAD_SHA failed its own check: $why"
+    fi
+    ln -sfn "releases/$HEAD_SHA" "$CURRENT.new"
+    [ "$TEST" = 1 ] || chown -h root:root "$CURRENT.new"
+    mv -T -- "$CURRENT.new" "$CURRENT"
+    if [ "$prev" = "$HEAD_SHA" ]; then echo "current: $HEAD_SHA (unchanged)"
+    else echo "promoted $HEAD_SHA (was ${prev:-none})"; fi
+    prune
+    [ "$(flag_now)" = archon ] || echo "WARNING: ARCHON_RUN_AS is '$(flag_now)', not archon: ops-self-update only holds ops/** changes for review under archon" >&2
+}
+
+status() {
+    local cur why
+    echo "snapshot root: $OPS_ROOT"
+    if cur=$(current_release 2>/dev/null); then echo "current:       $(basename "$cur") (checked: root-only)"
+    else echo "current:       NOT USABLE: $(current_release 2>&1 >/dev/null || true)"; fi
+    echo "releases:"
+    find "$RELEASES" -mindepth 1 -maxdepth 1 -type d -printf '    %TY-%Tm-%Td %TH:%TM  %f\n' 2>/dev/null | sort -r || true
+    if live_checks; then
+        echo "live HEAD:     $HEAD_SHA (promotable)"
+    else
+        echo "live HEAD:     ${HEAD_SHA:-?} (NOT promotable: $WHY)"
+    fi
+    if [ -n "${cur:-}" ] && [ -n "${HEAD_SHA:-}" ]; then
+        if [ "$(basename "$cur")" = "$HEAD_SHA" ]; then echo "up to date:    yes"
+        elif gitl diff --quiet --no-ext-diff --no-textconv "$(basename "$cur")" "$HEAD_SHA" -- ops/ 2>/dev/null; then
+            echo "up to date:    ops/ unchanged since $(basename "$cur") (promote only moves the sha)"
+        else echo "up to date:    NO — ops/ changed since $(basename "$cur"): sudo -n /usr/local/sbin/archon-ops-promote"; fi
+    fi
+    echo "run-as flag:   $(flag_now || true) (the ops/** review gate is active only under archon)"
+}
+
+verb="$NAME"
+if [ "$NAME" = archon-ops ]; then verb="${1:-}"; shift || true; fi
+case "$verb" in
+    archon-user-install) run_installer ops/host/archon-user/install.sh "$@" ;;
+    archon-host-install) run_installer ops/host/install.sh "$@" ;;
+    archon-ops-promote)
+        case "${1:-}" in
+            "") promote ;;
+            --status) status ;;
+            -h|--help) sed -n '2,38p' "$0" ;;
+            *) die "usage: $NAME [--status]" ;;
+        esac ;;
+    *) die "call me as archon-user-install, archon-host-install or archon-ops-promote (or: archon-ops <one of those> ...)" ;;
+esac

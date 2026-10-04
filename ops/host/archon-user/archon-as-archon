@@ -2,9 +2,13 @@
 # archon-as-archon — the only door from the owner's cron jobs into the factory
 # user. Installed root-owned at /usr/local/bin/archon-as-archon by
 # ops/host/archon-user/install.sh; /etc/sudoers.d/archon-user lets `asiri` run
-# exactly this file as user `archon` (never as root):
+# this file as user `archon` (never as root):
 #
 #   sudo -n -u archon /usr/local/bin/archon-as-archon <verb> [args...]
+#
+# (Since --install-sudo-ops the drop-in also lets asiri run anything as archon,
+# NOSETENV, for interactive and assistant use. The cron path stays here: it is
+# what gives agent sessions env -i, no_new_privs and the fixed verbs.)
 #
 # It runs as `archon`. It never evaluates its arguments as shell: each verb has
 # a fixed argument grammar, anything else is refused (exit 64), and the archon

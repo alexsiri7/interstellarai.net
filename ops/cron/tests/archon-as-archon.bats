@@ -258,6 +258,7 @@ STUB
 }
 
 @test "gh-probe: a classic token or one that reaches the fork fails" {
+    export ARCHON_AS_CONFIG_FILE="$T/no-config"   # not the host's /etc/archon-user/config (it may hold the opt-in)
     stub_gh gho_classic 404
     run "$W" gh-probe
     [ "$status" -eq 1 ]

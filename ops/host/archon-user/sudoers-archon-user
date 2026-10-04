@@ -1,23 +1,35 @@
 # /etc/sudoers.d/archon-user — installed by ops/host/archon-user/install.sh (mode 0440).
 #
-# The owner's cron jobs (user asiri) reach the factory user through exactly one
-# door: the root-owned wrapper, run AS archon (never as root). The wrapper
-# validates every argument, maps the owner's clone paths to archon's own
-# clones and execs the archon CLI with a fresh environment (env -i + allowlist)
-# and no_new_privs. sudo's env_reset (the default) drops the caller's
-# environment on the way in as well.
+# 1. asiri -> archon: anything, no password. archon is the factory's sandbox
+#    user and has strictly less than asiri (no secrets, no sudo, ACL-denied
+#    from asiri's files), so this hands asiri nothing new; it is for the owner
+#    and the assistant to inspect and fix the factory as archon
+#    (sudo -n -u archon -H bash -c '...'). NOSETENV: the command ALL would
+#    otherwise imply SETENV, letting `sudo -E` carry asiri's environment
+#    (secrets.env exports) into archon; with it env_reset always applies.
+#    The cron jobs do NOT use this: they still go through the root-owned
+#    wrapper (env -i + allowlist, no_new_privs, fixed verbs), via
+#    ops/cron/lib/archon-shim/archon, exactly as before.
 #
-# Plus the one systemctl shape the cron jobs need to restart the server that
-# now runs as archon (archon-update.sh, tool-freshness.sh). No ALL, no shell.
+# 2. asiri -> root: exactly three root-owned entrypoints (any arguments), and
+#    the one systemctl shape the cron jobs need (archon-update.sh,
+#    tool-freshness.sh). The entrypoints run the installers from a root-owned
+#    snapshot of ops/ (/usr/local/lib/archon-ops, see ops/host/archon-ops),
+#    never from the git checkout: archon can push to the repo, so nothing
+#    asiri or archon can write may ever be named here.
 #
 # Revoke: sudo rm /etc/sudoers.d/archon-user   (or: install.sh --rollback,
 # which leaves this in place but stops using it).
 
 Cmnd_Alias ARCHON_AS    = /usr/local/bin/archon-as-archon
 Cmnd_Alias ARCHON_SERVE = /usr/bin/systemctl restart archon-serve.service
+Cmnd_Alias ARCHON_OPS   = /usr/local/sbin/archon-user-install, \
+                          /usr/local/sbin/archon-host-install, \
+                          /usr/local/sbin/archon-ops-promote
 
 # Cron has no terminal, and the runs are backgrounded with nohup: no pty.
 Defaults!ARCHON_AS !use_pty
 
 asiri ALL=(archon) NOPASSWD: ARCHON_AS
-asiri ALL=(root)   NOPASSWD: ARCHON_SERVE
+asiri ALL=(archon) NOPASSWD:NOSETENV: ALL
+asiri ALL=(root)   NOPASSWD: ARCHON_SERVE, ARCHON_OPS

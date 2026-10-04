@@ -10,7 +10,9 @@
 # so this doubles as a readiness check after `install.sh`, --set-gh-token and
 # --set-claude-token.
 #
-#   1. host: flag, server unit + its user, owner unit stopped, health, links, crontab
+#   1. host: flag, server unit + its user, owner unit stopped, health, links, crontab,
+#      sudoers (asiri -> archon anything but no -E; asiri -> root only the
+#      ops snapshot's entrypoints), the snapshot root-owned and current
 #   2. owner side: home and secret-file modes as asiri sees them
 #   3. archon side (archon-as-archon selftest, as archon): identity, no sudo,
 #      named secrets unreachable, sweep of /home /mnt /media /srv /var/backups
@@ -26,8 +28,7 @@
 #      the wrapper (no provider call); with --live a real one-line run
 set -uo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+REPO_DIR=/mnt/ext-fast/interstellarai.net   # the live checkout, also when run from the root-owned snapshot
 WRAPPER=/usr/local/bin/archon-as-archon
 UNIT=archon-serve.service
 BASE=/mnt/ext-fast
@@ -68,9 +69,36 @@ if crontab -l 2>/dev/null | grep -q 'ops/cron/ops-self-update.sh'; then pass "cr
 else cutcheck "crontab self-update is still a bare git pull (ops/** changes would reach cron unreviewed)"; fi
 if sudo -k -n -u archon "$WRAPPER" --version >/dev/null 2>&1; then pass "sudoers: asiri may run the wrapper as archon"
 else fail "sudo -k -n -u archon $WRAPPER --version failed (sudoers/wrapper not installed?)"; fi
-if out=$(sudo -k -n -u archon /bin/true 2>&1); then fail "sudoers lets asiri run arbitrary commands as archon without a password"
-elif grep -qi 'password is required' <<<"$out"; then pass "sudoers: nothing else as archon without a password"
-else warn "sudo -k -n -u archon /bin/true: unexpected answer: ${out%%$'\n'*}"; fi
+# asiri -> archon, anything: intended since --install-sudo-ops (interactive and
+# assistant use; archon has less than asiri). The environment must not cross.
+if sudo -k -n -u archon /bin/true >/dev/null 2>&1; then pass "sudoers: asiri may run anything as archon without a password (by design)"
+else warn "sudoers: asiri cannot yet run arbitrary commands as archon without a password — sudo ops/host/archon-user/install.sh --install-sudo-ops"; fi
+if out=$(sudo -k -n -E -u archon /bin/true 2>&1); then fail "sudoers lets asiri keep its environment (sudo -E) as archon — the rule must be NOSETENV"
+else pass "sudoers: no sudo -E as archon (${out%%$'\n'*})"; fi
+# asiri -> root: only the snapshot's entrypoints and one systemctl shape.
+if out=$(sudo -k -n /bin/true 2>&1); then fail "sudoers lets asiri run arbitrary commands as root without a password"
+elif grep -qi 'password is required' <<<"$out"; then pass "sudoers: no arbitrary root without a password"
+else warn "sudo -k -n /bin/true: unexpected answer: ${out%%$'\n'*}"; fi
+OPS_SNAP=/usr/local/lib/archon-ops
+for e in archon-user-install archon-host-install archon-ops-promote; do
+    if sudo -k -n -l "/usr/local/sbin/$e" >/dev/null 2>&1; then pass "sudoers: asiri may run /usr/local/sbin/$e as root without a password"
+    else warn "sudoers: /usr/local/sbin/$e not allowed without a password — sudo ops/host/archon-user/install.sh --install-sudo-ops"; fi
+    if [ -e "/usr/local/sbin/$e" ]; then
+        st=$(stat -c '%U %a' "/usr/local/sbin/$e")
+        if [ "$st" = "root 755" ]; then pass "/usr/local/sbin/$e root 755"; else fail "/usr/local/sbin/$e is '$st' (want root 755)"; fi
+    fi
+done
+if [ -L "$OPS_SNAP/current" ]; then
+    rel="$OPS_SNAP/$(readlink "$OPS_SNAP/current")"
+    bad=$(find "$OPS_SNAP" "$rel" \( ! -user root -o \( ! -type l -perm /022 \) \) -print -quit 2>/dev/null)
+    if [ -n "$bad" ]; then fail "ops snapshot not root-only: $bad"
+    else pass "ops snapshot $(basename "$rel") is root-owned, nothing group/other-writable"; fi
+    if [ "$(basename "$rel")" = "$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null)" ]; then pass "ops snapshot = the live checkout's HEAD"
+    elif git -C "$REPO_DIR" diff --quiet "$(basename "$rel")" HEAD -- ops/ 2>/dev/null; then pass "ops snapshot: ops/ same as the live checkout's HEAD"
+    else warn "ops snapshot $(basename "$rel") is behind the live checkout's ops/ — sudo -n /usr/local/sbin/archon-ops-promote"; fi
+else
+    warn "no ops snapshot at $OPS_SNAP/current — sudo ops/host/archon-user/install.sh --install-sudo-ops"
+fi
 
 echo "== 2. owner side"
 mode_ok() {  # mode_ok <path> <max-octal-mask-of-forbidden-bits> <label>

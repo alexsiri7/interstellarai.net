@@ -5,8 +5,16 @@ sudo grant that lets the weekly `ops/cron/system-maintenance.sh` do host upkeep
 without a password. Everything here is applied by one command, run once:
 
 ```
-sudo ops/host/install.sh
+sudo -n /usr/local/sbin/archon-host-install     # no password: the root-owned ops snapshot
+sudo ops/host/install.sh                        # from the checkout, with the password
 ```
+
+The first form runs `ops/host/install.sh` from the root-owned snapshot in
+`/usr/local/lib/archon-ops`. It is set up once by
+`sudo ops/host/archon-user/install.sh --install-sudo-ops`; refresh the snapshot
+after an approved ops update with `sudo -n /usr/local/sbin/archon-ops-promote`.
+See [archon-user/README.md](archon-user/README.md#passwordless-sudo). The
+`sudo ops/host/install.sh` lines below work either way.
 
 Preview first, as any user (prints every command and every file it would write,
 changes nothing):
