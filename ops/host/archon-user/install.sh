@@ -119,7 +119,7 @@ for a in "$@"; do
         --rollback) MODE=rollback ;;
         --status) MODE=status ;;
         --install-sudo-ops) MODE=sudo-ops ;;
-        -h|--help) sed -n '2,57p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,57p' "$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"; exit 0 ;;
         *) echo "unknown argument: $a (see --help)" >&2; exit 2 ;;
     esac
 done

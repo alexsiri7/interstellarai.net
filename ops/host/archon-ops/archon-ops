@@ -69,18 +69,17 @@ need_root() { [ "$TEST" = 1 ] || [ "$(id -u)" -eq 0 ] || die "run as root: sudo 
 cd /
 
 # ------------------------------------------------------------ permissions ---
-# path_chain_ok <path> — every component from <path> up to $CHAIN_STOP is owned
-# by $ROOT_UID and not group/other-writable (symlinks are judged by their own
-# lstat, so a symlink anywhere fails unless it is exactly `current`).
+# path_chain_ok <path> [uid] [stop] — every component from <path> up to <stop>
+# (default $CHAIN_STOP) is owned by <uid> (default $ROOT_UID) and not
+# group/other-writable. Symlinks fail (their lstat mode is 0777): pass
+# resolved paths.
 path_chain_ok() {
-    local p="$1" st
+    local p="$1" uid="${2:-$ROOT_UID}" stop="${3:-$CHAIN_STOP}" o m
     while :; do
-        st=$(stat -c '%u %a' "$p" 2>/dev/null) || { echo "cannot stat $p"; return 1; }
-        # shellcheck disable=SC2086  # two numbers
-        set -- $st
-        [ "$1" = "$ROOT_UID" ] || { echo "$p is owned by uid $1, not $ROOT_UID"; return 1; }
-        [ $(( 8#$2 & 8#022 )) -eq 0 ] || { echo "$p is group/other-writable (mode $2)"; return 1; }
-        [ "$p" = "$CHAIN_STOP" ] || [ "$p" = / ] && return 0
+        read -r o m < <(stat -c '%u %a' "$p" 2>/dev/null) || { echo "cannot stat $p"; return 1; }
+        [ "$o" = "$uid" ] || { echo "$p is owned by uid $o, not $uid"; return 1; }
+        [ $(( 8#$m & 8#022 )) -eq 0 ] || { echo "$p is group/other-writable (mode $m)"; return 1; }
+        if [ "$p" = "$stop" ] || [ "$p" = / ]; then return 0; fi
         p=$(dirname "$p")
     done
 }
@@ -122,14 +121,13 @@ run_installer() {  # run_installer <path inside release> <args...>
     script="$rel/$1"; shift
     [ -f "$script" ] || die "$script missing in the snapshot"
     # every directory on the PATH the installer gets must be root's alone
-    if [ "$TEST" = 0 ]; then
-        local IFS=:
-        for d in $SAFE_PATH; do
-            [ -d "$d" ] || continue
-            path_chain_ok "$d" >/dev/null || die "PATH directory $d is not root-only: $(path_chain_ok "$d")"
-        done
-        unset IFS
-    fi
+    # (resolved: /bin and /sbin are symlinks into /usr on merged-/usr hosts)
+    local dirs msg
+    IFS=: read -r -a dirs <<<"$SAFE_PATH"
+    for d in "${dirs[@]}"; do
+        [ -e "$d" ] || continue
+        msg=$(path_chain_ok "$(readlink -f "$d")" 0 /) || die "PATH directory $d is not root-only: $msg"
+    done
     echo "$NAME: running $(basename "$rel") ${script#"$rel"/}" >&2
     exec env -i PATH="$SAFE_PATH" HOME=/root LANG=C.UTF-8 TERM="${TERM:-dumb}" /bin/bash "$script" "$@"
 }
