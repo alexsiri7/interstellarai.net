@@ -22,6 +22,7 @@ Required keys (see individual scripts for which ones each uses):
 
 - `ANNIE_DB_URL`, `RELI_DB_URL`, `FILMDUEL_DB_URL`, `KINDRED_DB_URL`, `LACHESIS_DB_URL`, `MUSENMINGLE_DB_URL` — Supabase connection strings used by `backup-dbs.sh` (`KINDRED_DB_URL` serves two entries: `kindred` and `kindred-auth`). Missing entries cause that DB to be skipped (not a hard failure). The URL is parsed into the libpq `PG*` environment (`lib/pg-backup.sh`) so it never appears on a command line.
 - `MUSENMINGLE_DB_URL` — read-only use by `musenmingle-digest.sh` (the `events` schema of Muse & Mingle, formerly Thaleia). Falls back to `THALEIA_DB_URL` while secrets.env still carries only the old name.
+- `LACHESIS_FACTORY_TOKEN` — a Lachesis factory token (`create_factory_token`), used by `lachesis-report.sh` to report fuel and run usage to Lachesis. Without it nothing is reported.
 - `NTFY_TOPIC` — private ntfy.sh topic for notifications. No fallback default; scripts fail loud if missing.
 
 Set perms: `chmod 600 ~/.config/archon-cron/secrets.env`.
