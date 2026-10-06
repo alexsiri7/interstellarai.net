@@ -341,10 +341,13 @@ fi
 # ================================================================ tokens ====
 if [ "$MODE" = gh-token ]; then
     user_exists || { echo "user $ARCHON_USER missing — run: sudo $0" >&2; exit 1; }
-    say "GitHub fine-grained PAT for $ARCHON_USER"
-    [ -t 0 ] && echo "    Paste the token (github_pat_...), then Enter. It is not echoed." >&2
+    say "GitHub PAT for $ARCHON_USER"
+    [ -t 0 ] && echo "    Paste the token (github_pat_... or ghp_...), then Enter. It is not echoed." >&2
     tok=$(read_secret "token")
-    [[ "$tok" =~ ^github_pat_[A-Za-z0-9_]{20,}$ ]] || { echo "    not a fine-grained PAT (want github_pat_...); refusing — see README step (a)" >&2; exit 1; }
+    # github_pat_: a fine-grained PAT. ghp_: a classic PAT of the factory's own
+    # machine user (alexsiri7-factory), which fine-grained tokens cannot serve:
+    # they reach only repos the token's own account owns.
+    [[ "$tok" =~ ^(github_pat_|ghp_)[A-Za-z0-9_]{20,}$ ]] || { echo "    not a GitHub PAT (want github_pat_... or ghp_...); refusing — see README step (a)" >&2; exit 1; }
     ghbin="$AH/.local/bin/gh"
     [ -x "$ghbin" ] || { echo "    $ghbin missing — run: sudo $0" >&2; exit 1; }
     if printf '%s\n' "$tok" | runuser -u "$ARCHON_USER" -- env -i HOME="$AH" PATH="$AH/.local/bin:/usr/bin:/bin" \

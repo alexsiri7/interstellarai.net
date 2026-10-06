@@ -40,7 +40,17 @@ path. `install.sh --rollback` goes back in one step.
 Run everything from the live checkout, `/mnt/ext-fast/interstellarai.net`. Steps 1–4
 can be done while the factory runs; they change nothing it uses.
 
-### (a) Create the GitHub token for archon (fine-grained PAT)
+### (a) Create the GitHub token for archon
+
+Since 2026-10-06 archon acts as its own GitHub machine user, **`alexsiri7-factory`**, a
+collaborator (Write) on the repos in `ops/cron/archon-projects.txt`. Its token is a
+**classic** PAT of that account with scopes `repo` and `workflow` (fine-grained tokens
+only reach repos their own account owns, so they cannot serve a collaborator). Install it
+with `--set-gh-token` as below. With its own identity GitHub tells factory work from the
+owner's, and `ops/cron/ops-self-update.sh` lets ops changes from the owner's own pull
+requests through without `--approve`; the factory's still wait for it.
+
+The fine-grained setup below is how it was before, on the owner's account:
 
 archon gets its own GitHub token, not a copy of yours. To create it:
 
