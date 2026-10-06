@@ -369,9 +369,18 @@ verb_gh_probe() {
     else
         echo "FAIL gh: not authenticated (sudo ops/host/archon-user/install.sh --set-gh-token)"; return 1
     fi
+    local login
     tok=$(sub_in "$ARCHON_HOME_DIR" gh auth token 2>/dev/null || true)
+    login=$(sub_in "$ARCHON_HOME_DIR" gh api user --jq .login 2>/dev/null || true)
     case "$tok" in
         github_pat_*) echo "PASS gh: fine-grained token (github_pat_...)" ;;
+        # A classic token is fine only on the factory's own machine user: its
+        # reach is the repos it collaborates on, which the checks below verify.
+        ghp_*) if [ -n "$login" ] && [ "$login" != "$GH_OWNER" ]; then
+                   echo "PASS gh: classic token of machine user $login (reach limited by collaborator access)"
+               else
+                   echo "FAIL gh: classic token on $GH_OWNER's own account — it reaches every repo; use the machine user"; rc=1
+               fi ;;
         *) echo "FAIL gh: not a fine-grained PAT (${tok:0:4}...) — use one limited to the factory repos"; rc=1 ;;
     esac
     unset tok
