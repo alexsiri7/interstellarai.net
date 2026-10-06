@@ -87,6 +87,8 @@ class Lachesis:
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
+            # Cloudflare refuses the default Python-urllib agent (error 1010).
+            "User-Agent": "lachesis-report/1",
         }
         if self.session:
             headers["Mcp-Session-Id"] = self.session
