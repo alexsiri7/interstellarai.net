@@ -16,6 +16,13 @@
 #   One ntfy per held commit. --approve records the sha in
 #   ~/.config/archon-cron/ops-approved (0600, a dir archon cannot read).
 #
+#   Since 2026-10-06 the factory pushes as its own GitHub user
+#   (alexsiri7-factory), so GitHub can tell its work from the owner's: an
+#   update goes through without --approve when every commit in the range that
+#   touches ops/** is the merge of a pull request opened by OPS_OWNER
+#   (alexsiri7), as GitHub's API reports it. A direct push, a factory pull
+#   request, or an API failure holds it as before.
+#
 # Env: OPS_CHECKOUT (default: the repo this script lives in), OPS_APPROVED_FILE,
 # OPS_SELF_UPDATE_STATE (held-notice markers), ARCHON_CRON_SECRETS (NTFY_TOPIC).
 set -uo pipefail
@@ -27,6 +34,8 @@ REPO="${OPS_CHECKOUT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 APPROVED_FILE="${OPS_APPROVED_FILE:-$HOME/.config/archon-cron/ops-approved}"
 STATE="${OPS_SELF_UPDATE_STATE:-$HOME/.local/state/archon-cron/ops-self-update}"
 GUARDED_PATHS=(ops/)
+OPS_OWNER="${OPS_OWNER:-alexsiri7}"
+OPS_REPO="${OPS_REPO:-alexsiri7/interstellarai.net}"
 
 log() { echo "$(date -Is) [ops-self-update] $*"; }
 
@@ -61,6 +70,24 @@ if [ "${1:-}" = --approve ]; then
 fi
 
 if [ -z "$guarded" ] || grep -qxF "$target" "$APPROVED_FILE" 2>/dev/null; then
+  exec git -C "$REPO" merge --ff-only -q "$target"
+fi
+
+# owner_authored — 0 when every commit in head..target touching the guarded
+# paths merged a pull request whose author is OPS_OWNER.
+owner_authored() {
+  local sha author
+  for sha in $(git -C "$REPO" rev-list "$head..$target" -- "${GUARDED_PATHS[@]}"); do
+    author=$(gh api "repos/$OPS_REPO/commits/$sha/pulls" \
+      --jq "[.[] | select(.merged_at != null and .merge_commit_sha == \"$sha\")][0].user.login" \
+      2>/dev/null) || return 1
+    [ "$author" = "$OPS_OWNER" ] || { log "$sha: not a pull request by $OPS_OWNER (${author:-none})"; return 1; }
+  done
+  return 0
+}
+
+if owner_authored; then
+  log "fast-forwarding to $target: every ops/ change is a pull request by $OPS_OWNER"
   exec git -C "$REPO" merge --ff-only -q "$target"
 fi
 
