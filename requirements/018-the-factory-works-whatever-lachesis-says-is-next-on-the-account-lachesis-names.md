@@ -1,8 +1,8 @@
 ---
 created: '2026-10-07'
-github_issue: null
+github_issue: 156
 id: '018'
-status: draft
+status: idea
 title: The factory works whatever Lachesis says is next, on the account Lachesis names
 updated: '2026-10-07'
 ---
@@ -17,4 +17,5 @@ While any registered Claude account has allowance Lachesis lets the factory use,
 
 ## Issues
 
-_None yet._
+- #156 — Run each archon launch on the Claude account Lachesis routes it to
+- #157 — Take work from Lachesis next_issue and stop holding work for the author with labels
