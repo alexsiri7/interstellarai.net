@@ -50,10 +50,11 @@ from typing import Any
 DEFAULT_URL = "https://lachesis.interstellarai.net/mcp"
 DEFAULT_DB = "/mnt/ext-fast/archon-home/.archon/archon.db"
 # The factory account is the archon user's; asiri's own login is the author's main
-# account, whose fuel this keeps current whenever Claude Code is used there.
+# account, whose fuel this keeps current whenever Claude Code is used there, as do
+# the factory's runs on main (archon's ~/.claude-main, lib/main-account.sh).
 DEFAULT_FUEL = (
     "factory=/mnt/ext-fast/archon-home/.claude/plan-usage.json;"
-    f"main={Path.home()}/.claude/plan-usage.json"
+    f"main={Path.home()}/.claude/plan-usage.json:/mnt/ext-fast/archon-home/.claude-main/plan-usage.json"
 )
 
 # Workflow → Lachesis kind of work. Workflows not listed are not reported.

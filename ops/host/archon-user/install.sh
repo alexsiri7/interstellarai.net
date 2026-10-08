@@ -11,6 +11,11 @@
 #   ops/host/archon-user/install.sh --dry-run              #    preview step 1 as any user
 #   sudo ops/host/archon-user/install.sh --set-gh-token    # 2. fine-grained PAT for archon (stdin)
 #   sudo ops/host/archon-user/install.sh --set-claude-token# 3. `claude setup-token` output for archon (stdin)
+#   sudo ops/host/archon-user/install.sh --set-claude-token --account main
+#                             # optional: a setup-token of the owner's MAIN account,
+#                             # the fallback while the factory is rate limited
+#                             # (ops/cron/lib/main-account.sh); also creates
+#                             # ~/.claude-main with its paced budget guard
 #   sudo ops/host/archon-user/install.sh --allow-all-repos-token     # owner opt-in: the PAT may reach
 #   sudo ops/host/archon-user/install.sh --no-allow-all-repos-token  #   every repo (Archon fork: WARN, not FAIL)
 #   sudo ops/host/archon-user/install.sh --drain           # 4. stop new launches, let runs finish
@@ -105,9 +110,17 @@ LINK_PREV="$OWNER_HOME/.config/archon-cron/archon-link.prev"
 SHIM="$LIVE_CHECKOUT/ops/cron/lib/archon-shim/archon"
 PROJECTS_SRC="$REPO_DIR/ops/cron/archon-projects.txt"
 
-MODE=prepare DRY=0 FORCE=0
+MODE=prepare DRY=0 FORCE=0 ACCOUNT=factory
+want_account=0
 for a in "$@"; do
+    if [ "$want_account" -eq 1 ]; then
+        case "$a" in factory|main) ACCOUNT="$a" ;; *) echo "--account: factory or main, not '$a'" >&2; exit 2 ;; esac
+        want_account=0; continue
+    fi
     case "$a" in
+        --account) want_account=1 ;;
+        --account=*) ACCOUNT="${a#--account=}"
+                     case "$ACCOUNT" in factory|main) ;; *) echo "--account: factory or main, not '$ACCOUNT'" >&2; exit 2 ;; esac ;;
         --dry-run|-n) DRY=1 ;;
         --force) FORCE=1 ;;
         --set-gh-token) MODE=gh-token ;;
@@ -119,10 +132,12 @@ for a in "$@"; do
         --rollback) MODE=rollback ;;
         --status) MODE=status ;;
         --install-sudo-ops) MODE=sudo-ops ;;
-        -h|--help) sed -n '2,57p' "$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"; exit 0 ;;
+        -h|--help) sed -n '2,62p' "$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"; exit 0 ;;
         *) echo "unknown argument: $a (see --help)" >&2; exit 2 ;;
     esac
 done
+[ "$want_account" -eq 0 ] || { echo "--account needs a value: factory or main" >&2; exit 2; }
+[ "$ACCOUNT" = factory ] || [ "$MODE" = claude-token ] || { echo "--account main goes with --set-claude-token only" >&2; exit 2; }
 
 if [ "$DRY" -eq 0 ] && [ "$MODE" != status ] && [ -z "$SANDBOX" ] && [ "$(id -u)" -ne 0 ]; then
     echo "run as root: sudo $0 $*   (or $0 --dry-run to preview)" >&2
@@ -363,15 +378,56 @@ fi
 
 if [ "$MODE" = claude-token ]; then
     user_exists || { echo "user $ARCHON_USER missing — run: sudo $0" >&2; exit 1; }
-    say "Claude credential for $ARCHON_USER (output of \`claude setup-token\`)"
+    if [ "$ACCOUNT" = main ]; then
+        say "Claude credential of the owner's MAIN account for $ARCHON_USER (output of \`claude setup-token\`, signed in as main)"
+        envfile=claude-main.env
+    else
+        say "Claude credential for $ARCHON_USER (output of \`claude setup-token\`)"
+        envfile=claude.env
+    fi
     [ -t 0 ] && echo "    Paste the token printed by 'claude setup-token' (sk-ant-oat...), then Enter. It is not echoed." >&2
     tok=$(read_secret "token")
     [[ "$tok" =~ ^sk-ant-[A-Za-z0-9._~+/=-]{20,}$ ]] || { echo "    does not look like a Claude OAuth token (sk-ant-...); refusing" >&2; exit 1; }
     dir="$AH/.config/archon-user"
     runuser -u "$ARCHON_USER" -- install -d -m 0700 "$AH/.config" "$dir"
-    write_ah_file "$dir/claude.env" 0600 "CLAUDE_CODE_OAUTH_TOKEN=$tok
-" || { echo "    could not write $dir/claude.env" >&2; exit 1; }
+    write_ah_file "$dir/$envfile" 0600 "CLAUDE_CODE_OAUTH_TOKEN=$tok
+" || { echo "    could not write $dir/$envfile" >&2; exit 1; }
     unset tok
+    if [ "$ACCOUNT" = main ]; then
+        # Main's own config dir: no connectors, the plan-usage plugin, and its
+        # paced budget guard (65% of the week, paced; 5-hour 60%), which both
+        # the sessions and the cron's launch gate read. Kept when present, so
+        # the owner's edits to the caps survive a token renewal.
+        cm="$AH/.claude-main"
+        runuser -u "$ARCHON_USER" -- install -d -m 0750 "$cm"
+        if [ -f "$cm/settings.json" ]; then done_ "$cm/settings.json exists — kept"
+        else write_ah_file "$cm/settings.json" 0640 '{
+  "disableClaudeAiConnectors": true,
+  "env": { "ENABLE_CLAUDEAI_MCP_SERVERS": "false" },
+  "extraKnownMarketplaces": {
+    "lachesis": { "source": { "source": "github", "repo": "alexsiri7/lachesis" }, "autoUpdate": true }
+  },
+  "enabledPlugins": { "plan-usage@lachesis": true }
+}
+'; fi
+        if [ -f "$cm/budget-guard.json" ]; then done_ "$cm/budget-guard.json exists — kept"
+        else write_ah_file "$cm/budget-guard.json" 0640 '{ "enabled": true, "weeklyCapPercent": 65, "fiveHourCapPercent": 60, "pace": true }
+'; fi
+        cpath="$AH/.local/bin:/usr/local/bin:/usr/bin:/bin"
+        if runuser -u "$ARCHON_USER" -- env -i HOME="$AH" PATH="$cpath" CLAUDE_CONFIG_DIR="$cm" \
+                sh -c 'cd "$HOME" && { claude plugin marketplace add alexsiri7/lachesis || claude plugin marketplace update lachesis; } >/dev/null 2>&1 && claude plugin install plan-usage@lachesis >/dev/null 2>&1'; then
+            done_ "plan-usage plugin installed in $cm"
+        else
+            echo "    could not install the plan-usage plugin in $cm: no plan-usage.json, so the launch gate holds every main launch" >&2
+        fi
+        if out=$(runuser -u "$ARCHON_USER" -- "$WRAPPER_DST" --account main claude-probe 90 2>&1); then
+            done_ "probe OK on main: $(tail -n 1 <<<"$out")"
+        else
+            echo "    probe FAILED on main: $(tail -n 1 <<<"$out")" >&2; exit 1
+        fi
+        done_ "main is still off: as $OWNER, put ARCHON_MAIN_ACCOUNT=on in $OWNER_HOME/.config/archon-cron/main-account to turn it on"
+        exit 0
+    fi
     if out=$(runuser -u "$ARCHON_USER" -- "$WRAPPER_DST" claude-probe 90 2>&1); then
         done_ "probe OK: $(tail -n 1 <<<"$out")"
     else
