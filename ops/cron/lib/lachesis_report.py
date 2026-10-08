@@ -6,7 +6,11 @@ Run by lachesis-report.sh every 15 minutes, as asiri:
 1. Fuel. The plan-usage Claude Code plugin writes each account's latest rate-limit
    windows to <config dir>/plan-usage.json after every turn. For every account in
    LACHESIS_FUEL_SOURCES, the newest such file whose weekly window has not reset is
-   reported with report_fuel. No file, or only stale ones: nothing is reported.
+   reported with report_fuel, if it was recorded within LACHESIS_FUEL_MAX_AGE_HOURS.
+   No file, or only stale ones: nothing is reported, so Lachesis keeps the last
+   real reading and its time instead of a days-old figure stamped as new (until
+   2026-10-08 a file last written on Oct 6 was re-reported every 15 minutes, and
+   the main account read 27% used while it was at 38%).
 
 2. Usage. Every archon workflow run that finished since the last report is read
    from archon.db: its repository, the issue or pull request its message names,
@@ -24,6 +28,7 @@ Env:
   LACHESIS_FACTORY_TOKEN  required (secrets.env)
   LACHESIS_FUEL_SOURCES   account=path[:path...][;account=...]
   LACHESIS_RUN_ACCOUNT    default factory
+  LACHESIS_FUEL_MAX_AGE_HOURS  default 2: older plan-usage.json records are not reported
   ARCHON_DB               default /mnt/ext-fast/archon-home/.archon/archon.db
   LACHESIS_REPORT_STATE   default ~/.local/state/archon-cron/lachesis-report.json
   --dry-run               print what would be reported; call nothing, save nothing
@@ -38,7 +43,7 @@ import sqlite3
 import sys
 import urllib.error
 import urllib.request
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -149,8 +154,18 @@ def _window(record: dict[str, Any], kind: str) -> dict[str, Any] | None:
     return next((w for w in record.get("rateLimits", []) if w.get("kind") == kind), None)
 
 
-def latest_fuel(paths: list[str], now: datetime) -> dict[str, Any] | None:
-    """The report_fuel arguments from the newest readable record whose week is current."""
+def _recorded_at(record: dict[str, Any]) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(record.get("recordedAt", "")).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def latest_fuel(
+    paths: list[str], now: datetime, max_age: timedelta = timedelta(hours=2)
+) -> dict[str, Any] | None:
+    """The report_fuel arguments from the newest readable record whose week is current
+    and that was recorded within *max_age* of *now*."""
     best: tuple[str, dict[str, Any]] | None = None
     for path in paths:
         try:
@@ -161,6 +176,9 @@ def latest_fuel(paths: list[str], now: datetime) -> dict[str, Any] | None:
         if not week or not week.get("resetsAt"):
             continue
         if datetime.fromisoformat(week["resetsAt"].replace("Z", "+00:00")) <= now:
+            continue
+        recorded = _recorded_at(record)
+        if recorded is None or now - recorded > max_age:
             continue
         stamp = record.get("recordedAt", "")
         if best is None or stamp > best[0]:
@@ -287,10 +305,11 @@ def main(argv: list[str]) -> int:
         return ok
 
     sources = parse_sources(os.environ.get("LACHESIS_FUEL_SOURCES", DEFAULT_FUEL))
+    max_age_hours = float(os.environ.get("LACHESIS_FUEL_MAX_AGE_HOURS") or 2)
     for account, paths in sources.items():
-        fuel = latest_fuel(paths, now)
+        fuel = latest_fuel(paths, now, timedelta(hours=max_age_hours))
         if fuel is None:
-            log(f"fuel: no current plan-usage.json for {account}")
+            log(f"fuel: no plan-usage.json for {account} recorded in the last {max_age_hours:g}h")
         elif call("report_fuel", {"account": account, **fuel}):
             log(f"fuel: {account} {fuel['weekly_used_percent']}% of the week")
 

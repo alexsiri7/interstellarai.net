@@ -47,6 +47,20 @@ class FuelTest(unittest.TestCase):
             stale = _record(Path(d), "a.json", "2026-09-29T09:00:00Z", 90, NOW - timedelta(hours=1))
             self.assertIsNone(lr.latest_fuel([stale], NOW))
 
+    def test_a_record_older_than_the_max_age_is_not_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            later = NOW + timedelta(days=2)
+            old = _record(Path(d), "a.json", "2026-10-04T20:04:27.860Z", 27, later)
+            self.assertIsNone(lr.latest_fuel([old], NOW))
+            self.assertEqual(lr.latest_fuel([old], NOW, timedelta(days=3))["weekly_used_percent"], 27)
+
+    def test_a_fresh_record_beats_a_newer_week_figure_that_is_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            later = NOW + timedelta(days=2)
+            fresh = _record(Path(d), "a.json", "2026-10-06T11:30:00Z", 38, later)
+            stale = _record(Path(d), "b.json", "2026-10-06T07:00:00Z", 27, later)
+            self.assertEqual(lr.latest_fuel([stale, fresh], NOW)["weekly_used_percent"], 38)
+
     def test_sources_parse(self) -> None:
         self.assertEqual(
             lr.parse_sources("factory=/a:/b; main=/c"), {"factory": ["/a", "/b"], "main": ["/c"]}
