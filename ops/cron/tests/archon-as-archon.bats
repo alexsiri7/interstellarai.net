@@ -439,3 +439,37 @@ make_tmp_sandbox() {
     [ "$status" -eq 0 ]
     [ ! -L "$S/link" ] && [ -e "$T/precious/keep" ]
 }
+
+@test "--account main: main's token file and config dir, never the factory's" {
+    mkdir -p "$T/home/.config/archon-user" "$T/home/.claude-main"
+    printf 'CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-factoryTOKEN_1\n' > "$T/home/.config/archon-user/claude.env"
+    printf 'CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-mainTOKEN_22\n' > "$T/home/.config/archon-user/claude-main.env"
+    cd "$T/owner/reli"
+    run "$W" --account main workflow run archon-ship "fix #12"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ENV=CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-mainTOKEN_22"* ]]
+    [[ "$output" != *factoryTOKEN* ]]
+    [[ "$output" == *"ENV=CLAUDE_CONFIG_DIR=$T/home/.claude-main"* ]]
+    [[ "$output" == *"ARGV: /usr/local/lib/archon-user/bin/archon workflow run archon-ship fix #12"* ]]
+    run "$W" --account factory claude-probe
+    [[ "$output" == *factoryTOKEN* ]]
+    [[ "$output" != *CLAUDE_CONFIG_DIR* ]]
+}
+
+@test "--account main without its credential or config dir: refused, no fallback to the factory" {
+    mkdir -p "$T/home/.config/archon-user"
+    printf 'CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-factoryTOKEN_1\n' > "$T/home/.config/archon-user/claude.env"
+    run "$W" --account main claude-probe
+    [ "$status" -eq 69 ]
+    [[ "$output" != *factoryTOKEN* ]]
+    printf 'CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-mainTOKEN_22\n' > "$T/home/.config/archon-user/claude-main.env"
+    run "$W" --account main claude-probe
+    [ "$status" -eq 69 ]
+}
+
+@test "--account takes only factory or main" {
+    run "$W" --account other claude-probe
+    [ "$status" -eq 64 ]
+    run "$W" --account
+    [ "$status" -eq 64 ]
+}

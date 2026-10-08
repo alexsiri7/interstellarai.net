@@ -275,6 +275,36 @@ gates apply:
 
   Changes outside `ops/` (the website, the workers) flow as before. They are the factory's job and deploy through CI, not through this host.
 
+### The owner's main account as a paced fallback
+
+While the factory account is rate limited, runs may go to the owner's **main** Claude
+account instead, never past a pace: the weekly cap in force is 65% × the share of main's
+7-day window elapsed (6.5% after a tenth of the week, 65% by the reset), and the 5-hour
+window stops at 60%. Off until the owner turns it on.
+
+1. In a normal terminal on interstellar, `claude setup-token`, signed in as the **main**
+   account. Then `sudo -n /usr/local/sbin/archon-user-install --set-claude-token --account main`
+   and paste it. That writes `~archon/.config/archon-user/claude-main.env`, creates
+   `~archon/.claude-main` (no connectors, the plan-usage plugin, and
+   `budget-guard.json` `{ "enabled": true, "weeklyCapPercent": 65, "fiveHourCapPercent": 60, "pace": true }`),
+   and probes main once.
+2. Turn it on, as asiri: `echo ARCHON_MAIN_ACCOUNT=on > ~/.config/archon-cron/main-account`
+   (`off`, or deleting the file, turns it off at the next tick).
+
+How it decides, per launch (`ops/cron/lib/main-account.sh`, called from
+`quota-pause.sh` and the shim): only while the factory is held; then main's
+`plan-usage.json` (refreshed by one haiku probe when older than 30 minutes, since the
+owner's own use elsewhere never reaches it) must be under the paced caps from that same
+`budget-guard.json`. The shim then hands the wrapper `--account main`, which uses
+main's token and `CLAUDE_CONFIG_DIR=~/.claude-main`, so the plugin's paced guard also stops
+a session that crosses the cap mid-run. To change the caps, edit that `budget-guard.json`
+(as archon); a token renewal keeps it.
+
+Known gaps: Archon's run DB does not record the account, so `lachesis-report` reports every
+run's usage against the factory account (fuel itself is reported per account); and a run on
+main that hits main's real limit (the owner's own use took it to 100%) holds the factory too,
+until main's reset.
+
 ## Decisions (and why)
 
 - **Separate system user, not a container or bubblewrap.** Ubuntu 24.04 restricts unprivileged user namespaces, and the toolchains (Android SDK, Flutter, Playwright, rustup) would all need mounting into a sandbox. A second Unix user with ACLs is standard, auditable with `ls`/`getfacl`, and survives upgrades. `no_new_privs` (wrapper) and the systemd hardening (server) come on top.
