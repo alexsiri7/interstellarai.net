@@ -19,8 +19,9 @@
 #
 # The usage read is the plugin's plan-usage.json in that dir. The owner's own
 # use of main (other machines, claude.ai) never reaches it, so a reading older
-# than MAIN_ACCOUNT_MAX_AGE seconds is refreshed first with one haiku request
-# through the factory door (claude-probe), which writes a current one. A
+# than MAIN_ACCOUNT_MAX_AGE seconds (30 min: pr-review asks every 5, and a probe
+# per ask would be 288 requests a day on main) is refreshed first with one haiku
+# request through the factory door (claude-probe), which writes a current one. A
 # reading that is still missing or stale after that holds the launch: an
 # unknown figure is never taken as room.
 
@@ -29,7 +30,7 @@ _MAIN_ACCOUNT_SH=1
 
 MAIN_ACCOUNT_FLAG="${MAIN_ACCOUNT_FLAG:-$HOME/.config/archon-cron/main-account}"
 MAIN_ACCOUNT_DIR="${MAIN_ACCOUNT_DIR:-/mnt/ext-fast/archon-home/.claude-main}"
-MAIN_ACCOUNT_MAX_AGE="${MAIN_ACCOUNT_MAX_AGE:-600}"
+MAIN_ACCOUNT_MAX_AGE="${MAIN_ACCOUNT_MAX_AGE:-1800}"
 
 # main_account_enabled — true when the owner's flag says ARCHON_MAIN_ACCOUNT=on.
 # Under bats the host's flag is ignored unless the test names its own file.
