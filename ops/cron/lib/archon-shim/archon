@@ -25,23 +25,35 @@ real="${ARCHON_REAL_BIN:-/mnt/ext-fast/archon/packages/cli/src/cli.ts}"
 # `workflow run` is refused like a drain (exit 75). The launching scripts check
 # quota_may_launch themselves first; this catches the rest (pipeline-health's
 # fixers). While held, a run main may take (lib/main-account.sh) goes to the
-# wrapper as --account main. ARCHON_QUOTA_OVERRIDE=1 lets the owner start a
-# run by hand anyway.
+# wrapper as --account main. With the owner's LACHESIS_ROUTE switch on, the
+# account is the one Lachesis route_run names for the workflow's kind of work
+# (lib/quota-pause.sh quota_route_account). Every run let through is recorded
+# with its account (quota_record_launch), so its rate-limit errors hold only
+# that account and lachesis-report reports its usage on it.
+# ARCHON_QUOTA_OVERRIDE=1 lets the owner start a run by hand anyway.
 if [ "$mode" = archon ] && [ "${1:-}" = workflow ] && [ "${2:-}" = run ] \
         && [ "${ARCHON_QUOTA_OVERRIDE:-}" != 1 ]; then
     shim_lib="$(dirname "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")")"
     if ARCHON_RUN_AS=archon source "$shim_lib/ship-breaker.sh" 2>/dev/null \
             && source "$shim_lib/quota-pause.sh" 2>/dev/null; then
-        if ! held=$(ARCHON_RUN_AS=archon quota_launch_account "archon workflow run"); then
+        # In this shell, not a $(...): QUOTA_ACCOUNT must survive the call.
+        held_log=$(mktemp 2>/dev/null || echo "/tmp/archon-shim.$$")
+        # shellcheck source=/dev/null
+        source "$shim_lib/lachesis.sh" 2>/dev/null || true
+        QUOTA_RUN_KIND=$(lachesis_kind_for "${3:-}" 2>/dev/null || echo implementation)
+        export QUOTA_RUN_KIND
+        rc=0; ARCHON_RUN_AS=archon quota_launch_account "archon workflow run" >"$held_log" || rc=$?
+        held=$(cat "$held_log" 2>/dev/null); rm -f "$held_log"
+        if [ "$rc" != 0 ]; then
+            held="${held##*$'\n'}"
             echo "archon: refusing 'workflow run' — ${held#*: }" >&2
             exit 75
         fi
-        # Not held: no output, the factory runs it. Held and main took it:
-        # its one [main-account] line (QUOTA_ACCOUNT cannot leave the $(...)).
-        if [[ "$held" == *"[main-account]"* ]]; then
-            echo "$held" >&2
-            set -- --account main "$@"
-        fi
+        # Not held and not routed: no output, the factory runs it. Held and
+        # main took it, or routed: its one log line.
+        [ -n "$held" ] && echo "$held" >&2
+        quota_record_launch "$QUOTA_ACCOUNT" "${3:-}" "${4:-}"
+        [ "$QUOTA_ACCOUNT" = factory ] || set -- --account "$QUOTA_ACCOUNT" "$@"
     fi
 fi
 case "$mode" in

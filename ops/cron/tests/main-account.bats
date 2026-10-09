@@ -172,3 +172,156 @@ hold_factory() {
     [ "$status" -eq 0 ]
     grep -q "^sudo -n -u archon /usr/local/bin/archon-as-archon workflow run archon-ship fix #12$" "$T/argv"
 }
+
+# ── Lachesis route (LACHESIS_ROUTE=on, #156) ─────────────────────────────────
+
+# Lachesis stands in as a stub answering route_run with ROUTE_JSON (or failing
+# with ROUTE_RC); every call lands in $T/lachesis-argv.
+route_on() {
+    export LACHESIS_FLAG_TEST=1 LACHESIS_ROUTE_FLAG="$T/home/.config/archon-cron/lachesis-route"
+    echo 'LACHESIS_ROUTE=on' > "$LACHESIS_ROUTE_FLAG"
+    cat > "$T/bin/lachesis" <<'STUB'
+#!/usr/bin/env bash
+printf '%s %s\n' "$1" "${2:-}" >> "$LACHESIS_ARGV"
+[ -n "${ROUTE_RC:-}" ] && exit "$ROUTE_RC"
+printf '%s\n' "$ROUTE_JSON"
+STUB
+    chmod +x "$T/bin/lachesis"
+    export LACHESIS_CALL_CMD="$T/bin/lachesis" LACHESIS_ARGV="$T/lachesis-argv"
+    : > "$LACHESIS_ARGV"
+}
+
+# routes <account> [via] — route_run names <account> on via (default
+# allowance); no account: via null, or the via given (requesty).
+routes() {
+    local acct=null via=null
+    if [ -n "$1" ]; then acct="\"$1\""; via="\"${2:-allowance}\""
+    elif [ -n "${2:-}" ]; then via="\"$2\""; fi
+    export ROUTE_JSON="{\"model\": \"claude\", \"via\": $via, \"account\": $acct, \"reason\": \"because\"}"
+}
+
+# hold_run <account> — a run started 10 minutes ago on <account> (per the
+# ledger) whose node failed on the weekly limit, resetting in two hours.
+hold_run() {
+    export ARCHON_DB="$T/archon.db" QUOTA_LEDGER="$T/ledger.tsv"
+    local spec; spec=$(TZ=Europe/London date -d '+2 hours' '+%-I%P')
+    sqlite3 "$ARCHON_DB" "
+      CREATE TABLE IF NOT EXISTS remote_agent_workflow_runs (id TEXT PRIMARY KEY, workflow_name TEXT,
+        user_message TEXT, started_at TEXT);
+      CREATE TABLE IF NOT EXISTS remote_agent_workflow_events (id INTEGER PRIMARY KEY,
+        workflow_run_id TEXT, event_type TEXT, data TEXT, created_at TEXT DEFAULT (datetime('now')));
+      INSERT INTO remote_agent_workflow_runs VALUES ('$1', 'archon-ship', 'fix #9', datetime('now', '-10 minutes'));
+      INSERT INTO remote_agent_workflow_events (workflow_run_id, event_type, data)
+        VALUES ('$1', 'node_failed', '{\"error\":\"You have hit your weekly limit · resets $spec (Europe/London)\"}');"
+    printf '%s\t%s\tarchon-ship\tfix #9\n' "$(( $(date +%s) - 605 ))" "$1" >> "$QUOTA_LEDGER"
+}
+
+@test "route: workflows map to Lachesis kinds of work" {
+    source "$LIB/lachesis.sh"
+    [ "$(lachesis_kind_for archon-ship)" = implementation ]
+    [ "$(lachesis_kind_for archon-triage-issue)" = triage ]
+    [ "$(lachesis_kind_for archon-security-audit)" = audit ]
+    [ "$(lachesis_kind_for archon-smart-pr-review)" = audit ]
+    [ "$(lachesis_kind_for archon-architect)" = "spec work" ]
+    [ "$(lachesis_kind_for archon-assist)" = implementation ]
+}
+
+@test "route off: Lachesis is never asked, and the launch is recorded on factory" {
+    export ARCHON_DB="$T/missing.db" QUOTA_LEDGER="$T/ledger.tsv"
+    export LACHESIS_CALL_CMD="$T/no-such-lachesis"
+    ARCHON_RUN_AS=archon run "$SHIM" workflow run archon-ship "fix #12"
+    [ "$status" -eq 0 ]
+    grep -q "^sudo -n -u archon /usr/local/bin/archon-as-archon workflow run archon-ship fix #12$" "$T/argv"
+    grep -qP '^\d+\tfactory\tarchon-ship\tfix #12$' "$QUOTA_LEDGER"
+}
+
+@test "route on: the launch goes to the account Lachesis names, asked with the workflow's kind" {
+    route_on; routes main
+    export ARCHON_DB="$T/missing.db" QUOTA_LEDGER="$T/ledger.tsv"
+    ARCHON_RUN_AS=archon run "$SHIM" workflow run archon-triage-issue "triage #12"
+    [ "$status" -eq 0 ]
+    grep -q '^route_run {"kind":"triage"}$' "$LACHESIS_ARGV"
+    grep -q "^sudo -n -u archon /usr/local/bin/archon-as-archon --account main workflow run archon-triage-issue triage #12$" "$T/argv"
+    grep -qP '^\d+\tmain\tarchon-triage-issue\ttriage #12$' "$QUOTA_LEDGER"
+    [[ "$output" == *"[lachesis-route] archon workflow run: triage on main"* ]]
+}
+
+@test "route on: factory named — the argv reaches the wrapper untouched" {
+    route_on; routes factory
+    export ARCHON_DB="$T/missing.db" QUOTA_LEDGER="$T/ledger.tsv"
+    ARCHON_RUN_AS=archon run "$SHIM" workflow run archon-ship "fix #12"
+    [ "$status" -eq 0 ]
+    grep -q "^sudo -n -u archon /usr/local/bin/archon-as-archon workflow run archon-ship fix #12$" "$T/argv"
+}
+
+@test "route on: no Claude account named — refused, with Lachesis's reason" {
+    route_on; routes ""
+    export ARCHON_DB="$T/missing.db"
+    ARCHON_RUN_AS=archon run "$SHIM" workflow run archon-ship "fix #12"
+    [ "$status" -eq 75 ]
+    [[ "$output" == *"no Claude account for implementation — because"* ]]
+    run ! grep -q archon-as-archon "$T/argv"
+}
+
+@test "route on: a Requesty route is not launched on Claude" {
+    route_on; routes "" requesty
+    export ARCHON_DB="$T/missing.db"
+    ARCHON_RUN_AS=archon run "$SHIM" workflow run archon-ship "fix #12"
+    [ "$status" -eq 75 ]
+}
+
+@test "route on: main named while the owner's ARCHON_MAIN_ACCOUNT is off — refused" {
+    route_on; routes main
+    echo "ARCHON_MAIN_ACCOUNT=off" > "$MAIN_ACCOUNT_FLAG"
+    export ARCHON_DB="$T/missing.db"
+    ARCHON_RUN_AS=archon run "$SHIM" workflow run archon-ship "fix #12"
+    [ "$status" -eq 75 ]
+    [[ "$output" == *"ARCHON_MAIN_ACCOUNT is off"* ]]
+}
+
+@test "route on: an account an earlier run hit the limit on is held, the other is not" {
+    route_on; hold_run main
+    routes main
+    ARCHON_RUN_AS=archon run "$SHIM" workflow run archon-ship "fix #12"
+    [ "$status" -eq 75 ]
+    [[ "$output" == *"its last run hit the rate limit until"* ]]
+    routes factory
+    ARCHON_RUN_AS=archon run "$SHIM" workflow run archon-ship "fix #12"
+    [ "$status" -eq 0 ]
+    grep -q "archon-as-archon workflow run archon-ship fix #12$" "$T/argv"
+}
+
+@test "per-account hold: a run on factory holds factory only; no ledger entry means factory" {
+    hold_run factory
+    : > "$QUOTA_LEDGER"
+    source "$LIB/ship-breaker.sh"; source "$LIB/quota-pause.sh"
+    [ "$(quota_pause_until_account factory)" -gt "$(date +%s)" ]
+    [ "$(quota_pause_until_account main)" = 0 ]
+}
+
+@test "route on: route_run unreadable — the local rules decide as before" {
+    route_on; export ROUTE_RC=2
+    export ARCHON_DB="$T/missing.db" QUOTA_LEDGER="$T/ledger.tsv"
+    ARCHON_RUN_AS=archon run "$SHIM" workflow run archon-ship "fix #12"
+    [ "$status" -eq 0 ]
+    grep -q "^sudo -n -u archon /usr/local/bin/archon-as-archon workflow run archon-ship fix #12$" "$T/argv"
+    [[ "$output" == *"route_run could not be read"* ]]
+}
+
+@test "route on: route_run unreadable and the factory held — held as before" {
+    route_on; export ROUTE_RC=2
+    hold_factory
+    usage "$T/main/plan-usage.json" 5 64 $((2 * DAY))
+    source "$LIB/ship-breaker.sh"; source "$LIB/quota-pause.sh"
+    run quota_may_launch test
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"rate limit in effect until"* ]]
+}
+
+@test "the ledger is trimmed when it grows past QUOTA_LEDGER_MAX" {
+    export QUOTA_LEDGER="$T/ledger.tsv" QUOTA_LEDGER_MAX=10
+    source "$LIB/ship-breaker.sh"; source "$LIB/quota-pause.sh"
+    for i in $(seq 1 11); do quota_record_launch factory archon-ship "fix #$i"; done
+    [ "$(wc -l < "$QUOTA_LEDGER")" -eq 5 ]
+    tail -n 1 "$QUOTA_LEDGER" | grep -q 'fix #11$'
+}

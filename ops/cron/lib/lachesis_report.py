@@ -15,7 +15,9 @@ Run by lachesis-report.sh every 15 minutes, as asiri:
 2. Usage. Every archon workflow run that finished since the last report is read
    from archon.db: its repository, the issue or pull request its message names,
    its kind of work (from the workflow), its tokens and its main model. Each is
-   reported with report_usage, on the account LACHESIS_RUN_ACCOUNT. A run whose
+   reported with report_usage, on the account the archon shim recorded for its
+   launch in the run ledger (lib/quota-pause.sh quota_record_launch), or
+   LACHESIS_RUN_ACCOUNT when the ledger names none. A run whose
    previous run on the same issue and workflow failed is also reported as a retry
    with report_run_outcome. Runs naming no number, or in a repository Lachesis
    does not track, are skipped.
@@ -27,7 +29,8 @@ Env:
   LACHESIS_URL            default https://lachesis.interstellarai.net/mcp
   LACHESIS_FACTORY_TOKEN  required (secrets.env)
   LACHESIS_FUEL_SOURCES   account=path[:path...][;account=...]
-  LACHESIS_RUN_ACCOUNT    default factory
+  LACHESIS_RUN_ACCOUNT    default factory: the account of a run the ledger does not name
+  LACHESIS_RUN_LEDGER     default ~/.local/state/archon-cron/run-accounts.tsv
   LACHESIS_FUEL_MAX_AGE_HOURS  default 2: older plan-usage.json records are not reported
   ARCHON_DB               default /mnt/ext-fast/archon-home/.archon/archon.db
   LACHESIS_REPORT_STATE   default ~/.local/state/archon-cron/lachesis-report.json
@@ -213,7 +216,7 @@ def finished_runs(db: str, since: str) -> list[dict[str, Any]]:
         runs = conn.execute(
             """
             SELECT r.id, r.workflow_name, r.user_message, r.status, r.completed_at,
-                   c.name AS repo
+                   r.started_at, c.name AS repo
             FROM remote_agent_workflow_runs r
             LEFT JOIN remote_agent_codebases c ON c.id = r.codebase_id
             WHERE r.completed_at IS NOT NULL AND r.completed_at > ?
@@ -251,6 +254,40 @@ def finished_runs(db: str, since: str) -> list[dict[str, Any]]:
         return result
     finally:
         conn.close()
+
+
+def read_ledger(path: str) -> list[tuple[int, str, str, str]]:
+    """The run ledger the archon shim appends to: (epoch, account, workflow, message)."""
+    entries = []
+    try:
+        lines = Path(path).read_text().splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        parts = line.split("\t")
+        if len(parts) == 4 and parts[0].isdigit():
+            entries.append((int(parts[0]), parts[1], parts[2], parts[3]))
+    return entries
+
+
+def _flat(text: str | None) -> str:
+    return re.sub(r"[\t\n\r]", " ", text or "")
+
+
+def run_account(run: dict[str, Any], ledger: list[tuple[int, str, str, str]], default: str) -> str:
+    """The account *run* used: the newest ledger launch of its workflow and message from
+    15 minutes before it started to 2 minutes after (as lib/quota-pause.sh matches it)."""
+    try:
+        started = datetime.strptime(str(run.get("started_at")), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return default
+    start = int(started.replace(tzinfo=UTC).timestamp())
+    message = _flat(run.get("user_message"))
+    account = default
+    for epoch, name, workflow, text in ledger:
+        if workflow == run.get("workflow_name") and text == message and start - 900 <= epoch <= start + 120:
+            account = name
+    return account
 
 
 def usage_report(run: dict[str, Any], account: str) -> dict[str, Any] | None:
@@ -314,13 +351,17 @@ def main(argv: list[str]) -> int:
         elif call("report_fuel", {"account": account, **fuel}):
             log(f"fuel: {account} {fuel['weekly_used_percent']}% of the week")
 
-    account = os.environ.get("LACHESIS_RUN_ACCOUNT", "factory")
+    default_account = os.environ.get("LACHESIS_RUN_ACCOUNT", "factory")
+    ledger = read_ledger(
+        os.environ.get("LACHESIS_RUN_LEDGER")
+        or str(Path.home() / ".local/state/archon-cron/run-accounts.tsv")
+    )
     failed: dict[str, bool] = state.get("failed", {})
     since = state["since"]
     reported = 0
     for run in finished_runs(os.environ.get("ARCHON_DB", DEFAULT_DB), since):
         since = max(since, run["completed_at"])
-        report = usage_report(run, account)
+        report = usage_report(run, run_account(run, ledger, default_account))
         if report is None:
             continue
         key = f"{report['repo']}#{report['issue']}:{run['workflow_name']}"
