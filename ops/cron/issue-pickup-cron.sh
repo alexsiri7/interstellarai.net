@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # issue-pickup-cron.sh — run every 15 minutes from cron.
 # Autonomous pipeline: auto-labels new issues, then picks up one per repo
-# per tick and fires archon-fix-github-issue on the oldest queued one.
+# per tick and fires archon-ship on the oldest queued one — or, with the
+# owner's LACHESIS_PICKUP switch on, on the issue Lachesis next_issue offers
+# (lachesis_pick; ops/cron/README.md "Lachesis pickup").
 #
 # Crontab:
 #   */15 * * * * <repo>/ops/cron/issue-pickup-cron.sh >> ~/.local/state/archon-cron/logs/issue-pickup.log 2>&1
@@ -59,6 +61,13 @@ source "$SCRIPT_DIR/lib/trust.sh"
 # phases below may act on them; see lib/screen.sh.
 # shellcheck source=lib/screen.sh
 source "$SCRIPT_DIR/lib/screen.sh"
+# Lachesis pickup (owner's switch, off by default): the issue to work comes from
+# Lachesis next_issue, not the archon:queued label scan, and labels record run
+# state only. See lib/lachesis.sh and lachesis_pick below.
+# shellcheck source=lib/lachesis.sh
+source "$SCRIPT_DIR/lib/lachesis.sh"
+LACHESIS_PICKUP_ON=0
+lachesis_pickup_enabled && LACHESIS_PICKUP_ON=1
 
 PROJECTS=("${DEFAULT_PROJECTS[@]}")
 [ $# -gt 0 ] && PROJECTS=("$@")
@@ -451,6 +460,21 @@ unstick_stale() {
       continue
     fi
 
+    # Lachesis pickup: no queue label to go back to. Releasing archon:in-progress
+    # is enough for next_issue to offer the issue again in its computed place.
+    if [ "${LACHESIS_PICKUP_ON:-0}" = 1 ]; then
+      log "$project: #$num is stuck (in-progress for ${age}s, no live or parked run, no PR) — releasing it to Lachesis"
+      gh issue edit "$num" --repo "alexsiri7/$project" \
+        --remove-label "archon:in-progress" 2>/dev/null || {
+          log "$project: #$num — could not remove archon:in-progress"
+          continue
+        }
+      SUMMARY_STALE=$((SUMMARY_STALE + 1))
+      gh issue comment "$num" --repo "alexsiri7/$project" \
+        --body "archon was labeled in-progress ${age}s ago but no live or parked (paused) run and no linked PR were found. Released archon:in-progress: Lachesis next_issue decides when it runs again." 2>/dev/null || true
+      continue
+    fi
+
     # A human-owned issue (manual-review etc.) must not go back in the queue,
     # but leaving it archon:in-progress with no run behind it is worse: it
     # reads as permanent pending work, so pipeline-health fires its
@@ -583,10 +607,97 @@ promote_unblocked() {
   done
 }
 
+# ship_slot_busy <project> — true (with SUMMARY_ACTION/NOTE set) when no
+# archon-ship may start on <project> this tick: no clone, a run already live or
+# parked on the repo (never stack two), or the Claude rate limit holds.
+ship_slot_busy() {
+  local project="$1"
+  local repo_dir="$BASE_DIR/$project"
+
+  if [ ! -d "$repo_dir/.git" ]; then
+    log "$project: no repo at $repo_dir, skipping"
+    SUMMARY_ACTION="skip"
+    SUMMARY_NOTE="repo missing"
+    return 0
+  fi
+
+  # Don't stack — if an archon run is already in flight for this repo, skip.
+  # Capture the issue number from the cmdline ("fix #N") for the summary note.
+  local running_for
+  running_for=$(pgrep -fa "archon workflow run archon-(ship|fix-github-issue).*--cwd.*$repo_dir" 2>/dev/null \
+    | grep -oE 'fix #[0-9]+' | head -1 | tr -d '#')
+  if [ -n "$running_for" ]; then
+    log "$project: archon already running, skipping"
+    SUMMARY_ACTION="skip-running"
+    SUMMARY_NOTE="archon already running for #$running_for"
+    return 0
+  fi
+  # Fallback detector: look for runs started via direct cd (no --cwd).
+  # Anchor project match so e.g. `reli` does not false-positive on
+  # `reliability` or another slug containing the substring.
+  running_for=$(pgrep -fa "archon workflow run archon-(ship|fix-github-issue)" 2>/dev/null \
+    | grep -E "(^|[[:space:]=/])$project([[:space:]/]|\$)" | grep -oE 'fix #[0-9]+' | head -1 | tr -d '#')
+  if [ -n "$running_for" ]; then
+    log "$project: archon already running (cwd match), skipping"
+    SUMMARY_ACTION="skip-running"
+    SUMMARY_NOTE="archon already running for #$running_for"
+    return 0
+  fi
+  # Parked-run guard: an archon-ship run suspended at a durable wait (CI pause)
+  # has no process but is still active — do not stack a second run on the repo.
+  running_for=$(archon_run_active_msg "$repo_dir" "$project" '^archon-(ship|fix-github-issue)$' \
+    | grep -oE 'fix #[0-9]+' | head -1 | tr -d '#')
+  if [ -n "$running_for" ]; then
+    log "$project: archon run active in DB (running or parked), skipping"
+    SUMMARY_ACTION="skip-running"
+    SUMMARY_NOTE="archon run active (possibly parked) for #$running_for"
+    return 0
+  fi
+
+  if [ "$QUOTA_HELD" = 1 ]; then
+    SUMMARY_ACTION="skip-quota"
+    SUMMARY_NOTE="Claude rate limit in effect"
+    return 0
+  fi
+
+  return 1
+}
+
+# fire_ship <project> <issue> — mark <issue> archon:in-progress and launch
+# archon-ship on it in the background.
+fire_ship() {
+  local project="$1" issue="$2"
+  local repo_dir="$BASE_DIR/$project"
+
+  log "$project: picking up issue #$issue"
+  # Lachesis pickup: no queue label to remove, and archon:in-progress is what
+  # next_issue passes over, so it must not ride on a removal that can fail.
+  local -a relabel=(--add-label "archon:in-progress")
+  [ "${LACHESIS_PICKUP_ON:-0}" = 1 ] || relabel=(--remove-label "archon:queued" "${relabel[@]}")
+  gh issue edit "$issue" --repo "alexsiri7/$project" "${relabel[@]}" 2>/dev/null || true
+  SUMMARY_ACTION="pickup #$issue"
+
+  cd "$repo_dir"
+  mkdir -p .archon-logs
+  local logf=".archon-logs/cron-issue-$issue-$(date +%Y%m%d-%H%M%S).log"
+  # The wrapper settles a no-PR verdict on the issue as soon as the run exits
+  # (lib/settle-ship-outcome.sh); its own output lands in this cron's log.
+  # Only the archon child may look like a live run to the pgrep guards: the
+  # wrapper's command line carries the literal "fix #$1", never "#<issue>",
+  # and the helper path and project travel in the environment so no path
+  # substring can match another project's anchor.
+  CLAUDECODE=0 SETTLE_SCRIPT="$SCRIPT_DIR/lib/settle-ship-outcome.sh" SETTLE_PROJECT="$project" \
+    nohup bash -c '
+      archon workflow run archon-ship "fix #$1" >"$2" 2>&1
+      "$SETTLE_SCRIPT" "$SETTLE_PROJECT" "$1" "$2"' \
+    ship-wrapper "$issue" "$logf" 2>/dev/null &
+  disown
+  log "$project: archon launched for #$issue (pid=$!, log=$logf)"
+}
+
 # --- Phase 2: pick up oldest queued issue per repo and fire archon ---
 pick_and_fire() {
   local project="$1"
-  local repo_dir="$BASE_DIR/$project"
 
   # Fetch queued list once, reuse for count + pick.
   # Order among queued siblings is NOT a contract — if issue A must run before
@@ -612,51 +723,7 @@ pick_and_fire() {
   done
   SUMMARY_QUEUED=${#candidates[@]}
 
-  if [ ! -d "$repo_dir/.git" ]; then
-    log "$project: no repo at $repo_dir, skipping"
-    SUMMARY_ACTION="skip"
-    SUMMARY_NOTE="repo missing"
-    return
-  fi
-
-  # Don't stack — if an archon run is already in flight for this repo, skip.
-  # Capture the issue number from the cmdline ("fix #N") for the summary note.
-  local running_for
-  running_for=$(pgrep -fa "archon workflow run archon-(ship|fix-github-issue).*--cwd.*$repo_dir" 2>/dev/null \
-    | grep -oE 'fix #[0-9]+' | head -1 | tr -d '#')
-  if [ -n "$running_for" ]; then
-    log "$project: archon already running, skipping"
-    SUMMARY_ACTION="skip-running"
-    SUMMARY_NOTE="archon already running for #$running_for"
-    return
-  fi
-  # Fallback detector: look for runs started via direct cd (no --cwd).
-  # Anchor project match so e.g. `reli` does not false-positive on
-  # `reliability` or another slug containing the substring.
-  running_for=$(pgrep -fa "archon workflow run archon-(ship|fix-github-issue)" 2>/dev/null \
-    | grep -E "(^|[[:space:]=/])$project([[:space:]/]|\$)" | grep -oE 'fix #[0-9]+' | head -1 | tr -d '#')
-  if [ -n "$running_for" ]; then
-    log "$project: archon already running (cwd match), skipping"
-    SUMMARY_ACTION="skip-running"
-    SUMMARY_NOTE="archon already running for #$running_for"
-    return
-  fi
-  # Parked-run guard: an archon-ship run suspended at a durable wait (CI pause)
-  # has no process but is still active — do not stack a second run on the repo.
-  running_for=$(archon_run_active_msg "$repo_dir" "$project" '^archon-(ship|fix-github-issue)$' \
-    | grep -oE 'fix #[0-9]+' | head -1 | tr -d '#')
-  if [ -n "$running_for" ]; then
-    log "$project: archon run active in DB (running or parked), skipping"
-    SUMMARY_ACTION="skip-running"
-    SUMMARY_NOTE="archon run active (possibly parked) for #$running_for"
-    return
-  fi
-
-  if [ "$QUOTA_HELD" = 1 ]; then
-    SUMMARY_ACTION="skip-quota"
-    SUMMARY_NOTE="Claude rate limit in effect"
-    return
-  fi
+  ship_slot_busy "$project" && return
 
   # First candidate whose thread is trusted end to end. Skip, never stop: an
   # issue a stranger commented on stays queued (owner ntfy'd once) without
@@ -685,27 +752,124 @@ pick_and_fire() {
     return  # nothing queued; SUMMARY_ACTION stays "none"
   fi
 
-  log "$project: picking up issue #$issue"
-  gh issue edit "$issue" --repo "alexsiri7/$project" \
-    --remove-label "archon:queued" --add-label "archon:in-progress" 2>/dev/null || true
-  SUMMARY_ACTION="pickup #$issue"
+  fire_ship "$project" "$issue"
+}
 
-  cd "$repo_dir"
-  mkdir -p .archon-logs
-  local logf=".archon-logs/cron-issue-$issue-$(date +%Y%m%d-%H%M%S).log"
-  # The wrapper settles a no-PR verdict on the issue as soon as the run exits
-  # (lib/settle-ship-outcome.sh); its own output lands in this cron's log.
-  # Only the archon child may look like a live run to the pgrep guards: the
-  # wrapper's command line carries the literal "fix #$1", never "#<issue>",
-  # and the helper path and project travel in the environment so no path
-  # substring can match another project's anchor.
-  CLAUDECODE=0 SETTLE_SCRIPT="$SCRIPT_DIR/lib/settle-ship-outcome.sh" SETTLE_PROJECT="$project" \
-    nohup bash -c '
-      archon workflow run archon-ship "fix #$1" >"$2" 2>&1
-      "$SETTLE_SCRIPT" "$SETTLE_PROJECT" "$1" "$2"' \
-    ship-wrapper "$issue" "$logf" 2>/dev/null &
-  disown
-  log "$project: archon launched for #$issue (pid=$!, log=$logf)"
+# --- Phase 2 (Lachesis pickup): launch the issue Lachesis orders first ---
+# Replaces auto_queue, promote_unblocked and pick_and_fire while the owner's
+# LACHESIS_PICKUP switch is on (lib/lachesis.sh). next_issue is asked once per
+# tick, across every registered repo: it returns the issue to work first and,
+# under also_eligible, the best issue of each other repo, in backlog order
+# (interrupt, security, focus, active milestone, age), already filtered for
+# readiness, open blockers, in-progress, needs-author, sprint budget and pace.
+# Each repo whose slot is free launches its own entry; a repo with a live or
+# parked run keeps the no-stacking guards. Labels gate nothing here. Every wait
+# for the author is a Lachesis question, which labels the issue needs-author so
+# next_issue passes over it: a stranger's issue or comment (prompt-injection
+# gate, lib/trust.sh) and a ship circuit-breaker park.
+LACHESIS_NEXT_JSON=""
+LACHESIS_NEXT_STATE=""   # "" not asked yet this tick, ok, failed
+
+# lachesis_next_fetch — next_issue into LACHESIS_NEXT_JSON, once per tick.
+lachesis_next_fetch() {
+  case "$LACHESIS_NEXT_STATE" in
+    ok) return 0 ;;
+    failed) return 1 ;;
+  esac
+  if LACHESIS_NEXT_JSON=$(lachesis_call next_issue '{}') \
+      && jq -e 'has("reason")' <<<"$LACHESIS_NEXT_JSON" >/dev/null 2>&1; then
+    LACHESIS_NEXT_STATE=ok
+    log "Lachesis next_issue: $(jq -r '.explanation // .reason' <<<"$LACHESIS_NEXT_JSON")"
+    return 0
+  fi
+  LACHESIS_NEXT_STATE=failed
+  log "Lachesis next_issue could not be read — no pickup this tick"
+  return 1
+}
+
+# lachesis_issue_for <project> — the issue next_issue offers on <project>, if any.
+lachesis_issue_for() {
+  jq -r --arg repo "$TRUST_OWNER/$1" '
+    ([.issue // empty] + (.also_eligible // []))
+    | map(select((.repo // "" | ascii_downcase) == ($repo | ascii_downcase)))
+    | .[0].number // empty' <<<"$LACHESIS_NEXT_JSON" 2>/dev/null
+}
+
+lachesis_pick() {
+  local project="$1" issue view rc
+
+  ship_slot_busy "$project" && return
+  if ! lachesis_next_fetch; then
+    SUMMARY_NOTE="Lachesis unavailable"
+    return
+  fi
+  issue=$(lachesis_issue_for "$project")
+  if [ -z "$issue" ]; then
+    SUMMARY_NOTE="Lachesis offers nothing here: $(jq -r '.reason' <<<"$LACHESIS_NEXT_JSON")"
+    return
+  fi
+  SUMMARY_QUEUED=1
+
+  # The issue itself: a stranger's, or a bridge's held by screening, waits for
+  # the owner to vet it (archon:approved releases it); a bridge issue not yet
+  # screened waits for lib/screen.sh, which runs every tick.
+  if ! view=$(gh issue view "$issue" --repo "alexsiri7/$project" \
+      --json number,author,labels,title,body 2>/dev/null); then
+    log "$project: #$issue — could not read the issue; not starting archon this tick"
+    return
+  fi
+  if [ "$(jq -s '.' <<<"$view" | trust_filter_issues "$project" | jq 'length' 2>/dev/null)" != 1 ]; then
+    if ! trust_issue_ok "$(jq -r '.author.login // ""' <<<"$view")" \
+        || jq -e --arg held "$TRUST_HELD_LABEL" '[.labels[]?.name] | index($held)' <<<"$view" >/dev/null 2>&1; then
+      if lachesis_ask_once "$project" "$issue" untrusted-issue \
+          "The factory will not start archon on #$issue: it was filed by an author outside the trusted list, or held by screening. Vet it, label it archon:approved if it is safe to work, or close it; then answer this question." \
+          "Untrusted text is never handed to archon (prompt injection), whatever Lachesis's order says."; then
+        log "$project: #$issue — untrusted or held issue, waiting on the author in Lachesis"
+      else
+        log "$project: #$issue — untrusted or held issue; could not record the question in Lachesis"
+      fi
+    else
+      log "$project: #$issue — waiting for screening before archon may start on it"
+    fi
+    return
+  fi
+
+  rc=0; trust_comments_ok "$project" issue "$issue" || rc=$?
+  if [ "$rc" = 1 ]; then
+    if lachesis_ask_once "$project" "$issue" untrusted-comment \
+        "The factory will not start archon on #$issue: its thread has comments by authors outside the trusted list. Delete them if they should not steer the work, then answer this question." \
+        "Untrusted text is never handed to archon (prompt injection). Hiding a comment is not enough: the API still returns it."; then
+      log "$project: #$issue — comments by untrusted authors, waiting on the author in Lachesis"
+    else
+      log "$project: #$issue — comments by untrusted authors; could not record the question in Lachesis"
+    fi
+    return
+  elif [ "$rc" != 0 ]; then
+    log "$project: #$issue — could not read its comments; not starting archon this tick"
+    return
+  fi
+
+  rc=0; SHIP_BREAKER_ASK=lachesis_ask ship_breaker_check "$project" "$issue" || rc=$?
+  if [ "$rc" = 1 ]; then
+    log "$project: #$issue — parked by the ship circuit breaker, not relaunching"
+    return
+  elif [ "$rc" != 0 ]; then
+    log "$project: #$issue — could not read its run history from the archon DB ($(ship_breaker_db)); not launching blind"
+    return
+  fi
+
+  fire_ship "$project" "$issue"
+}
+
+# lachesis_may_triage — with Lachesis pickup on, triage spends the allowance
+# too: only when next_issue answered and holds no work for budget or pace.
+lachesis_may_triage() {
+  [ "$LACHESIS_PICKUP_ON" = 1 ] || return 0
+  lachesis_next_fetch || return 1
+  case "$(jq -r '.reason' <<<"$LACHESIS_NEXT_JSON")" in
+    budget_spent|over_pace) return 1 ;;
+  esac
+  return 0
 }
 
 for PROJECT in "${PROJECTS[@]}"; do
@@ -722,11 +886,15 @@ for PROJECT in "${PROJECTS[@]}"; do
   settle_parked "$PROJECT"
   screen_bridge_issues "$PROJECT"
   unstick_stale "$PROJECT"
-  auto_queue "$PROJECT"
-  promote_unblocked "$PROJECT"
-  pick_and_fire "$PROJECT"
+  if [ "$LACHESIS_PICKUP_ON" = 1 ]; then
+    lachesis_pick "$PROJECT"
+  else
+    auto_queue "$PROJECT"
+    promote_unblocked "$PROJECT"
+    pick_and_fire "$PROJECT"
+  fi
   # Triage only runs when the fix queue is idle — it fills otherwise-empty ticks.
-  [ "$SUMMARY_ACTION" = "none" ] && auto_triage "$PROJECT"
+  [ "$SUMMARY_ACTION" = "none" ] && lachesis_may_triage && auto_triage "$PROJECT"
 
   summary="$PROJECT: queued=$SUMMARY_QUEUED blocked=$SUMMARY_BLOCKED in-progress=$SUMMARY_IN_PROGRESS stale=$SUMMARY_STALE promoted=$SUMMARY_PROMOTED deduped=$SUMMARY_DEDUPED settled=$SUMMARY_SETTLED action=$SUMMARY_ACTION"
   [ -n "$SUMMARY_NOTE" ] && summary="$summary ($SUMMARY_NOTE)"

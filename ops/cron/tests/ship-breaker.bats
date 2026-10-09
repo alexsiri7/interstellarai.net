@@ -174,3 +174,29 @@ run_row() {
     run quota_may_launch test
     [ "$status" -eq 0 ]
 }
+
+# ── Lachesis pickup: the park is a question (SHIP_BREAKER_ASK) ───────────────
+
+@test "with SHIP_BREAKER_ASK a trip asks the author instead of relabelling" {
+    run_row failed 50
+    run_row failed 30
+    run_row failed 10
+    ask() { printf '%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" > "$T/asked"; }
+    SHIP_BREAKER_ASK=ask run ship_breaker_check testproj 5
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"asked the author in Lachesis"* ]]
+    grep -q '^testproj|5|archon-ship keeps failing on #5' "$T/asked"
+    grep -q -- "$SHIP_BREAKER_MARKER" "$T/asked"
+    run ! grep -q 'issue edit\|issue comment' "$GH_ARGV"
+}
+
+@test "with SHIP_BREAKER_ASK a question that fails still launches nothing" {
+    run_row failed 50
+    run_row failed 30
+    run_row failed 10
+    ask() { return 1; }
+    SHIP_BREAKER_ASK=ask run ship_breaker_check testproj 5
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"could not record the question in Lachesis"* ]]
+    run ! grep -q 'issue edit\|issue comment' "$GH_ARGV"
+}

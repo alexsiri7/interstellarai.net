@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # Tests for dedupe_sentry, settle_parked, unstick_stale, auto_queue, auto_triage,
-# promote_unblocked and pick_and_fire in ops/cron/issue-pickup-cron.sh.
+# promote_unblocked, pick_and_fire and lachesis_pick in ops/cron/issue-pickup-cron.sh.
 #
 # Run: bunx bats ops/cron/tests/issue-pickup-cron.bats
 
@@ -97,6 +97,11 @@ STUB
     load_fn has_open_blockers
     load_fn has_archon_label
     load_fn has_human_label
+    load_fn ship_slot_busy
+    load_fn fire_ship
+    # Lachesis pickup is the owner's switch (lib/lachesis.sh); off unless a
+    # test turns it on.
+    LACHESIS_PICKUP_ON=0
 
     # The real trust gate, with its state, config and ntfy kept in $T.
     export TRUST_STATE_DIR="$T/trust-state"
@@ -949,4 +954,220 @@ JSON
 
     [ ! -s "$SETTLE_RECORD" ]
     [ "$SUMMARY_SETTLED" -eq 0 ]
+}
+
+# ── Lachesis pickup (LACHESIS_PICKUP=on) ─────────────────────────────────────
+
+# Lachesis stands in as a stub: next_issue prints fixtures/next.json (or fails
+# with LACHESIS_NEXT_RC), ask_question records its arguments and answers {}
+# (or fails with LACHESIS_ASK_RC).
+# shellcheck disable=SC2034  # read by the functions under test
+lachesis_on() {
+    LACHESIS_PICKUP_ON=1
+    LACHESIS_NEXT_JSON=""
+    LACHESIS_NEXT_STATE=""
+    cat > "$T/bin/lachesis" <<'STUB'
+#!/usr/bin/env bash
+printf '%s %s\n' "$1" "${2:-}" >> "$LACHESIS_ARGV"
+case "$1" in
+  next_issue)   [ -n "${LACHESIS_NEXT_RC:-}" ] && exit "$LACHESIS_NEXT_RC"
+                cat "$GH_FIXTURES/next.json" ;;
+  ask_question) [ -n "${LACHESIS_ASK_RC:-}" ] && exit "$LACHESIS_ASK_RC"
+                echo '{}' ;;
+esac
+STUB
+    chmod +x "$T/bin/lachesis"
+    export LACHESIS_CALL_CMD="$T/bin/lachesis" LACHESIS_ARGV="$T/lachesis-argv"
+    export LACHESIS_STATE_DIR="$T/lachesis-state"
+    : > "$LACHESIS_ARGV"
+    unset _LACHESIS_SH
+    # shellcheck source=../lib/lachesis.sh
+    source "$(dirname "$SCRIPT_FILE")/lib/lachesis.sh"
+    load_fn lachesis_next_fetch
+    load_fn lachesis_issue_for
+    load_fn lachesis_pick
+    load_fn lachesis_may_triage
+}
+
+# next_issue offering <repo>#<n> first and otherrepo#<m> under also_eligible.
+next_offers() {
+    jq -n --arg r "$1" --argjson n "$2" '{issue: {repo: $r, number: $n, title: "t", tier: "age"},
+      reason: "selected", explanation: "picked", blocked: [],
+      also_eligible: [{repo: "alexsiri7/otherrepo", number: 99, title: "o"}]}' > "$T/fixtures/next.json"
+}
+
+# issue view fixture: the issue as `gh issue view --json` prints it.
+issue_json() {
+    jq -n --argjson n "$1" --arg a "${2:-alexsiri7}" --argjson l "${3:-[]}" \
+        '{number: $n, author: {login: $a}, labels: ($l | map({name: .})), title: "t", body: "b"}' > "$T/fixtures/labels-$1"
+}
+
+@test "lachesis: the issue next_issue offers for the repo is launched, labelled in-progress only" {
+    lachesis_on
+    next_offers alexsiri7/testproj 42
+    issue_json 42
+
+    lachesis_pick testproj
+
+    [ "$SUMMARY_ACTION" = "pickup #42" ]
+    grep -q -- "issue edit 42 --repo alexsiri7/testproj --add-label archon:in-progress$" "$GH_ARGV"
+    [ "$(gh_calls -- 'archon:queued')" -eq 0 ]
+    [ "$(gh_calls -- 'issue list')" -eq 0 ]
+}
+
+@test "lachesis: a repo's issue under also_eligible is launched, and next_issue is asked once per tick" {
+    lachesis_on
+    jq -n '{issue: {repo: "alexsiri7/otherrepo", number: 99}, reason: "selected", explanation: "x",
+      also_eligible: [{repo: "alexsiri7/TestProj", number: 43, title: "t"}]}' > "$T/fixtures/next.json"
+    issue_json 43
+    mkdir -p "$T/base/otherrepo/.git"
+    issue_json 99
+
+    lachesis_pick testproj
+    [ "$SUMMARY_ACTION" = "pickup #43" ]
+    lachesis_pick otherrepo
+    [ "$SUMMARY_ACTION" = "pickup #99" ]
+    [ "$(grep -c '^next_issue' "$LACHESIS_ARGV")" -eq 1 ]
+}
+
+@test "lachesis: nothing offered for the repo launches nothing and says why" {
+    lachesis_on
+    echo '{"issue": null, "reason": "budget_spent", "explanation": "The sprint budget is spent.", "blocked": []}' > "$T/fixtures/next.json"
+
+    lachesis_pick testproj
+
+    [ "$SUMMARY_ACTION" = "none" ]
+    [ "$SUMMARY_NOTE" = "Lachesis offers nothing here: budget_spent" ]
+    [ "$(gh_calls -- 'issue edit')" -eq 0 ]
+    grep -q "Lachesis next_issue: The sprint budget is spent." "$LOGGED"
+}
+
+@test "lachesis: an unreachable Lachesis launches nothing (no fallback to labels)" {
+    lachesis_on
+    echo '[{"number":20}]' > "$T/fixtures/queued.json"
+    export LACHESIS_NEXT_RC=2
+
+    lachesis_pick testproj
+
+    [ "$SUMMARY_ACTION" = "none" ]
+    [ "$(gh_calls -- 'issue edit')" -eq 0 ]
+    grep -q "Lachesis next_issue could not be read" "$LACHESIS_ARGV" "$LOGGED"
+}
+
+@test "lachesis: a busy repo keeps the no-stacking guard and does not ask Lachesis" {
+    lachesis_on
+    next_offers alexsiri7/testproj 42
+    archon_run_active_msg() { echo "archon-ship fix #7"; }
+
+    lachesis_pick testproj
+
+    [ "$SUMMARY_ACTION" = "skip-running" ]
+    [ ! -s "$LACHESIS_ARGV" ]
+}
+
+@test "lachesis: the rate-limit hold still launches nothing" {
+    lachesis_on
+    next_offers alexsiri7/testproj 42
+    # shellcheck disable=SC2034  # read by ship_slot_busy
+    QUOTA_HELD=1
+
+    lachesis_pick testproj
+
+    [ "$SUMMARY_ACTION" = "skip-quota" ]
+    [ "$(gh_calls -- 'issue edit')" -eq 0 ]
+}
+
+@test "lachesis: a stranger's comment is a question for the author, asked once" {
+    lachesis_on
+    next_offers alexsiri7/testproj 42
+    issue_json 42
+    printf 'alexsiri7\nstranger\n' > "$T/fixtures/comments-42"
+
+    lachesis_pick testproj
+    LACHESIS_NEXT_STATE=""
+    lachesis_pick testproj
+
+    [ "$SUMMARY_ACTION" = "none" ]
+    [ "$(gh_calls -- 'issue edit')" -eq 0 ]
+    [ "$(grep -c '^ask_question .*"blocks":\[42\]' "$LACHESIS_ARGV")" -eq 1 ]
+    grep -q "#42 — comments by untrusted authors, waiting on the author in Lachesis" "$LOGGED"
+}
+
+@test "lachesis: comments that cannot be read are no question, only a skipped tick" {
+    lachesis_on
+    next_offers alexsiri7/testproj 42
+    issue_json 42
+    export GH_COMMENTS_FAIL=1
+
+    lachesis_pick testproj
+
+    [ "$SUMMARY_ACTION" = "none" ]
+    [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 0 ]
+    grep -q "#42 — could not read its comments" "$LOGGED"
+}
+
+@test "lachesis: a stranger's issue is a question for the author and never launched" {
+    lachesis_on
+    next_offers alexsiri7/testproj 42
+    issue_json 42 stranger
+
+    lachesis_pick testproj
+
+    [ "$SUMMARY_ACTION" = "none" ]
+    [ "$(gh_calls -- 'issue edit')" -eq 0 ]
+    grep -q '^ask_question .*"blocks":\[42\]' "$LACHESIS_ARGV"
+}
+
+@test "lachesis: the ship circuit breaker parks through a Lachesis question" {
+    lachesis_on
+    next_offers alexsiri7/testproj 42
+    issue_json 42
+    ship_breaker_check() { echo "$SHIP_BREAKER_ASK" > "$T/breaker-ask"; return 1; }
+
+    lachesis_pick testproj
+
+    [ "$SUMMARY_ACTION" = "none" ]
+    [ "$(cat "$T/breaker-ask")" = lachesis_ask ]
+    grep -q "#42 — parked by the ship circuit breaker" "$LOGGED"
+}
+
+@test "lachesis: factory-gap and requirements-gap labels gate nothing" {
+    lachesis_on
+    next_offers alexsiri7/testproj 42
+    issue_json 42 alexsiri7 '["factory-gap","requirements-gap","manual-review"]'
+
+    lachesis_pick testproj
+
+    [ "$SUMMARY_ACTION" = "pickup #42" ]
+}
+
+@test "lachesis: triage waits while Lachesis holds work for budget or pace" {
+    lachesis_on
+    echo '{"issue": null, "reason": "over_pace", "explanation": "ahead of pace"}' > "$T/fixtures/next.json"
+    run ! lachesis_may_triage
+    # shellcheck disable=SC2034  # read by lachesis_next_fetch
+    LACHESIS_NEXT_STATE=""
+    echo '{"issue": null, "reason": "all_waiting", "explanation": "x"}' > "$T/fixtures/next.json"
+    lachesis_may_triage
+}
+
+@test "lachesis off: triage is not gated and Lachesis is never asked" {
+    load_fn lachesis_may_triage
+    export LACHESIS_CALL_CMD="$T/no-such-lachesis"
+    lachesis_may_triage
+}
+
+@test "lachesis: a stale in-progress issue is released to Lachesis, not re-queued or parked" {
+    lachesis_on
+    echo '[{"number":71}]' > "$T/fixtures/in-progress.json"
+    echo '2026-01-01T00:00:00Z' > "$T/fixtures/events-71"
+    echo '["bug","factory-gap","archon:in-progress"]' > "$T/fixtures/labels-71"
+    load_fn unstick_stale
+
+    unstick_stale testproj
+
+    grep -q -- "issue edit 71 --repo alexsiri7/testproj --remove-label archon:in-progress$" "$GH_ARGV"
+    [ "$(gh_calls -- 'archon:queued')" -eq 0 ]
+    [ "$(gh_calls -- 'archon:skipped')" -eq 0 ]
+    [ "$SUMMARY_STALE" -eq 1 ]
 }

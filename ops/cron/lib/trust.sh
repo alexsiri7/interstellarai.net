@@ -288,7 +288,8 @@ trust_filter_prs() {
 # trust_comments_ok <project> issue|pr <number> — true when every comment (and
 # for a PR every review and review comment) is by a trusted author. Call right
 # before an archon run that reads the thread. Fails closed: a listing that
-# cannot be read counts as untrusted for this tick. A stranger's comment blocks
+# cannot be read counts as untrusted for this tick (returns 2, so a caller can
+# tell it from a stranger's comment, 1). A stranger's comment blocks
 # the item until the owner deletes it (hiding it does not: the API still
 # returns it).
 trust_comments_ok() {
@@ -299,7 +300,7 @@ trust_comments_ok() {
   for ep in "${eps[@]}"; do
     if ! logins=$(gh api --paginate "$ep" --jq '.[].user.login // ""' 2>/dev/null); then
       _trust_log "$project: $kind #$num — could not list $ep, not starting archon this tick"
-      return 1
+      return 2
     fi
     [ -n "$logins" ] || continue
     # Count what the loop actually judged: a loop that could not read its
@@ -313,7 +314,7 @@ trust_comments_ok() {
     done < <(printf '%s\n' "$logins")
     if [ "$got" != "$want" ] || [ "$want" = 0 ]; then
       _trust_log "$project: $kind #$num — comment check incomplete, not starting archon this tick"
-      return 1
+      return 2
     fi
   done
   [ -z "$bad" ] && return 0

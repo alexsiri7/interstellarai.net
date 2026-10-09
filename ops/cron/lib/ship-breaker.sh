@@ -117,6 +117,25 @@ ship_breaker_check() {
     *)
       why="its last ${verdict#failed:} archon-ship runs all failed (rate-limit failures not counted). Read the run logs under .archon-logs/cron-issue-$issue-* before re-queuing." ;;
   esac
+  # With Lachesis pickup on (lib/lachesis.sh) labels gate nothing: the park is
+  # a question for the author, which labels the issue needs-author so
+  # next_issue passes over it until it is answered. The marker travels in the
+  # question's comment, so the answered issue gets fresh attempts. A question
+  # that could not be recorded is not a park: no launch, retried next tick.
+  if [ -n "${SHIP_BREAKER_ASK:-}" ]; then
+    if "$SHIP_BREAKER_ASK" "$project" "$issue" \
+        "archon-ship keeps failing on #$issue. Look at why, then answer this question to let the factory try it again." \
+        "Parked by the archon-ship circuit breaker: ${why}
+
+Only runs after this comment will count.
+
+${SHIP_BREAKER_MARKER}"; then
+      echo "$(date -Is) [ship-breaker] $project: #$issue — circuit open ($verdict), asked the author in Lachesis"
+    else
+      echo "$(date -Is) [ship-breaker] $project: #$issue — circuit open ($verdict), could not record the question in Lachesis; not launching, will retry next tick"
+    fi
+    return 1
+  fi
   echo "$(date -Is) [ship-breaker] $project: #$issue — circuit open ($verdict), parking as manual-review + archon:skipped"
   # The marker comment resets the count, so it is only posted once the park
   # holds: posted after a failed relabel, the next tick would count no runs
