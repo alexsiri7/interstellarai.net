@@ -13,6 +13,11 @@
 # question (interstellarai.net #157). Off, or under bats without
 # LACHESIS_FLAG_TEST, nothing here changes what the factory does.
 #
+# A second switch routes every archon launch to the Claude account Lachesis
+# route_run names (interstellarai.net #156; lib/quota-pause.sh):
+#   $LACHESIS_ROUTE_FLAG (default ~/.config/archon-cron/lachesis-route), one line
+#   LACHESIS_ROUTE=on
+#
 # lachesis_call runs lib/lachesis_call.py with the factory token
 # (LACHESIS_FACTORY_TOKEN, read from secrets.env on its own: the rest of
 # secrets.env never reaches the environment of the archon runs these scripts
@@ -22,6 +27,7 @@
 _LACHESIS_SH=1
 
 LACHESIS_PICKUP_FLAG="${LACHESIS_PICKUP_FLAG:-$HOME/.config/archon-cron/lachesis-pickup}"
+LACHESIS_ROUTE_FLAG="${LACHESIS_ROUTE_FLAG:-$HOME/.config/archon-cron/lachesis-route}"
 LACHESIS_STATE_DIR="${LACHESIS_STATE_DIR:-$HOME/.local/state/archon-cron/lachesis}"
 
 # lachesis_flag_on <file> <VAR> — true when <file>'s last VAR= line says on.
@@ -33,6 +39,18 @@ lachesis_flag_on() {
 }
 
 lachesis_pickup_enabled() { lachesis_flag_on "$LACHESIS_PICKUP_FLAG" LACHESIS_PICKUP; }
+lachesis_route_enabled() { lachesis_flag_on "$LACHESIS_ROUTE_FLAG" LACHESIS_ROUTE; }
+
+# lachesis_kind_for <workflow> — Lachesis's kind of work for an archon
+# workflow, as route_run and report_usage take it (lachesis_report.py KINDS).
+lachesis_kind_for() {
+  case "$1" in
+    archon-triage-issue) echo triage ;;
+    archon-review|archon-smart-pr-review|archon-*-audit) echo audit ;;
+    archon-architect) echo "spec work" ;;
+    *) echo implementation ;;
+  esac
+}
 
 # lachesis_token — LACHESIS_FACTORY_TOKEN from the environment or secrets.env.
 lachesis_token() {

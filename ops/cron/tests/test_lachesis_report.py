@@ -75,13 +75,15 @@ class UsageTest(unittest.TestCase):
             """
             CREATE TABLE remote_agent_codebases (id TEXT, name TEXT);
             CREATE TABLE remote_agent_workflow_runs (id TEXT, codebase_id TEXT, workflow_name TEXT,
-                user_message TEXT, status TEXT, completed_at TEXT);
+                user_message TEXT, status TEXT, completed_at TEXT, started_at TEXT);
             CREATE TABLE remote_agent_workflow_events (workflow_run_id TEXT, event_type TEXT,
                 data TEXT);
             INSERT INTO remote_agent_codebases VALUES ('c1', 'alexsiri7/kith');
             INSERT INTO remote_agent_workflow_runs VALUES
-                ('r1', 'c1', 'archon-ship', 'fix #6', 'completed', '2026-10-06 10:00:00'),
-                ('r0', 'c1', 'archon-ship', 'fix #5', 'completed', '2026-10-01 10:00:00');
+                ('r1', 'c1', 'archon-ship', 'fix #6', 'completed', '2026-10-06 10:00:00',
+                 '2026-10-06 09:00:00'),
+                ('r0', 'c1', 'archon-ship', 'fix #5', 'completed', '2026-10-01 10:00:00',
+                 '2026-10-01 09:00:00');
             """
         )
         events = [
@@ -117,6 +119,29 @@ class UsageTest(unittest.TestCase):
         run = {"workflow_name": "archon-security-audit", "user_message": "audit everything",
                "repo": "alexsiri7/kith", "model": "m", "tokens_in": 1, "tokens_out": 1}
         self.assertIsNone(lr.usage_report(run, "factory"))
+
+
+class LedgerTest(unittest.TestCase):
+    START = int(datetime(2026, 10, 6, 9, tzinfo=UTC).timestamp())
+    RUN = {"workflow_name": "archon-ship", "user_message": "fix #6", "started_at": "2026-10-06 09:00:00"}
+
+    def test_the_launch_recorded_for_the_run_names_its_account(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            path = f"{d}/ledger.tsv"
+            Path(path).write_text(
+                f"{self.START - 7200}\tmain\tarchon-ship\tfix #6\n"  # an earlier run's launch
+                f"{self.START - 3}\tmain\tarchon-ship\tfix #6\n"
+                f"{self.START - 2}\tmain\tarchon-triage-issue\ttriage #6\n"
+                "garbage line\n"
+            )
+            ledger = lr.read_ledger(path)
+        self.assertEqual(lr.run_account(self.RUN, ledger, "factory"), "main")
+
+    def test_a_run_the_ledger_does_not_name_is_on_the_default_account(self) -> None:
+        ledger = [(self.START - 7200, "main", "archon-ship", "fix #6"),
+                  (self.START, "main", "archon-ship", "fix #7")]
+        self.assertEqual(lr.run_account(self.RUN, ledger, "factory"), "factory")
+        self.assertEqual(lr.read_ledger("/nonexistent/ledger.tsv"), [])
 
 
 if __name__ == "__main__":

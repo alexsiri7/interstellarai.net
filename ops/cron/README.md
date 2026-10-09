@@ -27,6 +27,10 @@ Required keys (see individual scripts for which ones each uses):
 
 Set perms: `chmod 600 ~/.config/archon-cron/secrets.env`.
 
+### Lachesis account routing (`LACHESIS_ROUTE`, off by default)
+
+With `~/.config/archon-cron/lachesis-route` holding `LACHESIS_ROUTE=on`, every archon launch (the shim, and each launching script's `quota_may_launch`) asks Lachesis `route_run` for the workflow's kind of work and runs on the Claude account it names, `factory` or `main` (`--account main` to `archon-as-archon`) (#156). No Claude account named (Requesty or none): no launch, with Lachesis's reason in the log. `main` also needs the owner's `ARCHON_MAIN_ACCOUNT=on`. An account whose own last run hit the rate limit is held until its reset (the local safety net when fuel is stale); the other account is not. `route_run` unreadable: the local rules below decide, as with the switch off. Whatever the switch, the shim records each launch's account in `~/.local/state/archon-cron/run-accounts.tsv`, which `lachesis-report.sh` reads for `report_usage`'s `account`.
+
 ### Lachesis pickup (`LACHESIS_PICKUP`, off by default)
 
 With `~/.config/archon-cron/lachesis-pickup` holding the line `LACHESIS_PICKUP=on`, `issue-pickup-cron.sh` takes its work from Lachesis `next_issue` (one call per tick, across every registered repo) instead of the `archon:queued` label scan (#157). `auto_queue`, `promote_unblocked` and `pick_and_fire` are skipped; each repo with a free slot launches the issue `next_issue` offers it. Labels record run state only (`archon:in-progress`, `archon:done`, `archon:failed`): human-intent labels such as `factory-gap` or `requirements-gap` gate nothing, and a stale in-progress issue is released to Lachesis rather than re-queued. Every wait for the author is a Lachesis question (needs-author): a stranger's issue or comment (the trust gate stays), a ship circuit-breaker park, an unconfirmed "No delivery needed" verdict. Triage waits while `next_issue` holds work for budget or pace. Lachesis unreachable: nothing is launched that tick. Remove the file (or set `off`) to return to the label queue. The switch lives outside this repo so archon cannot flip it.
