@@ -18,6 +18,12 @@
 #
 # A DB that cannot be read lifts nothing and holds nothing (returns 0): the
 # per-issue breaker is the gate that fails closed.
+#
+# While held, a launch may still go to the owner's main account when the owner
+# has turned that on and main is within its paced cap (lib/main-account.sh);
+# the shim then runs it with --account main. Known gap: a main-account run that
+# itself hits the limit (the owner's own use took main to 100%) is the newest
+# such error and holds the factory until main's reset.
 
 [ -n "${_QUOTA_PAUSE_SH:-}" ] && return 0
 _QUOTA_PAUSE_SH=1
@@ -67,11 +73,28 @@ quota_pause_until() {
   if [ "$until" -gt "$(date +%s)" ]; then echo "$until"; else echo 0; fi
 }
 
-# quota_may_launch <script-name> — false (and one log line) while held.
-quota_may_launch() {
+# quota_launch_account <script-name> — the account a launch may use now, in
+# QUOTA_ACCOUNT: factory when it is not held; main while it is held and the
+# owner's main account is on and within its paced cap (lib/main-account.sh).
+# False, with one log line, when neither may launch.
+QUOTA_ACCOUNT=factory
+quota_launch_account() {
   local until
+  QUOTA_ACCOUNT=factory
   until=$(quota_pause_until)
   [ "${until:-0}" -gt 0 ] || return 0
+  # shellcheck source=lib/main-account.sh
+  source "$(dirname "${BASH_SOURCE[0]}")/main-account.sh"
+  if main_account_may_launch "$1"; then
+    QUOTA_ACCOUNT=main
+    return 0
+  fi
   echo "$(date -Is) [quota-pause] $1: Claude rate limit in effect until $(date -d "@$until" -Is) — no archon launches"
   return 1
+}
+
+# quota_may_launch <script-name> — false (and one log line) while held and
+# main may not take the launch either.
+quota_may_launch() {
+  quota_launch_account "$1"
 }

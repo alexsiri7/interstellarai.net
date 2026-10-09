@@ -4,7 +4,14 @@
 # ops/host/archon-user/install.sh; /etc/sudoers.d/archon-user lets `asiri` run
 # this file as user `archon` (never as root):
 #
-#   sudo -n -u archon /usr/local/bin/archon-as-archon <verb> [args...]
+#   sudo -n -u archon /usr/local/bin/archon-as-archon [--account main] <verb> [args...]
+#
+# --account main runs the verb on the owner's main Claude account instead of
+# the factory's: the token from claude-main.env (install.sh --set-claude-token
+# --account main) and its own config dir, ~/.claude-main, which carries the
+# paced budget guard and the plan-usage.json the cron's launch gate reads
+# (ops/cron/lib/main-account.sh). Without it, or with --account factory, the
+# factory's own credential as before.
 #
 # (Since --install-sudo-ops the drop-in also lets asiri run anything as archon,
 # NOSETENV, for interactive and assistant use. The cron path stays here: it is
@@ -45,6 +52,7 @@
 #                                    probed on top of the built-in list
 #
 # Exit codes: 64 refused (bad verb/argument), 65 not running as archon,
+# 69 --account main without its credential or config dir,
 # 66 project not in /etc/archon-user/projects, otherwise the command's own.
 #
 # Test hook: ARCHON_AS_TEST=1 (honoured only when not started by sudo, i.e.
@@ -84,6 +92,7 @@ REPOS_DIR="$ARCHON_HOME_DIR/repos"
 # 1777, plain /tmp semantics, so the selftest allows exactly this path.
 TMP_BIND_SRC="$OWNER_BASE/.tmp-root"
 CLAUDE_TOKEN_ENV="$ARCHON_HOME_DIR/.config/archon-user/claude.env"
+CLAUDE_CONFIG_DIR_ARG=""
 
 # Debian's daily dpkg/apt/alternatives backups in /var/backups: world-readable
 # by design on every Ubuntu host and only package lists, so the selftest sweep
@@ -170,6 +179,7 @@ archon_env() {
         tok=$(sed -nE 's/^CLAUDE_CODE_OAUTH_TOKEN=["'\'']?([A-Za-z0-9._~+/=-]+)["'\'']?[[:space:]]*$/\1/p' "$CLAUDE_TOKEN_ENV" | tail -n 1)
         [ -n "$tok" ] && ENV+=("CLAUDE_CODE_OAUTH_TOKEN=$tok")
     fi
+    [ -n "$CLAUDE_CONFIG_DIR_ARG" ] && ENV+=("CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR_ARG")
     return 0
 }
 
@@ -370,9 +380,18 @@ verb_gh_probe() {
     else
         echo "FAIL gh: not authenticated (sudo ops/host/archon-user/install.sh --set-gh-token)"; return 1
     fi
+    local login
     tok=$(sub_in "$ARCHON_HOME_DIR" gh auth token 2>/dev/null || true)
+    login=$(sub_in "$ARCHON_HOME_DIR" gh api user --jq .login 2>/dev/null || true)
     case "$tok" in
         github_pat_*) echo "PASS gh: fine-grained token (github_pat_...)" ;;
+        # A classic token is fine only on the factory's own machine user: its
+        # reach is the repos it collaborates on, which the checks below verify.
+        ghp_*) if [ -n "$login" ] && [ "$login" != "$GH_OWNER" ]; then
+                   echo "PASS gh: classic token of machine user $login (reach limited by collaborator access)"
+               else
+                   echo "FAIL gh: classic token on $GH_OWNER's own account — it reaches every repo; use the machine user"; rc=1
+               fi ;;
         *) echo "FAIL gh: not a fine-grained PAT (${tok:0:4}...) — use one limited to the factory repos"; rc=1 ;;
     esac
     unset tok
@@ -664,6 +683,21 @@ verb_selftest() {
 
 # ------------------------------------------------------------- dispatch ----
 load_projects
+if [ "${1:-}" = --account ]; then
+    case "${2:-}" in
+        factory) ;;
+        main)
+            CLAUDE_TOKEN_ENV="$ARCHON_HOME_DIR/.config/archon-user/claude-main.env"
+            CLAUDE_CONFIG_DIR_ARG="$ARCHON_HOME_DIR/.claude-main"
+            # Never fall back to the factory's token or config dir: a run meant
+            # for main that silently spent the factory would hide the gate.
+            [ -r "$CLAUDE_TOKEN_ENV" ] || die 69 "no main-account credential ($CLAUDE_TOKEN_ENV) — run: sudo ops/host/archon-user/install.sh --set-claude-token --account main"
+            [ -d "$CLAUDE_CONFIG_DIR_ARG" ] || die 69 "no main-account config dir ($CLAUDE_CONFIG_DIR_ARG) — run: sudo ops/host/archon-user/install.sh --set-claude-token --account main"
+            ;;
+        *) refuse "account '${2:-}'" ;;
+    esac
+    shift 2
+fi
 verb="${1:-}"; shift || true
 case "$verb" in
     workflow)             verb_workflow "$@" ;;

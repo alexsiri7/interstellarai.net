@@ -24,15 +24,23 @@ real="${ARCHON_REAL_BIN:-/mnt/ext-fast/archon/packages/cli/src/cli.ts}"
 # can miss: while the Claude account is rate limited (lib/quota-pause.sh)
 # `workflow run` is refused like a drain (exit 75). The launching scripts check
 # quota_may_launch themselves first; this catches the rest (pipeline-health's
-# fixers). ARCHON_QUOTA_OVERRIDE=1 lets the owner start a run by hand anyway.
+# fixers). While held, a run main may take (lib/main-account.sh) goes to the
+# wrapper as --account main. ARCHON_QUOTA_OVERRIDE=1 lets the owner start a
+# run by hand anyway.
 if [ "$mode" = archon ] && [ "${1:-}" = workflow ] && [ "${2:-}" = run ] \
         && [ "${ARCHON_QUOTA_OVERRIDE:-}" != 1 ]; then
     shim_lib="$(dirname "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")")"
     if ARCHON_RUN_AS=archon source "$shim_lib/ship-breaker.sh" 2>/dev/null \
             && source "$shim_lib/quota-pause.sh" 2>/dev/null; then
-        if ! held=$(ARCHON_RUN_AS=archon quota_may_launch "archon workflow run"); then
+        if ! held=$(ARCHON_RUN_AS=archon quota_launch_account "archon workflow run"); then
             echo "archon: refusing 'workflow run' — ${held#*: }" >&2
             exit 75
+        fi
+        # Not held: no output, the factory runs it. Held and main took it:
+        # its one [main-account] line (QUOTA_ACCOUNT cannot leave the $(...)).
+        if [[ "$held" == *"[main-account]"* ]]; then
+            echo "$held" >&2
+            set -- --account main "$@"
         fi
     fi
 fi
