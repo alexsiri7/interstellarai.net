@@ -296,7 +296,7 @@ How it decides, per launch (`ops/cron/lib/main-account.sh`, called from
 `plan-usage.json` (refreshed when older than 30 minutes by the wrapper's `fuel-probe`, one
 1-token haiku request whose rate-limit headers carry the account-wide windows, since the
 owner's own use elsewhere never reaches it and headless sessions never write it; `lachesis-report`
-uses the same probe for both accounts) must be under the paced caps from that same
+uses the same probe for the factory, and for main only while it is turned on) must be under the paced caps from that same
 `budget-guard.json`. The shim then hands the wrapper `--account main`, which uses
 main's token and `CLAUDE_CONFIG_DIR=~/.claude-main`, so the plugin's paced guard also stops
 a session that crosses the cap mid-run. To change the caps, edit that `budget-guard.json`
@@ -431,6 +431,7 @@ These were grepped for `secrets.env|railway|psql|SUPABASE|CLOUDFLARE|wrangler|DA
 |---|---|---|
 | `install.sh` | — | prepare / `--set-gh-token` / `--set-claude-token` / `--[no-]allow-all-repos-token` / `--drain` / `--cutover` / `--rollback` / `--status` / `--dry-run` |
 | `archon-as-archon` | `/usr/local/bin/archon-as-archon` (root 0755) | the wrapper |
+| `fuel_probe.py` | `/usr/local/lib/archon-user/fuel_probe.py` (root 0644) | the `fuel-probe` verb's rate-limit-header probe (#165) |
 | `sudoers-archon-user` | `/etc/sudoers.d/archon-user` (0440) | asiri → archon: the wrapper, and `NOPASSWD:NOSETENV: ALL`; asiri → root: `systemctl restart archon-serve.service` and the three entrypoints below |
 | `../archon-ops/archon-ops` | `/usr/local/sbin/archon-{user-install,host-install,ops-promote}` (root 0755, three copies) | run the snapshot's installers; promote the snapshot (`/usr/local/lib/archon-ops`) |
 | `archon-serve.service` | `/etc/systemd/system/archon-serve.service` | the server as archon |
