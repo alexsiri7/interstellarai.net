@@ -67,6 +67,111 @@ class FuelTest(unittest.TestCase):
         )
 
 
+class FuelRefreshTest(unittest.TestCase):
+    """report_fuel_sources: probe a reading older than the refresh threshold, escalate
+    an account still stale after that once per episode."""
+
+    WEEK_END = NOW + timedelta(days=3)
+
+    def setUp(self) -> None:
+        self.dir = Path(tempfile.mkdtemp())
+        self.path = str(self.dir / "plan-usage.json")
+        self.probed: list[str] = []
+        self.alerts: list[tuple[str, str]] = []
+        self.reported: list[dict] = []
+        self.probe_writes = False
+        self.alert_delivers = True
+
+    def _write(self, age: timedelta) -> None:
+        _record(self.dir, "plan-usage.json", (NOW - age).isoformat(), 40, self.WEEK_END)
+
+    def probe(self, account: str) -> tuple[bool, str]:
+        self.probed.append(account)
+        if self.probe_writes:
+            self._write(timedelta(0))
+            return True, ""
+        return False, "x"
+
+    def alert(self, title: str, message: str) -> bool:
+        self.alerts.append((title, message))
+        return self.alert_delivers
+
+    def call(self, tool: str, arguments: dict) -> bool:
+        self.reported.append(arguments)
+        return True
+
+    def run_once(self, escalated: list[str], account: str = "factory", dry_run: bool = False) -> list[str]:
+        return lr.report_fuel_sources(
+            {account: [self.path]},
+            NOW,
+            max_age=timedelta(hours=2),
+            refresh=timedelta(minutes=25),
+            call=self.call,
+            escalated=escalated,
+            dry_run=dry_run,
+            probe=self.probe,
+            alert=self.alert,
+        )
+
+    def test_a_reading_past_the_refresh_threshold_is_probed_and_still_reported(self) -> None:
+        self._write(timedelta(minutes=40))
+        self.assertEqual(self.run_once([]), [])
+        self.assertEqual(self.probed, ["factory"])
+        self.assertEqual([r["account"] for r in self.reported], ["factory"])
+        self.assertEqual(self.alerts, [])
+
+    def test_a_fresh_reading_is_not_probed(self) -> None:
+        self._write(timedelta(minutes=10))
+        self.run_once([])
+        self.assertEqual(self.probed, [])
+        self.assertEqual(len(self.reported), 1)
+
+    def test_an_account_the_door_cannot_probe_is_never_probed(self) -> None:
+        self.run_once([], account="other")
+        self.assertEqual(self.probed, [])
+
+    def test_the_probes_fresh_reading_is_reported_and_nothing_escalated(self) -> None:
+        self.probe_writes = True
+        self.assertEqual(self.run_once([], account="main"), [])
+        self.assertEqual(self.probed, ["main"])
+        self.assertEqual(self.reported[0]["weekly_used_percent"], 40)
+        self.assertEqual(self.alerts, [])
+
+    def test_a_stale_episode_is_escalated_once_and_rearmed_by_a_current_reading(self) -> None:
+        escalated = self.run_once([])
+        self.assertEqual(escalated, ["factory"])
+        self.assertEqual(len(self.alerts), 1)
+        self.assertIn("factory", self.alerts[0][0])
+        self.assertIn("Probe: x", self.alerts[0][1])
+
+        escalated = self.run_once(escalated)
+        self.assertEqual(escalated, ["factory"])
+        self.assertEqual(len(self.alerts), 1)
+
+        self._write(timedelta(minutes=5))
+        escalated = self.run_once(escalated)
+        self.assertEqual(escalated, [])
+
+        Path(self.path).unlink()
+        self.assertEqual(self.run_once(escalated), ["factory"])
+        self.assertEqual(len(self.alerts), 2)
+
+    def test_an_undelivered_escalation_is_retried_next_tick(self) -> None:
+        self.alert_delivers = False
+        self.assertEqual(self.run_once([]), [])
+        self.assertEqual(self.run_once([]), [])
+        self.assertEqual(len(self.alerts), 2)
+
+    def test_an_account_no_longer_in_the_sources_is_dropped(self) -> None:
+        self._write(timedelta(minutes=5))
+        self.assertEqual(self.run_once(["gone"]), [])
+
+    def test_dry_run_neither_probes_nor_alerts(self) -> None:
+        self.assertEqual(self.run_once([], dry_run=True), [])
+        self.assertEqual(self.probed, [])
+        self.assertEqual(self.alerts, [])
+
+
 class UsageTest(unittest.TestCase):
     def _db(self, d: str) -> str:
         path = f"{d}/archon.db"

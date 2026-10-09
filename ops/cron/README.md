@@ -22,8 +22,8 @@ Required keys (see individual scripts for which ones each uses):
 
 - `ANNIE_DB_URL`, `RELI_DB_URL`, `FILMDUEL_DB_URL`, `KINDRED_DB_URL`, `LACHESIS_DB_URL`, `MUSENMINGLE_DB_URL` — Supabase connection strings used by `backup-dbs.sh` (`KINDRED_DB_URL` serves two entries: `kindred` and `kindred-auth`). Missing entries cause that DB to be skipped (not a hard failure). The URL is parsed into the libpq `PG*` environment (`lib/pg-backup.sh`) so it never appears on a command line.
 - `MUSENMINGLE_DB_URL` — read-only use by `musenmingle-digest.sh` (the `events` schema of Muse & Mingle, formerly Thaleia). Falls back to `THALEIA_DB_URL` while secrets.env still carries only the old name.
-- `LACHESIS_FACTORY_TOKEN` — a Lachesis factory token (`create_factory_token`), used by `lachesis-report.sh` to report fuel and run usage to Lachesis, and by `lib/lachesis.sh` (only that line is read) when Lachesis pickup is on. Without it nothing is reported.
-- `NTFY_TOPIC` — private ntfy.sh topic for notifications. No fallback default; scripts fail loud if missing.
+- `LACHESIS_FACTORY_TOKEN` — a Lachesis factory token (`create_factory_token`), used by `lachesis-report.sh` to report fuel and run usage to Lachesis, and by `lib/lachesis.sh` (only that line is read) when Lachesis pickup is on. Without it nothing is reported. The plan-usage plugin never writes fuel in headless sessions, so `lachesis-report.sh` refreshes an account's `plan-usage.json` older than 25 minutes itself with `archon-as-archon [--account main] fuel-probe` (one 1-token haiku request, #165). That verb exists only once the owner has run `sudo -n /usr/local/sbin/archon-ops-promote` and then `sudo -n /usr/local/sbin/archon-user-install`; main also needs its credential (`--set-claude-token --account main`).
+- `NTFY_TOPIC` — private ntfy.sh topic for notifications. No fallback default; scripts fail loud if missing. `lachesis-report.sh` sends one escalation per account per stale-fuel episode (no current reading within 2h, even after a probe), naming why the probe failed.
 
 Set perms: `chmod 600 ~/.config/archon-cron/secrets.env`.
 

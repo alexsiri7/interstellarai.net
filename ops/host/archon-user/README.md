@@ -293,8 +293,10 @@ window stops at 60%. Off until the owner turns it on.
 
 How it decides, per launch (`ops/cron/lib/main-account.sh`, called from
 `quota-pause.sh` and the shim): only while the factory is held; then main's
-`plan-usage.json` (refreshed by one haiku probe when older than 30 minutes, since the
-owner's own use elsewhere never reaches it) must be under the paced caps from that same
+`plan-usage.json` (refreshed when older than 30 minutes by the wrapper's `fuel-probe`, one
+1-token haiku request whose rate-limit headers carry the account-wide windows, since the
+owner's own use elsewhere never reaches it and headless sessions never write it; `lachesis-report`
+uses the same probe for both accounts) must be under the paced caps from that same
 `budget-guard.json`. The shim then hands the wrapper `--account main`, which uses
 main's token and `CLAUDE_CONFIG_DIR=~/.claude-main`, so the plugin's paced guard also stops
 a session that crosses the cap mid-run. To change the caps, edit that `budget-guard.json`

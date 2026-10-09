@@ -11,6 +11,12 @@ Run by lachesis-report.sh every 15 minutes, as asiri:
    real reading and its time instead of a days-old figure stamped as new (until
    2026-10-08 a file last written on Oct 6 was re-reported every 15 minutes, and
    the main account read 27% used while it was at 38%).
+   The plugin never writes in headless sessions (#165), so when factory or main
+   has no reading newer than LACHESIS_FUEL_REFRESH_MINUTES, one
+   `archon-as-archon [--account main] fuel-probe` refreshes it first from the
+   API's rate-limit headers. An account still without a current reading after
+   that raises one ntfy escalation per stale episode (re-armed once a current
+   reading is reported again).
 
 2. Usage. Every archon workflow run that finished since the last report is read
    from archon.db: its repository, the issue or pull request its message names,
@@ -23,7 +29,8 @@ Run by lachesis-report.sh every 15 minutes, as asiri:
    does not track, are skipped.
 
 Lachesis is called over MCP (streamable HTTP) with a factory token
-(LACHESIS_FACTORY_TOKEN). Stdlib only. Nothing here spends Claude tokens.
+(LACHESIS_FACTORY_TOKEN). Stdlib only. The only Claude spend is that fuel probe,
+one 1-token haiku request.
 
 Env:
   LACHESIS_URL            default https://lachesis.interstellarai.net/mcp
@@ -32,6 +39,9 @@ Env:
   LACHESIS_RUN_ACCOUNT    default factory: the account of a run the ledger does not name
   LACHESIS_RUN_LEDGER     default ~/.local/state/archon-cron/run-accounts.tsv
   LACHESIS_FUEL_MAX_AGE_HOURS  default 2: older plan-usage.json records are not reported
+  LACHESIS_FUEL_REFRESH_MINUTES  default 25: older readings are refreshed by a fuel probe
+  NTFY_TOPIC              ntfy.sh topic for the stale-fuel escalation (secrets.env)
+  ARCHON_AS_WRAPPER       default /usr/local/bin/archon-as-archon
   ARCHON_DB               default /mnt/ext-fast/archon-home/.archon/archon.db
   LACHESIS_REPORT_STATE   default ~/.local/state/archon-cron/lachesis-report.json
   --dry-run               print what would be reported; call nothing, save nothing
@@ -43,9 +53,11 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -53,8 +65,8 @@ from typing import Any
 DEFAULT_URL = "https://lachesis.interstellarai.net/mcp"
 DEFAULT_DB = "/mnt/ext-fast/archon-home/.archon/archon.db"
 # The factory account is the archon user's; asiri's own login is the author's main
-# account, whose fuel this keeps current whenever Claude Code is used there, as do
-# the factory's runs on main (archon's ~/.claude-main, lib/main-account.sh).
+# account. The fuel probe keeps both current through the factory door (archon's
+# ~/.claude and ~/.claude-main), and Claude Code used in asiri's own sessions may too.
 DEFAULT_FUEL = (
     "factory=/mnt/ext-fast/archon-home/.claude/plan-usage.json;"
     f"main={Path.home()}/.claude/plan-usage.json:/mnt/ext-fast/archon-home/.claude-main/plan-usage.json"
@@ -71,6 +83,9 @@ KINDS = {
     "archon-requirements-audit": "audit",
     "archon-architect": "spec work",
 }
+
+# The accounts the factory door can probe, and the wrapper flags that select them.
+PROBED: dict[str, list[str]] = {"factory": [], "main": ["--account", "main"]}
 
 _NUMBER = re.compile(r"#(\d+)")
 
@@ -202,6 +217,104 @@ def latest_fuel(
     return arguments
 
 
+def probe_fuel(account: str) -> tuple[bool, str]:
+    """Refresh *account*'s plan-usage.json with one fuel-probe; (ok, why not)."""
+    wrapper = os.environ.get("ARCHON_AS_WRAPPER", "/usr/local/bin/archon-as-archon")
+    try:
+        done = subprocess.run(
+            ["sudo", "-n", "-u", "archon", wrapper, *PROBED[account], "fuel-probe"],
+            cwd="/",
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return False, str(exc)
+    if done.returncode == 0:
+        return True, ""
+    if done.returncode == 64:
+        return False, (
+            "the installed archon-as-archon has no fuel-probe yet: "
+            "sudo -n /usr/local/sbin/archon-ops-promote, then sudo -n /usr/local/sbin/archon-user-install"
+        )
+    if done.returncode == 69:
+        return False, (
+            "no main-account credential in the factory: "
+            "sudo -n /usr/local/sbin/archon-user-install --set-claude-token --account main"
+        )
+    last = (done.stderr.strip().splitlines() or [""])[-1]
+    return False, f"exit {done.returncode}: {last[:200]}"
+
+
+def notify(title: str, message: str) -> bool:
+    """Send one ntfy alert; True when it was delivered."""
+    topic = os.environ.get("NTFY_TOPIC", "")
+    if not topic:
+        log("cannot escalate: NTFY_TOPIC not set")
+        return False
+    request = urllib.request.Request(
+        f"https://ntfy.sh/{topic}",
+        data=message.encode(),
+        headers={
+            "Title": title,
+            "Priority": "high",
+            "Tags": "fuelpump,warning",
+            "User-Agent": "lachesis-report/1",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return 200 <= response.status < 300
+    except (urllib.error.URLError, OSError) as exc:
+        log(f"cannot escalate: {exc}")
+        return False
+
+
+def report_fuel_sources(
+    sources: dict[str, list[str]],
+    now: datetime,
+    max_age: timedelta,
+    refresh: timedelta,
+    call: Callable[[str, dict[str, Any]], bool],
+    escalated: list[str],
+    dry_run: bool,
+    probe: Callable[[str], tuple[bool, str]] = probe_fuel,
+    alert: Callable[[str, str], bool] = notify,
+) -> list[str]:
+    """Report each account's current fuel, probing it first when older than *refresh*;
+    return the accounts whose stale episode has been escalated."""
+    still: list[str] = []
+    for account, paths in sources.items():
+        why = ""
+        if account in PROBED and latest_fuel(paths, now, refresh) is None:
+            if dry_run:
+                print(f"would probe {account}")
+            else:
+                ok, why = probe(account)
+                log(f"fuel: probed {account}" if ok else f"fuel: probe of {account} failed: {why}")
+        fuel = latest_fuel(paths, now, max_age)
+        if fuel is not None:
+            if call("report_fuel", {"account": account, **fuel}):
+                log(f"fuel: {account} {fuel['weekly_used_percent']}% of the week")
+            continue
+        hours = max_age.total_seconds() / 3600
+        log(f"fuel: no plan-usage.json for {account} recorded in the last {hours:g}h")
+        if account in escalated:
+            still.append(account)
+            continue
+        message = (
+            f"No fuel reading for {account} in the last {hours:g}h: "
+            "Lachesis is budgeting on its last real one."
+        ) + (f" Probe: {why}" if why else "")
+        if dry_run:
+            print(f"would escalate {account}: {message}")
+        elif alert(f"Lachesis fuel stale: {account}", message):
+            still.append(account)
+    return still
+
+
 # ---------------------------------------------------------------------------
 # Usage
 # ---------------------------------------------------------------------------
@@ -323,7 +436,7 @@ def main(argv: list[str]) -> int:
         state = json.loads(state_path.read_text())
     except (OSError, ValueError):
         # First run: start from now, so history is not replayed.
-        state = {"since": now.strftime("%Y-%m-%d %H:%M:%S"), "failed": {}}
+        state = {"since": now.strftime("%Y-%m-%d %H:%M:%S"), "failed": {}, "escalated": []}
 
     token = os.environ.get("LACHESIS_FACTORY_TOKEN", "")
     if not token and not dry_run:
@@ -343,13 +456,15 @@ def main(argv: list[str]) -> int:
         return ok
 
     sources = parse_sources(os.environ.get("LACHESIS_FUEL_SOURCES", DEFAULT_FUEL))
-    max_age_hours = float(os.environ.get("LACHESIS_FUEL_MAX_AGE_HOURS") or 2)
-    for account, paths in sources.items():
-        fuel = latest_fuel(paths, now, timedelta(hours=max_age_hours))
-        if fuel is None:
-            log(f"fuel: no plan-usage.json for {account} recorded in the last {max_age_hours:g}h")
-        elif call("report_fuel", {"account": account, **fuel}):
-            log(f"fuel: {account} {fuel['weekly_used_percent']}% of the week")
+    escalated = report_fuel_sources(
+        sources,
+        now,
+        max_age=timedelta(hours=float(os.environ.get("LACHESIS_FUEL_MAX_AGE_HOURS") or 2)),
+        refresh=timedelta(minutes=float(os.environ.get("LACHESIS_FUEL_REFRESH_MINUTES") or 25)),
+        call=call,
+        escalated=state.get("escalated", []),
+        dry_run=dry_run,
+    )
 
     default_account = os.environ.get("LACHESIS_RUN_ACCOUNT", "factory")
     ledger = read_ledger(
@@ -382,7 +497,7 @@ def main(argv: list[str]) -> int:
 
     if not dry_run:
         state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(json.dumps({"since": since, "failed": failed}) + "\n")
+        state_path.write_text(json.dumps({"since": since, "failed": failed, "escalated": escalated}) + "\n")
     return 0
 
 
