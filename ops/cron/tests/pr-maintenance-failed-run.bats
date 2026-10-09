@@ -103,12 +103,14 @@ gh_called() { grep -qE "$1" "$STUB_GH_ARGV"; }
 }
 
 @test "an unreadable failed-run listing holds archon branches and nothing else" {
-    export GH_PR_LIST="[$(pr 330 true archon/task-archon-ship-18), $(pr 332 false feat/human)]"
+    export GH_PR_LIST="[$(pr 330 true archon/task-archon-ship-18), $(pr 332 false feat/human), $(pr 333 false archon/task-archon-ship-19)]"
     export ARCHON_OPEN_RUNS='{"ok": false, "error": "db down"}'
     run "$CRON_DIR/pr-maintenance-cron.sh"
     [ "$status" -eq 0 ]
     [[ "$output" == *"could not list failed runs"*"db down"* ]]
     [[ "$output" == *"PR #330 (archon/task-archon-ship-18) — no failed-run listing this tick, not promoting or merging it"* ]]
+    [[ "$output" == *"PR #333 (archon/task-archon-ship-19) — no failed-run listing this tick, not promoting or merging it"* ]]
     ! gh_called '^pr ready 330'
+    ! gh_called '^pr merge 333 '
     gh_called '^pr merge 332 '
 }
