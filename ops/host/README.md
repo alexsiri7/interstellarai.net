@@ -50,6 +50,7 @@ later step with its own script and cutover: [`archon-user/README.md`](archon-use
 | 10. sysctl | `/etc/sysctl.d/60-dirty-bytes.conf` from [`60-dirty-bytes.conf`](60-dirty-bytes.conf) | `vm.dirty_background_bytes=268435456` (256 MiB), `vm.dirty_bytes=1073741824` (1 GiB) instead of 10% / 20% of 62 GB RAM, then `sysctl -p` and an assert. |
 | 11. /tmp on the NVMe | `/mnt/ext-fast/.tmp-root` (root:root 1777, no ACL); `/etc/systemd/system/tmp.mount` from [`tmp-on-nvme/tmp.mount`](tmp-on-nvme/tmp.mount); `/run/tmp-on-nvme.defer`; `/var/run/reboot-required{,.pkgs}` | `/tmp` becomes a bind mount of the NVMe dir **from the next boot** (no live remount), and a reboot is marked pending (`tmp-on-nvme` in `.pkgs`) so the safe-reboot gate takes it in its next idle window. Once the bind is active (a re-run after that boot), empties the old `/tmp` on `/` that the bind hides. See [/tmp on the NVMe](#tmp-on-the-nvme) below. |
 | 12. tmpfiles | `/etc/tmpfiles.d/tmp.conf` from [`tmp-on-nvme/tmpfiles-tmp.conf`](tmp-on-nvme/tmpfiles-tmp.conf) | `D /tmp 1777 root root 2d` (Ubuntu ships 30d; same file name, so it replaces `/usr/lib/tmpfiles.d/tmp.conf`), with `x` exclusions for `/tmp/tmux-*`, `/tmp/ssh-*`, `/tmp/claude-*`. Applied by the daily `systemd-tmpfiles-clean.timer`; nothing is cleaned at install. |
+| 13. cargo /tmp build-dir | `/etc/tmpfiles.d/cargo-tmp-build-dir.conf` from [`cargo-tmp-build-dir.conf`](cargo-tmp-build-dir.conf) | A root-owned `/tmp/.cargo/config.toml`, recreated at every boot and kept out of `/tmp`'s 30-day aging, that sets `build.build-dir = "{cargo-cache-home}/tmp-build/{workspace-path-hash}"` for every Cargo build under `/tmp` (#133: review checkouts there wrote 9–16 GB each to `/`). `{cargo-cache-home}` is each user's `$CARGO_HOME`: archon's is already on `/mnt/ext-fast`, and the pipeline-health tick keeps asiri's `~/.cargo/tmp-build` a symlink to `/mnt/ext-fast/.archon/cargo-build/tmp`. archon's dirs are reaped by `archon-as-archon worktree-trim`, asiri's by the 2-day Cargo build-dir reaping. A `/tmp/.cargo` not owned by root is removed first; then `systemd-tmpfiles --create` and an assert. |
 
 ### smartd-ntfy
 
@@ -330,7 +331,7 @@ want the old behaviour back). oomd / sysctl: delete
 vm.dirty_background_ratio=10`).
 /tmp on the NVMe: `systemctl disable tmp.mount && rm /etc/systemd/system/tmp.mount && systemctl daemon-reload`,
 then reboot (`/tmp` is back on `/`; `/mnt/ext-fast/.tmp-root` can go afterwards); the
-age rule: `rm /etc/tmpfiles.d/tmp.conf` (Ubuntu's 30 days is back).
+age rule: `rm /etc/tmpfiles.d/tmp.conf` (Ubuntu's 30 days is back). The /tmp Cargo config: `rm /etc/tmpfiles.d/cargo-tmp-build-dir.conf && rm -rf /tmp/.cargo`.
 The NodeSource change is a one-way version bump; the pre-change file is kept as
 `nodesource.sources.bak-<date>`.
 

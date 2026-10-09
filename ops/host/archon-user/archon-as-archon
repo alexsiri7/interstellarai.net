@@ -40,8 +40,9 @@
 #   gh-probe                         gh auth + push access per factory repo
 #   worktree-trim [--dry-run] [--tmp-only]
 #                                    remove stale task worktrees (no open PR, idle 4h),
-#                                    cargo build dirs idle 2 days, and archon's own
-#                                    top-level entries in /tmp and ~/tmp idle 12h;
+#                                    cargo build dirs idle 2 days, /tmp Cargo build
+#                                    dirs idle 2d, and archon's own top-level entries
+#                                    in /tmp and ~/tmp idle 12h;
 #                                    --tmp-only: just the last (no gh calls, every tick)
 #   bun-upgrade                      `bun upgrade` of archon's own bun
 #   ensure-clones                    clone every factory repo that is missing
@@ -432,6 +433,9 @@ recently_written() {
     [ -n "$out" ]
 }
 
+# Also drops the Cargo build dirs of builds under /tmp (ops/host/
+# cargo-tmp-build-dir.conf) that nothing wrote to for 2 days — archon owns
+# them, so the owner's cron cannot.
 verb_worktree_trim() {
     local dry=0 tmp_only=0 a
     for a in "$@"; do
@@ -440,7 +444,7 @@ verb_worktree_trim() {
     # A directory archon can always enter (see recently_written).
     cd "$ARCHON_HOME_DIR" 2>/dev/null || cd / || exit 1
     if [ "$tmp_only" = 1 ]; then trim_tmp "$dry"; return 0; fi
-    local p open wt_base wt_path name removed candidates=0 total=0 size
+    local p open wt_base wt_path name removed candidates=0 total=0 size d
     for p in "${PROJECTS[@]}"; do
         [ -d "$REPOS_DIR/$p/.git" ] || continue
         if ! open=$(sub_in "$ARCHON_HOME_DIR" gh pr list --repo "$GH_OWNER/$p" --state open --limit 200 \
@@ -488,6 +492,23 @@ verb_worktree_trim() {
     done
     [ "$dry" = 1 ] || find "$bd_root" -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null || true
     [ "$bd_removed" -gt 0 ] && echo "autoclean: removed $bd_removed idle cargo build dirs (${bd_mb}MB)"
+
+    # /tmp Cargo build dirs (root-owned /tmp/.cargo/config.toml, install.sh
+    # step 11): build-dir = {cargo-cache-home}/tmp-build/{workspace-path-hash},
+    # under archon's own $ARCHON_HOME_DIR/.cargo — nothing else removes them.
+    for d in "$ARCHON_HOME_DIR"/.cargo/tmp-build/*/*/; do
+        [ -d "$d" ] || continue
+        d=${d%/}
+        find "$d" -type f -mtime -2 -print -quit 2>/dev/null | grep -q . && continue
+        size=$(du -sm "$d" 2>/dev/null | cut -f1 || true); size=${size:-0}
+        if [ "$dry" = 1 ]; then
+            echo "autoclean: would remove $d (${size}MB)"
+            candidates=$((candidates + 1)); total=$((total + size)); continue
+        fi
+        if rm -rf "$d" 2>/dev/null; then echo "autoclean: removed $d (idle >2d) — freed ${size}MB"
+        else echo "autoclean: rm -rf $d failed"; fi
+    done
+    [ "$dry" = 1 ] || find "$ARCHON_HOME_DIR/.cargo/tmp-build" -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null || true
     [ "$dry" = 1 ] && echo "autoclean: dry run — $candidates stale worktrees / cargo build dirs, ${total}MB total"
     trim_tmp "$dry"
     return 0

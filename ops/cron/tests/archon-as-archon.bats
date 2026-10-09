@@ -440,6 +440,27 @@ make_tmp_sandbox() {
     [ ! -L "$S/link" ] && [ -e "$T/precious/keep" ]
 }
 
+@test "worktree-trim drops /tmp Cargo build dirs idle 2 days and keeps fresh ones; --dry-run removes nothing" {
+    printf '#!/bin/sh\nexit 1\n' > "$T/home/.local/bin/gh"; chmod +x "$T/home/.local/bin/gh"
+    local tb="$T/home/.cargo/tmp-build"
+    mkdir -p "$tb/ab/0123456789abcd" "$tb/cd/fedcba98765432"
+    echo x > "$tb/ab/0123456789abcd/f"; touch -d "3 days ago" "$tb/ab/0123456789abcd/f"
+    echo x > "$tb/cd/fedcba98765432/f"
+
+    run "$W" worktree-trim --dry-run
+    [ "$status" -eq 0 ]
+    [ -f "$tb/ab/0123456789abcd/f" ]
+    [ -f "$tb/cd/fedcba98765432/f" ]
+    [[ "$output" == *"autoclean: would remove $tb/ab/0123456789abcd ("*"MB)"* ]]
+    [[ "$output" != *"$tb/cd/"* ]]
+
+    run "$W" worktree-trim
+    [ "$status" -eq 0 ]
+    [ ! -e "$tb/ab" ]
+    [ -f "$tb/cd/fedcba98765432/f" ]
+    [[ "$output" == *"autoclean: removed $tb/ab/0123456789abcd (idle >2d) — freed "*"MB"* ]]
+}
+
 @test "--account main: main's token file and config dir, never the factory's" {
     mkdir -p "$T/home/.config/archon-user" "$T/home/.claude-main"
     printf 'CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-factoryTOKEN_1\n' > "$T/home/.config/archon-user/claude.env"

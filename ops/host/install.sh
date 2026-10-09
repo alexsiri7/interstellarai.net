@@ -21,6 +21,7 @@
 #                                          (marks a reboot pending for the safe-reboot gate); once active,
 #                                          empties the old /tmp left hidden on / underneath it
 #  12. tmpfiles                            /tmp entries idle 2 days are removed (Ubuntu: 30 days)
+#  13. cargo /tmp build-dir                /etc/tmpfiles.d/cargo-tmp-build-dir.conf → /tmp/.cargo/config.toml (root-owned)
 #
 # Every step is guarded so it can be run again after a partial failure.
 #
@@ -52,6 +53,7 @@ REPO_OOMD_DROPIN="$SCRIPT_DIR/20-oomd-pressure-limit.conf"
 REPO_SYSCTL_DIRTY="$SCRIPT_DIR/60-dirty-bytes.conf"
 REPO_TMP_MOUNT="$SCRIPT_DIR/tmp-on-nvme/tmp.mount"
 REPO_TMPFILES_TMP="$SCRIPT_DIR/tmp-on-nvme/tmpfiles-tmp.conf"
+REPO_TMPFILES_CARGO="$SCRIPT_DIR/cargo-tmp-build-dir.conf"
 
 SUDOERS_D="${HOST_INSTALL_SUDOERS_D:-/etc/sudoers.d}"
 SUDOERS_DST="$SUDOERS_D/archon-cron"
@@ -74,6 +76,7 @@ TMP_SRC=$TMP_BASE/.tmp-root          # also in tmp-on-nvme/tmp.mount, archon-use
 TMP_DEFER=/run/tmp-on-nvme.defer     # also in tmp-on-nvme/tmp.mount
 TMPFILES_TMP=/etc/tmpfiles.d/tmp.conf
 REBOOT_REQUIRED=/var/run/reboot-required
+TMPFILES_CARGO=/etc/tmpfiles.d/cargo-tmp-build-dir.conf
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -491,5 +494,25 @@ say "12. tmpfiles: /tmp entries idle for 2 days are removed (Ubuntu default: 30 
 # Takes effect at the next systemd-tmpfiles-clean.timer run (daily); nothing
 # is cleaned now.
 install_file "$REPO_TMPFILES_TMP" "$TMPFILES_TMP" 0644 || true
+
+# ------------------------------------------------------- 13. cargo /tmp -----
+say "13. cargo: builds under /tmp keep their build output off /"
+install_file "$REPO_TMPFILES_CARGO" "$TMPFILES_CARGO" 0644 || true
+# A /tmp/.cargo some user created first would feed its config to everyone's
+# /tmp builds; tmpfiles would keep it. rm -rf does not follow symlinks.
+cargo_tmp_owner=$(stat -c %U /tmp/.cargo 2>/dev/null)
+if [ -n "$cargo_tmp_owner" ] && [ "$cargo_tmp_owner" != root ]; then
+    run rm -rf /tmp/.cargo && did "removed /tmp/.cargo (owned by $cargo_tmp_owner, not root)"
+fi
+run systemd-tmpfiles --create "$TMPFILES_CARGO"
+if [ "$DRY" -eq 0 ]; then
+    cargo_tmp_build_dir=$(grep -o 'build-dir = "[^"]*"' "$REPO_TMPFILES_CARGO")
+    if [ "$(stat -c %U /tmp/.cargo 2>/dev/null)" = root ] && [ -n "$cargo_tmp_build_dir" ] \
+        && grep -qF "$cargo_tmp_build_dir" /tmp/.cargo/config.toml 2>/dev/null; then
+        done_ "/tmp/.cargo/config.toml (root-owned) → $cargo_tmp_build_dir"
+    else
+        fail cargo-tmp "/tmp/.cargo/config.toml missing, not root-owned or without the build-dir line after systemd-tmpfiles --create $TMPFILES_CARGO"
+    fi
+fi
 
 finish
