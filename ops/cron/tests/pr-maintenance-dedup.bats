@@ -91,3 +91,26 @@ tick() { run "$CRON_DIR/pr-maintenance-cron.sh"; [ "$status" -eq 0 ]; }
     grep -q 'PR #500$' "$STUB_ARCHON_ARGV"
     grep -q 'PR #501$' "$STUB_ARCHON_ARGV"
 }
+
+@test "a tick held by the rate limit marks nothing, so the next tick still launches" {
+    export ARCHON_DB="$T/archon.db"
+    local spec
+    spec=$(TZ=Europe/London date -d '+2 hours' '+%-I%P')
+    sqlite3 "$ARCHON_DB" "
+      CREATE TABLE remote_agent_workflow_runs (id TEXT PRIMARY KEY, codebase_id TEXT,
+        workflow_name TEXT, user_message TEXT, status TEXT, started_at TEXT);
+      CREATE TABLE remote_agent_workflow_events (id INTEGER PRIMARY KEY,
+        workflow_run_id TEXT, event_type TEXT, data TEXT,
+        created_at TEXT DEFAULT (datetime('now')));
+      INSERT INTO remote_agent_workflow_events (workflow_run_id, event_type, data)
+        VALUES ('r1', 'node_failed', '{\"error\":\"You have hit your weekly limit · resets $spec (Europe/London)\"}');"
+    export GH_PR_LIST="[$(pr 500 DIRTY aaaaaaa1)]"
+    tick
+    [[ "$output" == *"proj: PR #500 needs maintenance — held, Claude rate limit in effect"* ]]
+    [ "$(launches)" -eq 0 ]
+
+    sqlite3 "$ARCHON_DB" "DELETE FROM remote_agent_workflow_events;"
+    tick
+    [ "$(launches)" -eq 1 ]
+    grep -q 'PR #500$' "$STUB_ARCHON_ARGV"
+}
