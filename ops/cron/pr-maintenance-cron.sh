@@ -140,9 +140,14 @@ pr_left_by_failed_run() {
 # archon-smart-pr-review run on a PR this tick just merged. pr-review-cron.sh
 # fires one at any newly ready PR, so one can land minutes before the merge and
 # would otherwise spend 5-10 minutes of model budget reviewing a merged PR
-# (2026-09-10: reli #1438, un-reminder #307, each killed by hand).
+# (2026-09-10: reli #1438, un-reminder #307, each killed by hand). The merge
+# has already happened, so a partial snapshot still abandons every review it
+# can see, and says so: an empty match then does not mean no review is running.
 abandon_reviews() {
   local pr="$1" id
+  if ! archon_runs_known; then
+    log "$PROJECT: PR #$pr — no complete archon run snapshot this tick, a review run on the merged PR may be left running"
+  fi
   while read -r id; do
     [ -n "$id" ] || continue
     if archon workflow abandon "$id" >/dev/null 2>&1; then
