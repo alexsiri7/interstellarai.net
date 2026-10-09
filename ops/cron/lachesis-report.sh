@@ -9,7 +9,8 @@
 # reading is escalated, once per stale episode.
 #
 # Fuel older than 25 minutes is refreshed first with `archon-as-archon
-# [--account main] fuel-probe` (#165), through the same sudo rule as the shim.
+# [--account main] fuel-probe` (#165), through the same sudo rule as the shim;
+# main only while the owner's flag says ARCHON_MAIN_ACCOUNT=on (lib/main-account.sh).
 #
 # Usage: lachesis-report.sh [--dry-run]
 
@@ -23,4 +24,9 @@ export LACHESIS_FACTORY_TOKEN="${LACHESIS_FACTORY_TOKEN:-}"
 export NTFY_TOPIC="${NTFY_TOPIC:-}"
 
 CRON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/main-account.sh
+. "$CRON_DIR/lib/main-account.sh"
+ARCHON_MAIN_ACCOUNT=off
+main_account_enabled && ARCHON_MAIN_ACCOUNT=on
+export ARCHON_MAIN_ACCOUNT
 exec python3 "$CRON_DIR/lib/lachesis_report.py" "$@"

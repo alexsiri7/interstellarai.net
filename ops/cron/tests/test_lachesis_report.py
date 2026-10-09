@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 import lachesis_report as lr  # noqa: E402
@@ -100,7 +102,13 @@ class FuelRefreshTest(unittest.TestCase):
         self.reported.append(arguments)
         return True
 
-    def run_once(self, escalated: list[str], account: str = "factory", dry_run: bool = False) -> list[str]:
+    def run_once(
+        self,
+        escalated: list[str],
+        account: str = "factory",
+        dry_run: bool = False,
+        may_probe: frozenset[str] = frozenset({"factory", "main"}),
+    ) -> list[str]:
         return lr.report_fuel_sources(
             {account: [self.path]},
             NOW,
@@ -109,6 +117,7 @@ class FuelRefreshTest(unittest.TestCase):
             call=self.call,
             escalated=escalated,
             dry_run=dry_run,
+            may_probe=set(may_probe),
             probe=self.probe,
             alert=self.alert,
         )
@@ -166,10 +175,67 @@ class FuelRefreshTest(unittest.TestCase):
         self._write(timedelta(minutes=5))
         self.assertEqual(self.run_once(["gone"]), [])
 
+    def test_main_is_not_probed_while_the_owner_has_it_off_and_its_staleness_says_so(self) -> None:
+        self.assertEqual(self.run_once([], account="main", may_probe=frozenset({"factory"})), ["main"])
+        self.assertEqual(self.probed, [])
+        self.assertIn("ARCHON_MAIN_ACCOUNT is off", self.alerts[0][1])
+
+    def test_main_may_be_probed_only_when_the_owner_turned_it_on(self) -> None:
+        self.assertEqual(lr.probeable_accounts({}), {"factory"})
+        self.assertEqual(lr.probeable_accounts({"ARCHON_MAIN_ACCOUNT": "off"}), {"factory"})
+        self.assertEqual(lr.probeable_accounts({"ARCHON_MAIN_ACCOUNT": "on"}), {"factory", "main"})
+
     def test_dry_run_neither_probes_nor_alerts(self) -> None:
         self.assertEqual(self.run_once([], dry_run=True), [])
         self.assertEqual(self.probed, [])
         self.assertEqual(self.alerts, [])
+
+
+class ProbeFuelTest(unittest.TestCase):
+    """probe_fuel against a stand-in sudo: the argv it runs, and what each exit means."""
+
+    def setUp(self) -> None:
+        self.dir = Path(tempfile.mkdtemp())
+        sudo = self.dir / "sudo"
+        sudo.write_text(
+            '#!/bin/sh\nprintf "%s\\n" "$@" > "$(dirname "$0")/argv"\n'
+            'echo first >&2; echo "$PROBE_ERR" >&2; exit "$PROBE_RC"\n'
+        )
+        sudo.chmod(0o755)
+        self.env = mock.patch.dict(
+            os.environ,
+            {
+                "PATH": f"{self.dir}:{os.environ['PATH']}",
+                "ARCHON_AS_WRAPPER": "/w/archon-as-archon",
+                "PROBE_RC": "0",
+                "PROBE_ERR": "",
+            },
+        )
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def _argv(self) -> list[str]:
+        return (self.dir / "argv").read_text().splitlines()
+
+    def test_the_factory_and_main_are_probed_through_the_wrapper_as_archon(self) -> None:
+        self.assertEqual(lr.probe_fuel("factory"), (True, ""))
+        self.assertEqual(self._argv(), ["-n", "-u", "archon", "/w/archon-as-archon", "fuel-probe"])
+        self.assertEqual(lr.probe_fuel("main"), (True, ""))
+        self.assertEqual(
+            self._argv(), ["-n", "-u", "archon", "/w/archon-as-archon", "--account", "main", "fuel-probe"]
+        )
+
+    def test_each_failure_names_its_remedy(self) -> None:
+        os.environ["PROBE_RC"] = "64"
+        ok, why = lr.probe_fuel("factory")
+        self.assertFalse(ok)
+        self.assertIn("archon-ops-promote", why)
+        os.environ["PROBE_RC"] = "69"
+        ok, why = lr.probe_fuel("main")
+        self.assertFalse(ok)
+        self.assertIn("--set-claude-token --account main", why)
+        os.environ.update(PROBE_RC="1", PROBE_ERR="fuel-probe: no rate-limit headers")
+        self.assertEqual(lr.probe_fuel("factory"), (False, "exit 1: fuel-probe: no rate-limit headers"))
 
 
 class UsageTest(unittest.TestCase):

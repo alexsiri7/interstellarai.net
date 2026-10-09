@@ -11,8 +11,9 @@ Run by lachesis-report.sh every 15 minutes, as asiri:
    real reading and its time instead of a days-old figure stamped as new (until
    2026-10-08 a file last written on Oct 6 was re-reported every 15 minutes, and
    the main account read 27% used while it was at 38%).
-   The plugin never writes in headless sessions (#165), so when factory or main
-   has no reading newer than LACHESIS_FUEL_REFRESH_MINUTES, one
+   The plugin never writes in headless sessions (#165), so when factory, or main
+   while the owner has ARCHON_MAIN_ACCOUNT=on (lib/main-account.sh), has no
+   reading newer than LACHESIS_FUEL_REFRESH_MINUTES, one
    `archon-as-archon [--account main] fuel-probe` refreshes it first from the
    API's rate-limit headers. An account still without a current reading after
    that raises one ntfy escalation per stale episode (re-armed once a current
@@ -40,6 +41,7 @@ Env:
   LACHESIS_RUN_LEDGER     default ~/.local/state/archon-cron/run-accounts.tsv
   LACHESIS_FUEL_MAX_AGE_HOURS  default 2: older plan-usage.json records are not reported
   LACHESIS_FUEL_REFRESH_MINUTES  default 25: older readings are refreshed by a fuel probe
+  ARCHON_MAIN_ACCOUNT     on: main may be probed (lachesis-report.sh sets it from the owner's flag)
   NTFY_TOPIC              ntfy.sh topic for the stale-fuel escalation (secrets.env)
   ARCHON_AS_WRAPPER       default /usr/local/bin/archon-as-archon
   ARCHON_DB               default /mnt/ext-fast/archon-home/.archon/archon.db
@@ -57,7 +59,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -65,8 +67,9 @@ from typing import Any
 DEFAULT_URL = "https://lachesis.interstellarai.net/mcp"
 DEFAULT_DB = "/mnt/ext-fast/archon-home/.archon/archon.db"
 # The factory account is the archon user's; asiri's own login is the author's main
-# account. The fuel probe keeps both current through the factory door (archon's
-# ~/.claude and ~/.claude-main), and Claude Code used in asiri's own sessions may too.
+# account. The fuel probe keeps the factory current through the factory door (archon's
+# ~/.claude), and main (~/.claude-main) once the owner turns main on; Claude Code used
+# in asiri's own sessions may write main's too.
 DEFAULT_FUEL = (
     "factory=/mnt/ext-fast/archon-home/.claude/plan-usage.json;"
     f"main={Path.home()}/.claude/plan-usage.json:/mnt/ext-fast/archon-home/.claude-main/plan-usage.json"
@@ -217,6 +220,12 @@ def latest_fuel(
     return arguments
 
 
+def probeable_accounts(env: Mapping[str, str]) -> set[str]:
+    """The accounts this tick may probe: the factory, and main only while the owner
+    has turned main on, since every probe is a request on that account."""
+    return {"factory", "main"} if env.get("ARCHON_MAIN_ACCOUNT") == "on" else {"factory"}
+
+
 def probe_fuel(account: str) -> tuple[bool, str]:
     """Refresh *account*'s plan-usage.json with one fuel-probe; (ok, why not)."""
     wrapper = os.environ.get("ARCHON_AS_WRAPPER", "/usr/local/bin/archon-as-archon")
@@ -280,16 +289,19 @@ def report_fuel_sources(
     call: Callable[[str, dict[str, Any]], bool],
     escalated: list[str],
     dry_run: bool,
+    may_probe: set[str],
     probe: Callable[[str], tuple[bool, str]] = probe_fuel,
     alert: Callable[[str, str], bool] = notify,
 ) -> list[str]:
-    """Report each account's current fuel, probing it first when older than *refresh*;
-    return the accounts whose stale episode has been escalated."""
+    """Report each account's current fuel, probing one in *may_probe* first when older
+    than *refresh*; return the accounts whose stale episode has been escalated."""
     still: list[str] = []
     for account, paths in sources.items():
         why = ""
         if account in PROBED and latest_fuel(paths, now, refresh) is None:
-            if dry_run:
+            if account not in may_probe:
+                why = "not probed while ARCHON_MAIN_ACCOUNT is off (lib/main-account.sh)"
+            elif dry_run:
                 print(f"would probe {account}")
             else:
                 ok, why = probe(account)
@@ -464,6 +476,7 @@ def main(argv: list[str]) -> int:
         call=call,
         escalated=state.get("escalated", []),
         dry_run=dry_run,
+        may_probe=probeable_accounts(os.environ),
     )
 
     default_account = os.environ.get("LACHESIS_RUN_ACCOUNT", "factory")
