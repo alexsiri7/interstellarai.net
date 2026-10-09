@@ -115,6 +115,26 @@ if [ "$health_filed" = 0 ] && [[ "$verdict" == "No delivery needed: "* ]]; then
 fi
 [ "$recheck" = 1 ] && exit 1
 
+# With Lachesis pickup on (lib/lachesis.sh) archon:skipped gates nothing:
+# next_issue would offer the issue again and pay for the same triage. The park
+# is a question for the author, which labels it needs-author; archon:skipped
+# stays as the record settle_parked re-checks. Asked before the park comment,
+# so that comment stays the last one settle_parked reads. A question that could
+# not be recorded leaves archon:in-progress in place, so unstick_stale settles
+# it again on a later tick.
+rerun_note="Remove the label and add archon:queued to run it again."
+# shellcheck source=lib/lachesis.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lachesis.sh"
+if lachesis_pickup_enabled; then
+  if ! lachesis_ask "$project" "$issue" \
+      "archon-ship finished on #$issue without a PR, and GitHub does not confirm that nothing is needed. Close the issue, or answer this question to let the factory run it again." \
+      "The run's verdict: ${verdict:0:600}"; then
+    echo "$(date -Is) [issue-pickup] $project: #$issue — could not record a question in Lachesis; left archon:in-progress, settled again later"
+    exit 0
+  fi
+  rerun_note="Waiting on the author's answer to the question above (Lachesis)."
+fi
+
 if ! gh issue edit "$issue" --repo "$repo" \
     --remove-label "archon:in-progress" --add-label "archon:skipped" >/dev/null 2>&1; then
   echo "$(date -Is) [issue-pickup] $project: #$issue — could not park as archon:skipped"
@@ -125,5 +145,5 @@ health_note=""
   && health_note=" Not auto-closed: the issue was filed by pipeline-health-cron.sh (CI/deploy state), or its body could not be read, so a human decides."
 gh issue comment "$issue" --repo "$repo" --body "archon-ship finished without a PR: ${verdict}
 
-Parked as archon:skipped. Remove the label and add archon:queued to run it again.${health_note} Run log: \`${run_log}\`" >/dev/null 2>&1 || true
+Parked as archon:skipped. ${rerun_note}${health_note} Run log: \`${run_log}\`" >/dev/null 2>&1 || true
 echo "$(date -Is) [issue-pickup] $project: #$issue settled as archon:skipped (${verdict:0:120})"

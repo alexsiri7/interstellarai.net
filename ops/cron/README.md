@@ -22,10 +22,14 @@ Required keys (see individual scripts for which ones each uses):
 
 - `ANNIE_DB_URL`, `RELI_DB_URL`, `FILMDUEL_DB_URL`, `KINDRED_DB_URL`, `LACHESIS_DB_URL`, `MUSENMINGLE_DB_URL` — Supabase connection strings used by `backup-dbs.sh` (`KINDRED_DB_URL` serves two entries: `kindred` and `kindred-auth`). Missing entries cause that DB to be skipped (not a hard failure). The URL is parsed into the libpq `PG*` environment (`lib/pg-backup.sh`) so it never appears on a command line.
 - `MUSENMINGLE_DB_URL` — read-only use by `musenmingle-digest.sh` (the `events` schema of Muse & Mingle, formerly Thaleia). Falls back to `THALEIA_DB_URL` while secrets.env still carries only the old name.
-- `LACHESIS_FACTORY_TOKEN` — a Lachesis factory token (`create_factory_token`), used by `lachesis-report.sh` to report fuel and run usage to Lachesis. Without it nothing is reported.
+- `LACHESIS_FACTORY_TOKEN` — a Lachesis factory token (`create_factory_token`), used by `lachesis-report.sh` to report fuel and run usage to Lachesis, and by `lib/lachesis.sh` (only that line is read) when Lachesis pickup is on. Without it nothing is reported.
 - `NTFY_TOPIC` — private ntfy.sh topic for notifications. No fallback default; scripts fail loud if missing.
 
 Set perms: `chmod 600 ~/.config/archon-cron/secrets.env`.
+
+### Lachesis pickup (`LACHESIS_PICKUP`, off by default)
+
+With `~/.config/archon-cron/lachesis-pickup` holding the line `LACHESIS_PICKUP=on`, `issue-pickup-cron.sh` takes its work from Lachesis `next_issue` (one call per tick, across every registered repo) instead of the `archon:queued` label scan (#157). `auto_queue`, `promote_unblocked` and `pick_and_fire` are skipped; each repo with a free slot launches the issue `next_issue` offers it. Labels record run state only (`archon:in-progress`, `archon:done`, `archon:failed`): human-intent labels such as `factory-gap` or `requirements-gap` gate nothing, and a stale in-progress issue is released to Lachesis rather than re-queued. Every wait for the author is a Lachesis question (needs-author): a stranger's issue or comment (the trust gate stays), a ship circuit-breaker park, an unconfirmed "No delivery needed" verdict. Triage waits while `next_issue` holds work for budget or pace. Lachesis unreachable: nothing is launched that tick. Remove the file (or set `off`) to return to the label queue. The switch lives outside this repo so archon cannot flip it.
 
 ### pg_dump version (server is pg17, no docker)
 

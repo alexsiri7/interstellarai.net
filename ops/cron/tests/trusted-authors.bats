@@ -177,6 +177,16 @@ load_trust() {
     ! trust_comments_ok proj issue 8 2>/dev/null
 }
 
+@test "lib: trust_comments_ok tells a stranger's comment (1) from a listing it could not read (2)" {
+    load_trust
+    echo stranger > "$GH_COMMENTS_DIR/pulls-7-reviews"
+    run trust_comments_ok proj pr 7
+    [ "$status" -eq 1 ]
+    gh() { return 1; }
+    run trust_comments_ok proj issue 8
+    [ "$status" -eq 2 ]
+}
+
 # ── pr-maintenance-cron.sh ───────────────────────────────────────────────────
 
 @test "maintenance: a stranger's CLEAN PR is never merged, and the owner is told once" {

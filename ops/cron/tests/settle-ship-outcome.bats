@@ -302,3 +302,48 @@ Parked as archon:skipped. Remove the label and add archon:queued to run it again
     grep -q -- "issue close 7 --repo alexsiri7/testproj --reason completed --comment" "$GH_ARGV"
     [ "$(gh_calls 'Not auto-closed')" -eq 0 ]
 }
+
+# ── Lachesis pickup (lib/lachesis.sh) ────────────────────────────────────────
+
+lachesis_on() {
+    export LACHESIS_FLAG_TEST=1 LACHESIS_PICKUP_FLAG="$T/lachesis-pickup"
+    echo 'LACHESIS_PICKUP=on' > "$LACHESIS_PICKUP_FLAG"
+    cat > "$T/bin/lachesis" <<'STUB'
+#!/usr/bin/env bash
+printf '%s %s\n' "$1" "${2:-}" >> "$LACHESIS_ARGV"
+exit "${LACHESIS_RC:-0}"
+STUB
+    chmod +x "$T/bin/lachesis"
+    export LACHESIS_CALL_CMD="$T/bin/lachesis" LACHESIS_ARGV="$T/lachesis-argv"
+    : > "$LACHESIS_ARGV"
+}
+
+@test "lachesis pickup off: an unconfirmed verdict parks exactly as before, asking nothing" {
+    export LACHESIS_CALL_CMD="$T/no-such-lachesis"
+    echo 'No delivery needed: nothing to do here.' > "$RUN_LOG"
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 9
+    grep -q -- "Remove the label and add archon:queued to run it again" "$GH_ARGV"
+}
+
+@test "lachesis pickup on: an unconfirmed verdict asks the author before it parks" {
+    lachesis_on
+    echo 'No delivery needed: nothing to do here.' > "$RUN_LOG"
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 9
+    grep -q '^ask_question .*"repo":"alexsiri7/testproj".*"blocks":\[9\]' "$LACHESIS_ARGV"
+    grep -q -- "Waiting on the author's answer" "$GH_ARGV"
+}
+
+@test "lachesis pickup on: a question Lachesis refuses leaves the issue in progress" {
+    lachesis_on
+    export LACHESIS_RC=2
+    echo 'No delivery needed: nothing to do here.' > "$RUN_LOG"
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    [ "$(gh_calls 'issue edit')" -eq 0 ]
+    [ "$(gh_calls 'issue comment')" -eq 0 ]
+    [[ "$output" == *"could not record a question in Lachesis"* ]]
+}
