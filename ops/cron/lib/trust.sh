@@ -37,7 +37,7 @@
 [ -n "${_ARCHON_TRUST_SH:-}" ] && return 0
 _ARCHON_TRUST_SH=1
 
-: "${TRUSTED_AUTHORS=alexsiri7}"
+: "${TRUSTED_AUTHORS=alexsiri7 alexsiri7-factory}"
 : "${TRUSTED_ISSUE_BOTS=sentry[bot] github-actions[bot]}"
 : "${TRUSTED_MERGE_ONLY_AUTHORS=dependabot[bot] github-actions[bot]}"
 TRUST_FILE="${ARCHON_CRON_TRUST_FILE:-$HOME/.config/archon-cron/trust.env}"

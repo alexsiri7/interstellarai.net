@@ -112,6 +112,7 @@ load_trust() {
 @test "lib: PR levels — owner full, dependabot and workflows merge-only, forks and strangers none" {
     load_trust
     [ "$(trust_pr_level alexsiri7 false)" = full ]
+    [ "$(trust_pr_level alexsiri7-factory false)" = full ]
     [ "$(trust_pr_level app/dependabot false)" = merge ]
     [ "$(trust_pr_level 'dependabot[bot]' false)" = merge ]
     [ "$(trust_pr_level app/github-actions false)" = merge ]

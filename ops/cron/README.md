@@ -99,7 +99,7 @@ Several factory repos are public, and every archon run is a Claude session on th
 
 | List | Default | Trusted for |
 |---|---|---|
-| `TRUSTED_AUTHORS` | `alexsiri7` | everything: issues, PRs, comments |
+| `TRUSTED_AUTHORS` | `alexsiri7 alexsiri7-factory` | everything: issues, PRs, comments |
 | `TRUSTED_ISSUE_BOTS` | `sentry[bot] github-actions[bot]` | issues and comments (Sentry's integration, the repos' own workflows: Railway alerts, token-expiry issues) |
 | `TRUSTED_MERGE_ONLY_AUTHORS` | `dependabot[bot] github-actions[bot]` | PRs that `pr-maintenance` may merge when CLEAN, but that no archon run ever reads: dependabot bodies carry upstream release notes |
 
