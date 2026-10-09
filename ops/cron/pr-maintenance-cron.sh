@@ -52,6 +52,10 @@ mkdir -p "$LOG_DIR"
 # pr-review-cron.sh). It is how a human parks a PR that must stay open and
 # unmerged — e.g. an asset-upload PR whose head another workflow fetches from.
 HOLD_LABEL="hold"
+# One marker per project and PR holding the "<headRefOid> <mergeStateStatus>"
+# Phase 2 last launched archon-pr-maintenance for.
+MAINTENANCE_STATE_DIR="$HOME/.archon/state/pr-maintenance"
+mkdir -p "$MAINTENANCE_STATE_DIR"
 
 # Use arguments if provided, otherwise all projects
 if [ $# -gt 0 ]; then
@@ -75,6 +79,19 @@ ensure_hold_label() {
 pr_on_hold() {
   [ "$2" = "true" ] || return 1
   log "$PROJECT: PR #$1 is on hold — skipping"
+}
+
+# maintenance_launched_for <number> <headRefOid> <mergeStateStatus> — true
+# (with a log line) when Phase 2 already launched maintenance for this PR at
+# this head and merge state. A run that could not move the PR leaves both
+# unchanged, and relaunching it every tick only re-reports the same conflict
+# (interstellarai.net#73: a CONFLICTING PR got a fresh run each tick until a
+# human rebased it). A push or a base-branch change re-arms it; a PR that
+# stays stuck is pipeline-health-cron's check_stuck_prs to escalate.
+maintenance_launched_for() {
+  local marker="$MAINTENANCE_STATE_DIR/${PROJECT}-$1.launched"
+  [ "$(cat "$marker" 2>/dev/null)" = "$2 $3" ] || return 1
+  log "$PROJECT: PR #$1 already had maintenance launched at ${2:0:7} ($3) — waiting for a new head or merge state"
 }
 
 # pr_owned_by_live_run <number> <headRefName> <body>
@@ -119,13 +136,14 @@ pr_owned_by_live_run() {
 # list_prs full|merge <jq select expression> — open PRs of the current repo
 # whose author the trust gate admits at that level (lib/trust.sh: `full` =
 # archon may work it, `merge` = may also be a merge-only bot's PR), one
-# "<number>\t<headRefName>\t<hold>\t<body>" row each. Untrusted PRs are
-# dropped here, before any phase sees them, and the owner is told once.
+# "<number>\t<headRefName>\t<hold>\t<headRefOid>\t<mergeStateStatus>\t<body>"
+# row each. Untrusted PRs are dropped here, before any phase sees them, and
+# the owner is told once.
 list_prs() {
   local level="$1" select="$2" json
-  json=$(gh pr list --state open --json number,mergeStateStatus,isDraft,headRefName,labels,body,author,isCrossRepository,title,createdAt 2>/dev/null || echo "[]")
+  json=$(gh pr list --state open --json number,mergeStateStatus,isDraft,headRefName,headRefOid,labels,body,author,isCrossRepository,title,createdAt 2>/dev/null || echo "[]")
   trust_filter_prs "$PROJECT" "$level" <<<"$json" \
-    | jq -r --arg held "$TRUST_HELD_LABEL" ".[] | select($select)"' | [.number, .headRefName, ((.labels // []) | map(.name) | (index("hold") or index($held))), ((.body // "") | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null || true
+    | jq -r --arg held "$TRUST_HELD_LABEL" ".[] | select($select)"' | [.number, .headRefName, ((.labels // []) | map(.name) | (index("hold") or index($held))), .headRefOid, .mergeStateStatus, ((.body // "") | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null || true
 }
 
 # UNSAFE_CHANGE_CHECK: the repo-side check (pull_request_target, policy read
@@ -211,7 +229,7 @@ for PROJECT in "${PROJECTS[@]}"; do
   # Phase 1 can merge it on this same tick.
   GREEN_DRAFTS=$(list_prs merge '.isDraft == true and .mergeStateStatus == "CLEAN"')
 
-  while IFS=$'\t' read -r PR HEAD HOLD BODY; do
+  while IFS=$'\t' read -r PR HEAD HOLD _ _ BODY; do
     [ -n "$PR" ] || continue
     pr_on_hold "$PR" "$HOLD" && continue
     if pr_owned_by_live_run "$PR" "$HEAD" "$BODY"; then
@@ -227,7 +245,7 @@ for PROJECT in "${PROJECTS[@]}"; do
   # --- Phase 1: Merge CLEAN PRs directly (bash only, zero AI cost) ---
   CLEAN_PRS=$(list_prs merge '.isDraft == false and .mergeStateStatus == "CLEAN"')
 
-  while IFS=$'\t' read -r PR HEAD HOLD BODY; do
+  while IFS=$'\t' read -r PR HEAD HOLD _ _ BODY; do
     [ -n "$PR" ] || continue
     pr_on_hold "$PR" "$HOLD" && continue
     if pr_owned_by_live_run "$PR" "$HEAD" "$BODY"; then
@@ -297,9 +315,10 @@ for PROJECT in "${PROJECTS[@]}"; do
   CANDIDATES=$(list_prs full '(.isDraft == false and (.mergeStateStatus == "BEHIND" or .mergeStateStatus == "DIRTY" or .mergeStateStatus == "UNSTABLE" or .mergeStateStatus == "UNKNOWN")) or (.isDraft == true and .mergeStateStatus == "DIRTY")')
 
   ACTIONABLE=""
-  while IFS=$'\t' read -r PR HEAD HOLD BODY; do
+  while IFS=$'\t' read -r PR HEAD HOLD SHA STATE BODY; do
     [ -n "$PR" ] || continue
     pr_on_hold "$PR" "$HOLD" && continue
+    maintenance_launched_for "$PR" "$SHA" "$STATE" && continue
     if pr_owned_by_live_run "$PR" "$HEAD" "$BODY"; then
       log "$PROJECT: PR #$PR ($HEAD) needs maintenance but is owned by a live archon run — leaving it to the run"
       continue
@@ -309,6 +328,7 @@ for PROJECT in "${PROJECTS[@]}"; do
       continue
     fi
     ACTIONABLE="$PR"
+    ACTIONABLE_KEY="$SHA $STATE"
     break
   done <<< "$CANDIDATES"
 
@@ -322,6 +342,7 @@ for PROJECT in "${PROJECTS[@]}"; do
     continue
   fi
   log "$PROJECT: PR #$ACTIONABLE needs maintenance — launching archon"
+  echo "$ACTIONABLE_KEY" > "$MAINTENANCE_STATE_DIR/${PROJECT}-${ACTIONABLE}.launched"
   archon workflow run archon-pr-maintenance --cwd "$REPO_DIR" "PR #$ACTIONABLE" &
 
 done
