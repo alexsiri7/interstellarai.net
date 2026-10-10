@@ -1003,3 +1003,10 @@ load_trust() {
 
     [ ! -f "$STALL_MARKER" ]
 }
+
+@test "check_cron_heartbeats watches issue-pickup and pr-maintenance at their 15-minute periods" {
+    load_fn check_cron_heartbeats
+    heartbeat_watch() { echo "$*" >> "$STATE_DIR/watched"; }
+    check_cron_heartbeats
+    [ "$(cat "$STATE_DIR/watched")" = "$(printf 'issue-pickup 15\npr-maintenance 15')" ]
+}

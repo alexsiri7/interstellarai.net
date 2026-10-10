@@ -122,3 +122,36 @@ curl_calls() { [ -f "$CURL_ARGV" ] && wc -l < "$CURL_ARGV" || echo 0; }
     [ "$(curl_calls)" -eq 0 ]
     [ -f "$HEARTBEAT_STATE_DIR/pr-maintenance-alerted" ]
 }
+
+@test "without an override the watch reads the stamp should_tick writes" {
+    unset HEARTBEAT_STAMP_DIR _ARCHON_HEARTBEAT_SH
+    source "$SCRIPT_DIR/lib/heartbeat.sh"
+    should_tick issue-pickup
+    run heartbeat_watch issue-pickup 15
+    [ "$status" -eq 0 ]
+    [ "$(curl_calls)" -eq 0 ]
+}
+
+# ── wiring into the work-loop crons ──────────────────────────────────
+
+# A watch whose period or name drifts from the watched cron pages falsely, or
+# never: the period must be the cron's own crontab period and the name its
+# should_tick key.
+@test "each work-loop cron is watched exactly once, with its crontab period and throttle name" {
+    local name calls period
+    for name in issue-pickup pr-maintenance pipeline-health; do
+        calls=$(grep -hE "^[[:space:]]*heartbeat_watch $name [0-9]+$" "$SCRIPT_DIR"/*.sh)
+        [ "$(grep -c . <<<"$calls")" -eq 1 ]
+        period=$(awk -v s="/$name-cron.sh" '$7 == ">>" && substr($6, length($6) - length(s) + 1) == s { sub(/^\*\//, "", $1); print $1 }' "$SCRIPT_DIR/crontab")
+        [[ "$period" =~ ^[0-9]+$ ]]
+        [ "${calls##* }" = "$period" ]
+        grep -qE "^[[:space:]]*should_tick \"$name\" \|\| exit 0$" "$SCRIPT_DIR/$name-cron.sh"
+    done
+}
+
+# Top-level, unindented lines run on every real tick; an indented one sits
+# inside a branch or function and may not.
+@test "the watch calls run unconditionally on every real tick" {
+    [ "$(grep -cx 'heartbeat_watch pipeline-health [0-9]*' "$SCRIPT_DIR/issue-pickup-cron.sh")" -eq 1 ]
+    [ "$(grep -cx 'check_cron_heartbeats' "$SCRIPT_DIR/pipeline-health-cron.sh")" -eq 1 ]
+}
