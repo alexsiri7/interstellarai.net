@@ -1,7 +1,8 @@
 #!/usr/bin/env bats
-# Tests for the `hold` label convention in pr-maintenance-cron.sh and
-# pr-review-cron.sh: a PR labeled `hold` is never flipped to ready, merged,
-# handed to archon-pr-maintenance, or reviewed.
+# End-to-end tests for pr-maintenance-cron.sh and pr-review-cron.sh: the
+# `hold` label convention (a PR labeled `hold` is never flipped to ready,
+# merged, handed to archon-pr-maintenance, or reviewed), the squash merge
+# message, and the review/merge race.
 #
 # Runs the real scripts end to end against a temp project tree with `gh` and
 # `archon` stubbed. The stubs live in $HOME/.local/bin under a temp HOME: the
@@ -9,7 +10,9 @@
 # archon may be installed, so this is the one place a stub reliably wins. The
 # gh stub answers `pr list` with $GH_PR_LIST (applying the script's own --jq
 # filter), `pr view` with $GH_PR_VIEW, fails `pr merge --auto` when
-# $GH_MERGE_AUTO_FAILS is set, and records every invocation.
+# $GH_MERGE_AUTO_FAILS is set, and records every invocation. The archon stub
+# lists $ARCHON_RUNNING_RUNS as the running runs, fails the paused listing when
+# $ARCHON_PAUSED_FAILS is set, and records every invocation.
 #
 # Run: npx bats@1.11.0 ops/cron/tests/pr-hold-label.bats
 
@@ -39,6 +42,13 @@ setup() {
     # Set to make `gh pr merge --auto` fail, so the non---auto fallback runs.
     export GH_MERGE_AUTO_FAILS=""
 
+    # The `runs` array `archon workflow runs --status running` answers with.
+    export ARCHON_RUNNING_RUNS="[]"
+
+    # Set to make `archon workflow runs --status paused` fail, leaving the
+    # tick's run snapshot incomplete.
+    export ARCHON_PAUSED_FAILS=""
+
     # The real token predicate, so no test re-declares what lib/ci-skip.sh owns.
     unset _ARCHON_CI_SKIP_SH
     source "$CRON_DIR/lib/ci-skip.sh"
@@ -62,7 +72,14 @@ STUB
     cat > "$STUB_BIN/archon" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$STUB_ARCHON_ARGV"
-[ "$1 $2" = "workflow runs" ] && printf '{"runs": []}'
+if [ "$1 $2" = "workflow runs" ]; then
+  case "$*" in
+    *"--status paused"*) [ -n "$ARCHON_PAUSED_FAILS" ] && { printf '{"ok": false, "error": "db locked"}'; exit 1; }
+                         printf '{"runs": []}' ;;
+    *"--status running"*) printf '{"runs": %s}' "$ARCHON_RUNNING_RUNS" ;;
+    *) printf '{"runs": []}' ;;
+  esac
+fi
 exit 0
 STUB
     chmod +x "$STUB_BIN/gh" "$STUB_BIN/archon"
@@ -73,9 +90,14 @@ teardown() {
     rm -rf "$T"
 }
 
-pr() { # pr <number> <draft> <mergeState> <labels-json> — an owner, same-repo PR
-    printf '{"number": %s, "isDraft": %s, "mergeStateStatus": "%s", "headRefName": "feat/x-%s", "headRefOid": "abc%s", "updatedAt": "2026-09-10T00:00:00Z", "body": "asset upload", "labels": %s, "author": {"login": "alexsiri7"}, "isCrossRepository": false}' \
-        "$1" "$2" "$3" "$1" "$1" "$4"
+pr() { # pr <number> <draft> <mergeState> <labels-json> [head] — an owner, same-repo PR
+    printf '{"number": %s, "isDraft": %s, "mergeStateStatus": "%s", "headRefName": "%s", "headRefOid": "abc%s", "updatedAt": "2026-09-10T00:00:00Z", "body": "asset upload", "labels": %s, "author": {"login": "alexsiri7"}, "isCrossRepository": false}' \
+        "$1" "$2" "$3" "${5:-feat/x-$1}" "$1" "$4"
+}
+
+run_json() { # run_json <id> <workflow> <user_message> — a running run on proj
+    printf '{"id": "%s", "workflow_name": "%s", "status": "running", "user_message": "%s", "metadata": {"workflow_source": {"origin": "%s"}}}' \
+        "$1" "$2" "$3" "$BASE_DIR/proj"
 }
 
 gh_called() { grep -qE "$1" "$STUB_GH_ARGV"; }
@@ -212,8 +234,73 @@ merge_argv() { grep -E "^pr merge $1 " "$STUB_GH_ARGV"; }
     [ "$status" -eq 0 ]
     [[ "$output" == *"proj: PR #299 is on hold — skipping"* ]]
     [[ "$output" == *"fired archon-review"* ]]
-    [[ "$output" == *"1 on-hold, 1 fired"* ]]
+    [[ "$output" == *"1 on-hold, 0 ship-merging, 1 fired"* ]]
     grep -q 'review PR #300' "$STUB_ARCHON_ARGV"
     ! grep -q 'review PR #299' "$STUB_ARCHON_ARGV"
     [ ! -f "$HOME/.archon/state/pr-review/proj-299.pid" ]
+}
+
+# ── review/merge race (interstellarai.net#71) ────────────────────────────────
+
+@test "review: a CLEAN non-draft archon-ship PR does not get a review fired" {
+    export GH_PR_LIST="[$(pr 300 false CLEAN '[]' archon/task-archon-ship-1791575208056)]"
+    run "$CRON_DIR/pr-review-cron.sh"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"proj: PR #300 is a CLEAN archon-ship PR, reviewed by its run and about to merge — skipping"* ]]
+    [[ "$output" == *"1 ship-merging, 0 fired"* ]]
+    ! grep -q 'workflow run archon-review' "$STUB_ARCHON_ARGV"
+    [ ! -f "$HOME/.archon/state/pr-review/proj-300.pid" ]
+}
+
+@test "review: archon-ship PRs not yet CLEAN, and CLEAN PRs on other heads, are still reviewed" {
+    export GH_PR_LIST="[$(pr 300 false BLOCKED '[]' archon/task-archon-ship-1), $(pr 301 false CLEAN '[]')]"
+    run "$CRON_DIR/pr-review-cron.sh"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"0 ship-merging, 2 fired"* ]]
+    grep -q 'review PR #300' "$STUB_ARCHON_ARGV"
+    grep -q 'review PR #301' "$STUB_ARCHON_ARGV"
+}
+
+@test "maintenance: merging a PR with an active review abandons the review" {
+    export GH_PR_LIST="[$(pr 300 false CLEAN '[]')]"
+    export ARCHON_RUNNING_RUNS="[$(run_json rev-300 archon-review 'review PR #300'), $(run_json smart-300 archon-smart-pr-review 'PR #300'), $(run_json rev-3000 archon-review 'review PR #3000'), $(run_json ship-300 archon-ship 'fix #300')]"
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    [ "$status" -eq 0 ]
+    gh_called '^pr merge 300 '
+    [[ "$output" == *"proj: PR #300 — abandoned review run rev-300 on the merged PR"* ]]
+    grep -qx 'workflow abandon rev-300' "$STUB_ARCHON_ARGV"
+    grep -qx 'workflow abandon smart-300' "$STUB_ARCHON_ARGV"
+    ! grep -q 'workflow abandon rev-3000' "$STUB_ARCHON_ARGV"
+    ! grep -q 'workflow abandon ship-300' "$STUB_ARCHON_ARGV"
+}
+
+@test "maintenance: merging via the non-auto fallback also abandons the review" {
+    export GH_PR_LIST="[$(pr 300 false CLEAN '[]')]"
+    export GH_MERGE_AUTO_FAILS=1
+    export ARCHON_RUNNING_RUNS="[$(run_json rev-300 archon-review 'review PR #300')]"
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    [ "$status" -eq 0 ]
+    merge_argv 300 | grep -v -- '--auto' | grep -q .
+    [[ "$output" == *"proj: PR #300 — abandoned review run rev-300 on the merged PR"* ]]
+    grep -qx 'workflow abandon rev-300' "$STUB_ARCHON_ARGV"
+}
+
+@test "maintenance: a merge on an incomplete run snapshot abandons what it sees and says so" {
+    export GH_PR_LIST="[$(pr 300 false CLEAN '[]')]"
+    export ARCHON_PAUSED_FAILS=1
+    export ARCHON_RUNNING_RUNS="[$(run_json rev-300 archon-review 'review PR #300')]"
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    [ "$status" -eq 0 ]
+    gh_called '^pr merge 300 '
+    [[ "$output" == *"proj: PR #300 — no complete archon run snapshot this tick, a review run on the merged PR may be left running"* ]]
+    grep -qx 'workflow abandon rev-300' "$STUB_ARCHON_ARGV"
+}
+
+@test "maintenance: a PR that is not merged keeps its review" {
+    export GH_PR_LIST="[$(pr 300 false CLEAN '[{"name":"hold"}]')]"
+    export ARCHON_RUNNING_RUNS="[$(run_json rev-300 archon-review 'review PR #300')]"
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    [ "$status" -eq 0 ]
+    ! gh_called '^pr merge 300'
+    ! grep -q 'workflow abandon' "$STUB_ARCHON_ARGV"
 }

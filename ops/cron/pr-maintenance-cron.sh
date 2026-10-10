@@ -136,6 +136,28 @@ pr_left_by_failed_run() {
   log "$PROJECT: PR #$pr ($head) was left by failed archon run $run — not promoting or merging it; adopt the run or merge by hand"
 }
 
+# abandon_reviews <number> — cancel every running or paused archon-review /
+# archon-smart-pr-review run on a PR this tick just merged. pr-review-cron.sh
+# fires one at any newly ready PR, so one can land minutes before the merge and
+# would otherwise spend 5-10 minutes of model budget reviewing a merged PR
+# (2026-09-10: reli #1438, un-reminder #307, each killed by hand). The merge
+# has already happened, so a partial snapshot still abandons every review it
+# can see, and says so: an empty match then does not mean no review is running.
+abandon_reviews() {
+  local pr="$1" id
+  if ! archon_runs_known; then
+    log "$PROJECT: PR #$pr — no complete archon run snapshot this tick, a review run on the merged PR may be left running"
+  fi
+  while read -r id; do
+    [ -n "$id" ] || continue
+    if archon workflow abandon "$id" >/dev/null 2>&1; then
+      log "$PROJECT: PR #$pr — abandoned review run $id on the merged PR"
+    else
+      log "$PROJECT: PR #$pr — could not abandon review run $id on the merged PR"
+    fi
+  done < <(archon_run_active_ids "$REPO_DIR" "$PROJECT" '^archon-(review|smart-pr-review)$' "#${pr}([^0-9]|$)")
+}
+
 # list_prs full|merge <jq select expression> — open PRs of the current repo
 # whose author the trust gate admits at that level (lib/trust.sh: `full` =
 # archon may work it, `merge` = may also be a merge-only bot's PR), one
@@ -298,12 +320,13 @@ for PROJECT in "${PROJECTS[@]}"; do
     MERGE_BODY=$(strip_ci_skip_tokens "$(jq -r '.body // ""' <<<"$MERGE_JSON" || echo "")")
     # Surface stderr to the cron log so actual failures (permissions, branch
     # protection, etc.) are diagnosable on the next tick instead of vanishing.
-    if ! gh pr merge "$PR" --squash --auto --delete-branch \
-         --subject "$MERGE_SUBJECT" --body "$MERGE_BODY" 2>&1; then
-      if ! gh pr merge "$PR" --squash --delete-branch \
-           --subject "$MERGE_SUBJECT" --body "$MERGE_BODY" 2>&1; then
-        log "$PROJECT: PR #$PR — could not merge, skipping"
-      fi
+    if gh pr merge "$PR" --squash --auto --delete-branch \
+         --subject "$MERGE_SUBJECT" --body "$MERGE_BODY" 2>&1 \
+       || gh pr merge "$PR" --squash --delete-branch \
+            --subject "$MERGE_SUBJECT" --body "$MERGE_BODY" 2>&1; then
+      abandon_reviews "$PR"
+    else
+      log "$PROJECT: PR #$PR — could not merge, skipping"
     fi
   done <<< "$CLEAN_PRS"
 
