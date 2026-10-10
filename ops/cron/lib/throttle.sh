@@ -41,6 +41,11 @@ throttle_interval_minutes() {
     echo "$_interval"
 }
 
+# Prints the directory holding the <script-name>.last_run stamps.
+throttle_state_dir() {
+    echo "$HOME/.config/archon-cron/state"
+}
+
 # Returns 0 (do work) or 1 (skip — too soon since last run).
 # Args: $1 = script-name (used as state file key)
 #
@@ -63,7 +68,8 @@ should_tick() {
     local _interval
     _interval=$(throttle_interval_minutes "$_name")
 
-    local _state_dir="$HOME/.config/archon-cron/state"
+    local _state_dir
+    _state_dir=$(throttle_state_dir)
     if ! mkdir -p "$_state_dir" 2>/dev/null; then
         echo "$(date -Is) [throttle] ${_name}: WARNING — cannot create state dir $_state_dir, throttle disabled" >&2
     fi

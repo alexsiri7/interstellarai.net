@@ -25,7 +25,7 @@ _ARCHON_HEARTBEAT_SH=1
 # shellcheck source=lib/throttle.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/throttle.sh"
 
-HEARTBEAT_STAMP_DIR="${HEARTBEAT_STAMP_DIR:-$HOME/.config/archon-cron/state}"
+HEARTBEAT_STAMP_DIR="${HEARTBEAT_STAMP_DIR:-$(throttle_state_dir)}"
 HEARTBEAT_STATE_DIR="${HEARTBEAT_STATE_DIR:-$HOME/.archon/pipeline-health-state/heartbeat}"
 
 _heartbeat_log() { echo "$(date -Is) [heartbeat] $*"; }
