@@ -98,11 +98,12 @@ trust_pr_level() {
   else echo none; fi
 }
 
-# trust_notify_once <project> <kind> <number> <message> — log + ntfy the owner
-# once per (project, kind, number). The marker is written only once the ntfy
-# went out (or there is no topic to send to), so a failed push is retried.
+# trust_notify_once <project> <kind> <number> <message> [title] — log + ntfy
+# the owner once per (project, kind, number). The marker is written only once
+# the ntfy went out (or there is no topic to send to), so a failed push is
+# retried.
 trust_notify_once() {
-  local project="$1" kind="$2" num="$3" msg="$4"
+  local project="$1" kind="$2" num="$3" msg="$4" title="${5:-Untrusted $2 on $1}"
   local marker="$TRUST_STATE_DIR/$project-$kind-$num"
   [ -f "$marker" ] && return 0
   mkdir -p "$TRUST_STATE_DIR" 2>/dev/null || true
@@ -119,7 +120,7 @@ trust_notify_once() {
     touch "$marker" 2>/dev/null || true
     return 0
   fi
-  if curl -s --fail -o /dev/null -H "Title: Untrusted $kind on $project" \
+  if curl -s --fail -o /dev/null -H "Title: $title" \
        -H "Priority: default" -H "Tags: shield" \
        -d "$msg" "ntfy.sh/$NTFY_TOPIC" 2>/dev/null; then
     touch "$marker" 2>/dev/null || true

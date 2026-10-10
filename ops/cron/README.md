@@ -149,6 +149,8 @@ A *bridge* is a service that files issues under the owner's token with text chos
 
 2. **Classifier.** It can only allow. It is one chat completion via Requesty (`SCREEN_MODEL`, default `anthropic/claude-haiku-4-5`) with no tools and no secrets. The issue text goes in as data between `BEGIN-ISSUE-<nonce>` and `END-ISSUE-<nonce>` lines, with a fresh random nonce each call. The model must answer `{verdict: safe|suspicious, issue_type, reasons}`. A reply that is not exactly one such JSON object (optionally wrapped in one `json` fence) is an error, never a pass. So is a failed request. On an error the issue stays unlabelled and is retried next tick.
 
+   Exhausted Requesty credits (HTTP 402, or a 403/429 whose body blames credit, balance, billing or a spend limit rather than a rate) are the error `credits-exhausted`: it ends the tick's screening after that one call, and the owner gets one ntfy per UTC day across all projects (marker `requesty-credits-exhausted-<date>` in `~/.archon/state/untrusted`) saying screening is paused until the balance is topped up at https://app.requesty.ai.
+
    The key is read from `~/.config/archon-cron/requesty.key` (`SCREEN_KEY_FILE`, chmod 600). It reaches curl through a file descriptor, never through argv.
 
 The outcomes:
