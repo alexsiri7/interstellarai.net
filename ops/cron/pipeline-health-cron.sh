@@ -185,6 +185,9 @@ MAX_ATTEMPTS=3
 # check_parked_runs nudges it. 6x the longest `wait:` the sdlc pack declares
 # (ci-pause, duration_ms 300000).
 PARKED_WAIT_MAX_SECONDS="${PARKED_WAIT_MAX_SECONDS:-1800}"
+# A run paused at the CI attention step is pr-maintenance's to resume and is
+# reported here only after ARCHON_CI_ATTENTION_MAX_SECONDS (a day by default,
+# set in lib/archon-active-runs.sh).
 
 log() { echo "$(date -Is) $LOG_PREFIX $*"; }
 
@@ -2507,21 +2510,27 @@ check_cron_heartbeats() {
 # take, or the run is parked on something only a person can answer, ntfy once
 # and leave it alone: approving a gate, or declaring the run dead so
 # pr-maintenance merges under it, is a guess this cron does not get to make.
+# An `attention` pause is owed an outside action before its resume; for the CI
+# attention step that action is CI turning green, which pr-maintenance watches
+# for and answers with the resume itself, so it reaches this check only after
+# it has waited a day without that happening.
 # ----------------------------------------------------------------------------
 check_parked_runs() {
   local marker_dir="$STATE_DIR/parked"
-  local run_id class wf origin msg deadline seen="" ack marker id overdue
+  local run_id class wf origin msg deadline step need seen="" ack marker id overdue
   # A failed listing has no paused rows and would read as a quiet pipeline —
   # never let that delete markers or look like a recovery.
   if ! archon_runs_known; then
     log "parked-runs: no archon run snapshot this tick — skipping"
     return 0
   fi
-  while IFS=$'\t' read -r run_id class wf origin msg deadline; do
+  while IFS=$'\t' read -r run_id class wf origin msg deadline step need; do
     [ -n "$run_id" ] || continue
     seen="$seen $run_id"
     # `wait` and `resolved` are both the engine's own to resume, so a nudge is
-    # the recovery; a `gate` is owed an answer cron must never give.
+    # the recovery; a `gate` is owed an answer cron must never give, and an
+    # `attention` pause an action (a CI attention pause here has stayed red a
+    # day; any other only a person can take).
     if { [ "$class" = wait ] || [ "$class" = resolved ]; } && [ ! -e "$marker_dir/resumed-$run_id" ]; then
       overdue="no resume deadline recorded"
       [ "${deadline:-0}" -gt 0 ] && overdue="$(( $(date +%s) - deadline ))s past its recorded resume deadline"
@@ -2535,8 +2544,9 @@ check_parked_runs() {
     [ -e "$marker_dir/alerted-$run_id" ] && continue
     log "parked-runs: $wf $run_id parked ($class) with no automated recovery left — alerting"
     notify "Archon run parked: ${origin##*/}" \
-      "$wf ($class) — ${msg:-no user message}
-run $run_id
+      "$wf ($class${step:+ at $step}) — ${msg:-no user message}
+${need:+$need
+}run $run_id
 archon workflow get $run_id --json" \
       high hourglass
     touch "$marker_dir/alerted-$run_id"

@@ -251,6 +251,19 @@ pr_scope_decision() {
   esac
 }
 
+# pr_checks_green <number> — exit 0 when the PR has at least one check and
+# every one concluded success, neutral or skipped: the rule the deliver tail's
+# check-ci applies, so a run resumed on it concludes instead of re-pausing.
+# Not mergeStateStatus CLEAN, which looks only at required checks. Any read or
+# parse failure is not green.
+pr_checks_green() {
+  local view
+  view=$(gh pr view "$1" --json statusCheckRollup 2>/dev/null) || return 1
+  printf '%s' "$view" | jq -e '
+    [.statusCheckRollup[]? | ((.conclusion // .state // "") | ascii_upcase)]
+    | length > 0 and all(IN("SUCCESS", "NEUTRAL", "SKIPPED"))' >/dev/null 2>&1
+}
+
 for PROJECT in "${PROJECTS[@]}"; do
   REPO_DIR="$BASE_DIR/$PROJECT"
 
@@ -263,6 +276,30 @@ for PROJECT in "${PROJECTS[@]}"; do
   ensure_hold_label "$PROJECT"
   gh label create "$TRUST_HELD_LABEL" --repo "alexsiri7/$PROJECT" \
     --color "d93f0b" --description "Held by the factory for the owner" 2>/dev/null || true
+
+  # --- Resume runs parked on CI attention whose PR is now green ---
+  # A ship run that saw late red it did not introduce pauses at the CI
+  # attention step, waiting for someone to re-run the check and resume it, and
+  # pr_owned_by_live_run keeps every phase below off its PR meanwhile (#174).
+  # Green CI is that someone: resume the run so it flips its own draft ready
+  # and exits, and a later tick merges it. Never merge under the paused run —
+  # --delete-branch would take its worktree. Every node after the pause is a
+  # script, so this runs while QUOTA_HELD too.
+  if archon_runs_known; then
+    ARCHON_PRS=$(list_prs merge '.headRefName | startswith("archon/task-")')
+    while IFS=$'\t' read -r PR HEAD HOLD _; do
+      [ -n "$PR" ] && [ "$HOLD" != true ] || continue
+      RUN=$(archon_branch_ci_attention_run "$HEAD") || continue
+      if ! pr_checks_green "$PR"; then
+        log "$PROJECT: PR #$PR — run $RUN is parked on CI attention and the checks are not all green yet"
+        continue
+      fi
+      log "$PROJECT: PR #$PR is green — resuming run $RUN parked on CI attention"
+      ACK=$(CLAUDECODE=0 ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING=1 \
+        archon workflow resume "$RUN" --detach --json --cwd "$ARCHON_RUNS_CWD" 2>&1 | tail -1) || true
+      log "$PROJECT: resume $RUN — $ACK"
+    done <<< "$ARCHON_PRS"
+  fi
 
   # --- Phase 0: Promote CLEAN draft PRs to ready-for-review ---
   # Archon workflows create PRs as drafts by default. When CI is green the

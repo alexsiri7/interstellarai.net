@@ -23,6 +23,7 @@
 #   archon_worktrees_known || ...       # false when some active run's worktree is unknown
 #   archon_runs_known || ...            # false when this tick's snapshot failed
 #   archon_parked_runs 1800             # rows for paused runs nothing will resume
+#   run_id=$(archon_branch_ci_attention_run "$head") # paused at the CI attention step on this branch
 #   archon_failed_runs_snapshot         # once per tick: failed runs nothing adopted
 #   run_id=$(archon_branch_failed_run "$head") # such a run left this branch
 #   archon_failed_runs_known || ...     # false when that listing failed
@@ -43,16 +44,28 @@ ARCHON_RUNS_CWD="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # 1 when the last archon_runs_snapshot listed both statuses, 0 otherwise.
 ARCHON_RUNS_SNAPSHOT_OK=0
 
+# The deliver tail's CI attention pause (archon-deliver.yaml
+# ci-attention.attention-ci-pause): late red the branch did not introduce.
+# pr-maintenance resumes it once the PR is green; archon_parked_runs reports it
+# only after ARCHON_CI_ATTENTION_MAX_SECONDS.
+ARCHON_CI_ATTENTION_STEP_RE='(^|[._])attention-ci-pause$'
+ARCHON_CI_ATTENTION_MAX_SECONDS="${ARCHON_CI_ATTENTION_MAX_SECONDS:-86400}"
+
 # Snapshot all running + paused runs to $ARCHON_RUNS_SNAPSHOT as TSV:
 #   $1 workflow_name  $2 status  $3 origin_path  $4 user_message
 #   $5 run_id         $6 pause class            $7 deadline    $8 waiting_since
-#   $9 working_path (the run's worktree)
-# Fields 5-9 are appended so every $1..$4 matcher keeps working unchanged.
+#   $9 working_path (the run's worktree)  $10 pause step  $11 pause message
+# Fields 5-11 are appended so every $1..$4 matcher keeps working unchanged.
 #
 # The pause class is "" for a running run; for a paused one it mirrors
 # `runAttention` in archon's packages/workflows/src/schemas/workflow-run.ts
 # (isApprovalContext / isGateResolved), so the two can be diffed when the engine
 # moves:
+#   attention  a durable `wait:` with kind "attention" — runAttention's
+#              `action_required`, checked before any gate. Something outside the
+#              run is owed an action (re-run a check, fix a secret), then
+#              `archon workflow resume`. No deadline; $8 is its waitingSince.
+#              Before this class existed such runs read as `unreadable`.
 #   wait       no approval gate and a durable `wait:` with a readable resumeAt.
 #              The server's continuation scan owns the resume.
 #   resolved   a gate that was already approved or rejected — the machine's to
@@ -84,6 +97,11 @@ ARCHON_RUNS_SNAPSHOT_OK=0
 # rewritten, so taking the max keeps a scheduler that is actively retrying from
 # ever looking stale. $8 is wait.waitingSince as an epoch, 0 otherwise.
 #
+# $10 and $11 name what an `attention` or `gate` pause is waiting on, and are
+# empty for every other class. For `attention` they are archon's step name
+# (workflowWaitStepName: "<nodeId>.<bodyWaitId>" for a loop-owned wait) and
+# wait.message; for `gate`, approval.nodeId and approval.message.
+#
 # A listing failure, or a page holding fewer runs than its `total` (the listing
 # is capped at 100), leaves the snapshot short and sets ARCHON_RUNS_SNAPSHOT_OK=0
 # with one stderr line per failed status (cron captures stderr into the tick
@@ -112,28 +130,40 @@ def epoch(value):
     except ValueError:
         return 0
 
+def nonempty(value):
+    return isinstance(value, str) and value != ""
+
 def classify(meta):
-    """(class, deadline, waiting_since) for a paused run — see the header."""
+    """(class, deadline, waiting_since, step, need) for a paused run — see the header."""
     wait = meta.get("wait")
     wait = wait if isinstance(wait, dict) else {}
+    if wait.get("kind") == "attention" and nonempty(wait.get("nodeId")) \
+            and isinstance(wait.get("message"), str):
+        step = wait["nodeId"]
+        if wait.get("owner") == "loop_group" and nonempty(wait.get("bodyWaitId")):
+            step = step + "." + wait["bodyWaitId"]
+        return ("attention", 0, epoch(wait.get("waitingSince")), step, wait["message"])
     resume_at = epoch(wait.get("resumeAt"))
     approval = meta.get("approval")
     if approval is None:
         if not resume_at:
-            return ("unreadable", 0, 0)
+            return ("unreadable", 0, 0, "", "")
         deadline = max(resume_at, epoch(meta.get("continuation_retry_at")))
-        return ("wait", deadline, epoch(wait.get("waitingSince")))
-    if not isinstance(approval, dict) or not isinstance(approval.get("nodeId"), str) \
-            or not isinstance(approval.get("message"), str) or approval["nodeId"] == "":
-        return ("unreadable", 0, 0)
+        return ("wait", deadline, epoch(wait.get("waitingSince")), "", "")
+    if not isinstance(approval, dict) or not nonempty(approval.get("nodeId")) \
+            or not isinstance(approval.get("message"), str):
+        return ("unreadable", 0, 0, "", "")
     if approval.get("resolved") in ("approved", "rejected"):
-        return ("resolved", 0, 0)
+        return ("resolved", 0, 0, "", "")
     if approval.get("type") == "child_workflow":
         child = approval.get("childRunId")
-        if not isinstance(child, str) or child == "":
-            return ("unreadable", 0, 0)
-        return ("blocked_on_child", 0, 0)
-    return ("gate", 0, 0)
+        if not nonempty(child):
+            return ("unreadable", 0, 0, "", "")
+        return ("blocked_on_child", 0, 0, "", "")
+    return ("gate", 0, 0, approval["nodeId"], approval["message"])
+
+def field(value):
+    return (value or "").replace("\t", " ").replace("\n", " ")
 
 raw = sys.stdin.read()
 try:
@@ -152,14 +182,15 @@ if isinstance(total, int) and total > len(runs):
     sys.exit(3)
 for r in runs:
     name = r.get("workflow_name") or ""
-    msg = (r.get("user_message") or "").replace("\t", " ").replace("\n", " ")
+    msg = field(r.get("user_message"))
     meta = r.get("metadata") or {}
     origin = ((meta.get("workflow_source") or {}).get("origin")) or ""
     status = r.get("status") or ""
     run_id = r.get("id") or ""
-    wpath = (r.get("working_path") or "").replace("\t", " ").replace("\n", " ")
-    pause, deadline, since = classify(meta) if status == "paused" else ("", 0, 0)
-    print(f"{name}\t{status}\t{origin}\t{msg}\t{run_id}\t{pause}\t{deadline}\t{since}\t{wpath}")
+    wpath = field(r.get("working_path"))
+    pause, deadline, since, step, need = classify(meta) if status == "paused" else ("", 0, 0, "", "")
+    print(f"{name}\t{status}\t{origin}\t{msg}\t{run_id}\t{pause}\t{deadline}\t{since}\t{wpath}"
+          f"\t{field(step)}\t{field(need)}")
 ' 2>&1 >> "$ARCHON_RUNS_SNAPSHOT"); then
       continue
     fi
@@ -232,7 +263,8 @@ archon_worktrees_known() {
 
 # archon_parked_runs <stale_seconds> [hard_max_seconds]
 # Print one TSV row per paused run that nothing will resume on its own:
-#   run_id <TAB> class <TAB> workflow_name <TAB> origin <TAB> user_message <TAB> deadline_epoch
+#   run_id <TAB> class <TAB> workflow_name <TAB> origin <TAB> user_message
+#   <TAB> deadline_epoch <TAB> pause step <TAB> pause message
 # Call after archon_runs_snapshot, and only when archon_runs_known — an
 # unreadable snapshot has no paused rows and would look like a quiet pipeline.
 #
@@ -246,14 +278,33 @@ archon_worktrees_known() {
 # way to see a scheduler that is alive but failing every retry. hard_max
 # defaults to 4x stale; runs with no readable waitingSince skip that backstop
 # rather than trip it every tick.
+#
+# An `attention` run is reported immediately, unless it is at the CI attention
+# step: pr-maintenance resumes that one once its PR is green, so it is reported
+# only after waiting ARCHON_CI_ATTENTION_MAX_SECONDS (or at once when it has no
+# readable waitingSince to age it by).
 archon_parked_runs() {
   local stale="$1" hard_max="${2:-$(( $1 * 4 ))}"
   [ -s "$ARCHON_RUNS_SNAPSHOT" ] || return 0
-  awk -F'\t' -v now="$(date +%s)" -v stale="$stale" -v hard="$hard_max" '
-    function report() { print $5 "\t" $6 "\t" $1 "\t" $3 "\t" $4 "\t" $7 }
+  awk -F'\t' -v now="$(date +%s)" -v stale="$stale" -v hard="$hard_max" \
+      -v cire="$ARCHON_CI_ATTENTION_STEP_RE" -v cimax="$ARCHON_CI_ATTENTION_MAX_SECONDS" '
+    function report() { print $5 "\t" $6 "\t" $1 "\t" $3 "\t" $4 "\t" $7 "\t" $10 "\t" $11 }
     $6 == "gate" || $6 == "resolved" || $6 == "unreadable" { report(); next }
+    $6 == "attention" && ($10 !~ cire || $8 == 0 || now - $8 > cimax) { report(); next }
     $6 == "wait" && (now - $7 > stale || ($8 > 0 && now - $8 > hard)) { report() }
   ' "$ARCHON_RUNS_SNAPSHOT"
+}
+
+# archon_branch_ci_attention_run <branch> — print the id of a run paused at
+# the CI attention step whose worktree is <branch> (archon names each run's
+# worktree after its branch, as archon_branch_failed_run relies on). Exit 0 on
+# match, 1 otherwise.
+archon_branch_ci_attention_run() {
+  [ -n "$1" ] && [ -s "$ARCHON_RUNS_SNAPSHOT" ] || return 1
+  awk -F'\t' -v tail="/$1" -v cire="$ARCHON_CI_ATTENTION_STEP_RE" '
+    $6 == "attention" && $10 ~ cire && substr($9, length($9) - length(tail) + 1) == tail {
+      print $5; found = 1; exit }
+    END { exit found ? 0 : 1 }' "$ARCHON_RUNS_SNAPSHOT"
 }
 
 # Failed runs nothing has adopted, as "<run_id>\t<working_path>" lines.

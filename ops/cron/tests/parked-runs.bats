@@ -35,11 +35,11 @@ teardown() {
     rm -rf "$BATS_TMPDIR/parked-$$"
 }
 
-# run_id, class, workflow, origin, user_message, deadline_epoch
+# run_id, class, workflow, origin, user_message, deadline_epoch, step, need
 parked_row() {
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$1" "$2" archon-ship /mnt/ext-fast/un-reminder "fix #361" "$(( $(date +%s) - 7200 ))" \
-      >> "$PARKED_ROWS"
+      "${3:-}" "${4:-}" >> "$PARKED_ROWS"
 }
 
 @test "a stale wait is resumed once, without an alert" {
@@ -88,6 +88,21 @@ parked_row() {
     [ ! -e "$ARCHON_ARGV" ]
 }
 
+@test "a CI attention row is alerted once with what it needs, never resumed or answered" {
+    parked_row 5deb98da-aaaa attention deliver__ci-attention.attention-ci-pause \
+      "CI remains non-green for pull request #735: Re-run the failing check, then resume this run."
+    check_parked_runs
+
+    [ "$(wc -l < "$NOTIFIED")" -eq 1 ]
+    grep -q '(attention at deliver__ci-attention.attention-ci-pause)' "$NOTIFIED"
+    grep -q 'Re-run the failing check, then resume this run.' "$NOTIFIED"
+    [ ! -e "$ARCHON_ARGV" ]
+
+    check_parked_runs
+    [ "$(wc -l < "$NOTIFIED")" -eq 1 ]
+    [ ! -e "$ARCHON_ARGV" ]
+}
+
 @test "an unreadable pause is reported, and no resume is attempted" {
     parked_row 500946af-ffff unreadable
     check_parked_runs
@@ -117,16 +132,18 @@ parked_row() {
 }
 
 @test "a user message with spaces survives into the notification intact" {
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' 500946af-dddd gate archon-ship \
-      /mnt/ext-fast/un-reminder "fix #361 — ship the thing" 0 >> "$PARKED_ROWS"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' 500946af-dddd gate archon-ship \
+      /mnt/ext-fast/un-reminder "fix #361 — ship the thing" 0 review-gate "Ship it now?" >> "$PARKED_ROWS"
     check_parked_runs
 
     grep -q 'fix #361 — ship the thing' "$NOTIFIED"
     grep -q 'un-reminder' "$NOTIFIED"
+    grep -q '(gate at review-gate)' "$NOTIFIED"
+    grep -q 'Ship it now?' "$NOTIFIED"
 }
 
 @test "the real archon_parked_runs row feeds check_parked_runs unchanged" {
-    # The only test that crosses the seam: both sides assert the six-column
+    # The only test that crosses the seam: both sides assert the eight-column
     # contract independently, so a reordered column would otherwise pass twice.
     # shellcheck disable=SC1091
     source "$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/lib/archon-active-runs.sh"
@@ -140,4 +157,22 @@ parked_row() {
     grep -q 'workflow resume 500946af-bbbb --detach' "$ARCHON_ARGV"
     [ -e "$PARKED_DIR/resumed-500946af-bbbb" ]
     [ ! -e "$NOTIFIED" ]
+}
+
+@test "the real archon_parked_runs row of a day-old CI attention run is alerted, not resumed" {
+    # shellcheck disable=SC1091
+    source "$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/lib/archon-active-runs.sh"
+    ARCHON_RUNS_SNAPSHOT="$STATE_DIR/snapshot"
+    ARCHON_RUNS_SNAPSHOT_OK=1
+    printf 'archon-ship\tpaused\t/mnt/ext-fast/filmduel\tfix #586\t5deb98da-aaaa\tattention\t0\t%s\t%s\t%s\t%s\n' \
+      "$(( $(date +%s) - 90000 ))" /w/filmduel/worktrees/archon/task-archon-ship-1 \
+      deliver__ci-attention.attention-ci-pause "CI remains non-green for pull request #735." \
+      > "$ARCHON_RUNS_SNAPSHOT"
+
+    check_parked_runs
+
+    [ "$(wc -l < "$NOTIFIED")" -eq 1 ]
+    grep -q 'archon-ship (attention at deliver__ci-attention.attention-ci-pause) — fix #586' "$NOTIFIED"
+    grep -q 'CI remains non-green for pull request #735. run 5deb98da-aaaa' "$NOTIFIED"
+    [ ! -e "$ARCHON_ARGV" ]
 }
