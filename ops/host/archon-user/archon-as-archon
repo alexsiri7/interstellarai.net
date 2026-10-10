@@ -191,7 +191,7 @@ archon_env() {
 # run_in <dir> <cmd...> — exec <cmd> in <dir> with the archon environment.
 run_in() {
     local dir="$1"; shift
-    [ -n "$dir" ] && [ -d "$dir" ] || die 1 "no directory to run in (${dir:-empty})"
+    if ! { [ -n "$dir" ] && [ -d "$dir" ]; }; then die 1 "no directory to run in (${dir:-empty})"; fi
     archon_env
     mkdir -p "$ARCHON_HOME_DIR/tmp" 2>/dev/null || true
     cd "$dir" || die 1 "cannot cd to $dir"
@@ -269,9 +269,9 @@ check_value() {
     local f="$1" v="$2"
     case "$f" in
         --branch|-b|--from|--from-branch|--base)
-            [[ "$v" =~ $re_ref ]] && [[ "$v" != -* ]] || refuse "$f value '$v'" ;;
+            if ! { [[ "$v" =~ $re_ref ]] && [[ "$v" != -* ]]; }; then refuse "$f value '$v'"; fi ;;
         --input)
-            [[ "$v" =~ ^[A-Za-z0-9_.-]{1,64}= ]] && [ "${#v}" -le 8000 ] || refuse "$f value (want name=value)" ;;
+            if ! { [[ "$v" =~ ^[A-Za-z0-9_.-]{1,64}= ]] && [ "${#v}" -le 8000 ]; }; then refuse "$f value (want name=value)"; fi ;;
         --model)
             [[ "$v" =~ ^[A-Za-z0-9@_.-]{1,64}=[A-Za-z0-9@_.:/\[\]-]{1,128}$ ]] || refuse "$f value '$v'" ;;
         --adopt|--supersedes|--conversation-id)
