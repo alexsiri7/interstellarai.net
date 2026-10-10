@@ -33,12 +33,25 @@ jobs:
         with:
           python-version: "3.12"
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Match the workstation the scripts run on: mawk as awk (the tests' load_fn
+      # helpers extract functions with mawk-compatible patterns), bats 1.13, no
+      # shellcheck yet (its lint tests skip there; enabling them is #179), and a
+      # root-only /usr/local/bin (the runner ships it mode 777, which the
+      # installers rightly refuse).
       - name: Install test tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq bats shellcheck jq
+          sudo apt-get install -y -qq mawk jq
+          sudo update-alternatives --set awk /usr/bin/mawk
+          sudo apt-get remove -y -qq shellcheck >/dev/null 2>&1 || true
+          sudo chmod 755 /usr/local/bin
+          npm install -g bats@1.13.0 >/dev/null
           python -m pip install --quiet pytest==8.3.5
-          bats --version
+          bats --version; awk -W version 2>&1 | head -1
 
       - name: Python tests
         run: python -m pytest -q ops/cron/tests
