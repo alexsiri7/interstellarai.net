@@ -38,7 +38,8 @@
 #   6. toolchains copied into archon's home (bun, claude, gh, shellcheck, uv,
 #      JDK, Android SDK, Playwright browsers, rustup/cargo, Flutter SDK)
 #   7. /etc/archon-user/projects, /usr/local/lib/archon-user/bin/archon,
-#      /usr/local/bin/archon-as-archon, the root-owned ops snapshot
+#      /usr/local/bin/archon-as-archon and its /usr/local/lib/archon-user/fuel_probe.py,
+#      the root-owned ops snapshot
 #      (/usr/local/lib/archon-ops, bootstrapped from the live checkout when absent)
 #      and its entrypoints /usr/local/sbin/archon-{user-install,host-install,ops-promote},
 #      /etc/sudoers.d/archon-user (visudo checked, rolled back on failure),
@@ -802,6 +803,8 @@ fi
 run ln -sfn "$ENGINE/packages/cli/src/cli.ts" "$LIBDIR/bin/archon"
 if [ -r "$WRAPPER_DST" ] && cmp -s "$SCRIPT_DIR/archon-as-archon" "$WRAPPER_DST"; then done_ "$WRAPPER_DST already done"
 else run install -m 0755 -o root -g root "$SCRIPT_DIR/archon-as-archon" "$WRAPPER_DST" && done_ "installed $WRAPPER_DST"; fi
+if [ -r "$LIBDIR/fuel_probe.py" ] && cmp -s "$SCRIPT_DIR/fuel_probe.py" "$LIBDIR/fuel_probe.py"; then done_ "$LIBDIR/fuel_probe.py already done"
+else run install -m 0644 -o root -g root "$SCRIPT_DIR/fuel_probe.py" "$LIBDIR/fuel_probe.py" && done_ "installed $LIBDIR/fuel_probe.py"; fi
 install_ops_entrypoints
 install_sudoers
 if [ -r "$UNIT_DST" ] && cmp -s "$SCRIPT_DIR/$UNIT" "$UNIT_DST"; then done_ "$UNIT_DST already done"

@@ -37,6 +37,9 @@
 #   --version | version                                           archon CLI
 #   doctor                                                        archon doctor
 #   claude-probe [timeout-seconds]   one real `claude -p --model haiku` request
+#   fuel-probe                       one 1-token haiku API request; writes the
+#                                    account's plan-usage.json from its rate-limit
+#                                    headers (fuel_probe.py, #165)
 #   gh-probe                         gh auth + push access per factory repo
 #   worktree-trim [--dry-run] [--tmp-only]
 #                                    remove stale task worktrees (no open PR, idle 4h),
@@ -73,6 +76,7 @@ CONFIG_FILE=/etc/archon-user/config
 OWNER_BASE=/mnt/ext-fast
 TMP_ROOT=/tmp
 ARCHON_BIN=/usr/local/lib/archon-user/bin/archon     # symlink -> <archon checkout>/packages/cli/src/cli.ts
+FUEL_PROBE=/usr/local/lib/archon-user/fuel_probe.py
 GH_OWNER=alexsiri7
 DRY_EXEC=0
 
@@ -84,6 +88,7 @@ if [ "${ARCHON_AS_TEST:-}" = 1 ] && [ -z "${SUDO_USER:-}" ]; then
     OWNER_BASE="${ARCHON_AS_OWNER_BASE:-$OWNER_BASE}"
     TMP_ROOT="${ARCHON_AS_TMP_ROOT:-$TMP_ROOT}"
     ARCHON_BIN="${ARCHON_AS_ARCHON_BIN:-$ARCHON_BIN}"
+    FUEL_PROBE="${ARCHON_AS_FUEL_PROBE:-$FUEL_PROBE}"
     DRY_EXEC="${ARCHON_AS_DRY_EXEC:-0}"
 fi
 
@@ -359,6 +364,11 @@ verb_claude_probe() {
     [[ "$t" =~ ^[0-9]{1,4}$ ]] || refuse "timeout '$t'"
     [ "$#" -le 1 ] || refuse "too many arguments"
     run_in "$ARCHON_HOME_DIR" timeout "$t" claude -p --model haiku "ok"
+}
+
+verb_fuel_probe() {
+    [ "$#" -eq 0 ] || refuse "fuel-probe takes no arguments"
+    run_in "$ARCHON_HOME_DIR" timeout 60 python3 "$FUEL_PROBE"
 }
 
 # write_status <owner/repo> — HTTP status of a write the token can never
@@ -707,6 +717,7 @@ case "$verb" in
     doctor)               [ "$#" -eq 0 ] || refuse "doctor takes no arguments"
                           run_in "$(first_clone)" "$ARCHON_BIN" doctor ;;
     claude-probe)         verb_claude_probe "$@" ;;
+    fuel-probe)           verb_fuel_probe "$@" ;;
     gh-probe)             verb_gh_probe "$@" ;;
     worktree-trim)        verb_worktree_trim "$@" ;;
     bun-upgrade)          [ "$#" -eq 0 ] || refuse "bun-upgrade takes no arguments"

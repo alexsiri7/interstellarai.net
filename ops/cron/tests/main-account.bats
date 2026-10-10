@@ -95,6 +95,29 @@ DAY=86400
     [ "$(grep -c probe "$T/argv")" -eq 0 ]
 }
 
+@test "the record fuel-probe writes is one the verdict reads" {
+    # The headers a 1-token request on the factory account answered with (#165),
+    # read at 2026-10-09T15:30Z (epoch 1791559800).
+    python3 - "$LIB/../../host/archon-user" "$T/main" <<'PY'
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import fuel_probe
+headers = {
+    "anthropic-ratelimit-unified-5h-utilization": "0.27",
+    "anthropic-ratelimit-unified-5h-reset": "1791574800",
+    "anthropic-ratelimit-unified-7d-utilization": "0.03",
+    "anthropic-ratelimit-unified-7d-reset": "1792159200",
+}
+record = fuel_probe.record_from_headers(headers, datetime.fromtimestamp(1791559800, UTC))
+fuel_probe.write_record(Path(sys.argv[2]), record)
+PY
+    guard '{ "enabled": true, "weeklyCapPercent": 65, "fiveHourCapPercent": 60, "pace": false }'
+    run main_account_verdict 1791559860
+    [ "$output" = "ok 7d 3% of a 65% cap, 5h 27%/60%" ]
+}
+
 @test "no reading even after the probe: held, never taken as room" {
     run main_account_may_launch test
     [ "$status" -eq 1 ]

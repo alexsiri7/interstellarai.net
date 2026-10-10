@@ -170,6 +170,14 @@ setup() {
     [ "$status" -eq 64 ]
 }
 
+@test "fuel-probe runs the root-owned probe with the account's token, no arguments" {
+    ARCHON_AS_FUEL_PROBE=/x/fuel_probe.py run "$W" fuel-probe
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ARGV: timeout 60 python3 /x/fuel_probe.py"* ]]
+    run "$W" fuel-probe 5
+    [ "$status" -eq 64 ]
+}
+
 @test "the factory's Claude token is passed from its token file, read as data" {
     mkdir -p "$T/home/.config/archon-user"
     printf 'CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-abcDEF_123\n' > "$T/home/.config/archon-user/claude.env"
@@ -472,6 +480,11 @@ make_tmp_sandbox() {
     [[ "$output" != *factoryTOKEN* ]]
     [[ "$output" == *"ENV=CLAUDE_CONFIG_DIR=$T/home/.claude-main"* ]]
     [[ "$output" == *"ARGV: /usr/local/lib/archon-user/bin/archon workflow run archon-ship fix #12"* ]]
+    run "$W" --account main fuel-probe
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ENV=CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-mainTOKEN_22"* ]]
+    [[ "$output" != *factoryTOKEN* ]]
+    [[ "$output" == *"ENV=CLAUDE_CONFIG_DIR=$T/home/.claude-main"* ]]
     run "$W" --account factory claude-probe
     [[ "$output" == *factoryTOKEN* ]]
     [[ "$output" != *CLAUDE_CONFIG_DIR* ]]
