@@ -209,6 +209,28 @@ asked() { grep -c '^ask_question' "$LACHESIS_ARGV" || true; }
     [ "$(launches)" -eq 1 ]
 }
 
+@test "an unreadable newest trusted report is not a verdict, even over a readable older one" {
+    local older=$(report false correct $SHA1) newer
+    export GH_PR_LIST="[$(pr 7 $SHA1)]"
+    for newer in \
+        "$(printf '<!-- archon-review-report -->\n## 1. Verdict\n\n**ready: true** — **action: correct**\n\n## 3. Reviewed head SHA\n\n`%s`\n' $SHA1)" \
+        "$(printf '<!-- archon-review-report -->\n## 1. Verdict\n\n**ready: false** — **action: correct**\n\n## 3. Reviewed head SHA\n\nunknown\n')"; do
+        export GH_PR_COMMENTS="$(jq -c --arg b "$newer" '.comments += [{author: {login: "alexsiri7-factory"}, body: $b}]' <<<"$older")"
+        tick
+        [ "$(launches)" -eq 0 ]
+        [[ "$output" == *"no CLEAN PRs need correction"* ]]
+    done
+}
+
+@test "a verdict rendered as a list item rather than a heading is read" {
+    local body
+    body=$(printf '<!-- archon-review-report -->\n# Review Report\n\n1. **Verdict:** **ready: false**, `action: correct`. Findings remain.\n2. **Findings:** R1.\n3. **Reviewed head SHA:** `%s`\n' $SHA1)
+    export GH_PR_LIST="[$(pr 7 $SHA1)]"
+    export GH_PR_COMMENTS="$(jq -nc --arg b "$body" '{comments: [{author: {login: "alexsiri7-factory"}, body: $b}]}')"
+    tick
+    [ "$(launches)" -eq 1 ]
+}
+
 @test "a live correction run owns the PR: no second launch, no merge" {
     export GH_PR_LIST="[$(pr 7 $SHA1 archon/task-archon-deliver-9)]" GH_PR_COMMENTS="$(report false correct $SHA1)"
     export GH_PR_DIFF="README.md"

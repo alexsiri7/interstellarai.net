@@ -195,9 +195,9 @@ abandon_reviews() {
 # pr_review_verdict <number> — prints "<ready> <action> <reviewed-sha>" from the
 # PR's newest canonical review report ($REVIEW_MARKER) by an author the trust
 # gate admits; a stranger can post a report too. The report is model-written
-# markdown, so emphasis is stripped and the first ready:/action: after the
-# Verdict heading and the first full SHA after the "Reviewed head SHA" heading
-# are taken. Exit 1 when there is no such report, a part is missing, or ready
+# markdown with no fixed layout, so emphasis is stripped and the first
+# ready:/action: after the first line naming the Verdict (a heading or a list
+# item) and the first full SHA after the "Reviewed head SHA" line are taken. Exit 1 when there is no such report, a part is missing, or ready
 # and action contradict each other: an unreadable verdict acts on nothing.
 pr_review_verdict() {
   local json login body text ready action sha
@@ -205,9 +205,9 @@ pr_review_verdict() {
   while IFS=$'\t' read -r login body; do
     trust_commenter_ok "$login" || continue
     text=$(printf '%s' "$body" | base64 -d 2>/dev/null | tr -d '*`') || return 1
-    ready=$(printf '%s\n' "$text" | sed -n '/^#.*Verdict/,$p' \
+    ready=$(printf '%s\n' "$text" | sed -n '/Verdict/,$p' \
       | grep -oE 'ready:[[:space:]]*(true|false)' | head -1 | grep -oE '(true|false)$' || true)
-    action=$(printf '%s\n' "$text" | sed -n '/^#.*Verdict/,$p' \
+    action=$(printf '%s\n' "$text" | sed -n '/Verdict/,$p' \
       | grep -oE 'action:[[:space:]]*(none|correct|replan)' | head -1 | grep -oE '[a-z]+$' || true)
     sha=$(printf '%s\n' "$text" | sed -n '/[Rr]eviewed head SHA/,$p' \
       | grep -oE '[0-9a-f]{40}' | head -1 || true)
