@@ -415,6 +415,7 @@ if [ "$MODE" = claude-token ]; then
         else write_ah_file "$cm/budget-guard.json" 0640 '{ "enabled": true, "weeklyCapPercent": 65, "fiveHourCapPercent": 60, "pace": true }
 '; fi
         cpath="$AH/.local/bin:/usr/local/bin:/usr/bin:/bin"
+        # shellcheck disable=SC2016  # $HOME must expand in the inner sh (env -i HOME=...), not here
         if runuser -u "$ARCHON_USER" -- env -i HOME="$AH" PATH="$cpath" CLAUDE_CONFIG_DIR="$cm" \
                 sh -c 'cd "$HOME" && { claude plugin marketplace add alexsiri7/lachesis || claude plugin marketplace update lachesis; } >/dev/null 2>&1 && claude plugin install plan-usage@lachesis >/dev/null 2>&1'; then
             done_ "plan-usage plugin installed in $cm"
