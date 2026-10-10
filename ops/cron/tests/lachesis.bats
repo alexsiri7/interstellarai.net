@@ -88,6 +88,15 @@ STUB
     [ "$output" = '{"repo":"alexsiri7/testproj","question":"Why \"this\"?","kind":"clarification","asker":"factory","blocks":[12],"issue":12,"context":"some context"}' ]
 }
 
+@test "lachesis_note records a clarification question that blocks no issue" {
+    export LACHESIS_CALL_CMD="$T/bin/lachesis"
+    lachesis_note testproj 'Merge PR #7?' 'https://x'
+    run jq -c . <<<"$(sed -E 's/^ask_question //' "$LACHESIS_ARGV")"
+    [ "$output" = '{"repo":"alexsiri7/testproj","question":"Merge PR #7?","kind":"clarification","asker":"factory","blocks":[],"context":"https://x"}' ]
+    LACHESIS_RC=2 run lachesis_note testproj 'q?'
+    [ "$status" -eq 2 ]
+}
+
 @test "lachesis_ask_once asks once per issue and key, and again after a failure" {
     export LACHESIS_CALL_CMD="$T/bin/lachesis"
     LACHESIS_RC=1 run lachesis_ask_once testproj 12 k 'q?'

@@ -344,3 +344,30 @@ FAILED_SHIP_RUN='{"runs": [{"id": "run-329", "workflow_name": "archon-ship", "st
     ! archon_failed_runs_known
     ! archon_branch_failed_run archon/task-archon-ship-17
 }
+
+# ── completed runs (`--status completed`), the run a follow-up adopts ────────
+
+COMPLETED_RUNS='{"runs": [
+  {"id": "old", "status": "completed", "completed_at": "2026-10-01T10:00:00Z", "working_path": "/w/p/worktrees/archon/task-archon-ship-17"},
+  {"id": "new", "status": "completed", "completed_at": "2026-10-09T10:00:00Z", "working_path": "/w/p/worktrees/archon/task-archon-ship-17"},
+  {"id": "suffix", "status": "completed", "completed_at": "2026-10-10T10:00:00Z", "working_path": "/w/p/worktrees/archon/task-archon-ship-117"}], "total": 3}'
+
+@test "archon_branch_completed_run names the newest completed run whose worktree is the branch" {
+    export STUB_PAYLOAD="$COMPLETED_RUNS"
+    [ "$(archon_branch_completed_run archon/task-archon-ship-17)" = "new" ]
+    [[ "$(cat "$STUB_ARGV")" == "workflow runs --all --status completed --limit 10000 --json --cwd "* ]]
+    ! archon_branch_completed_run archon/task-archon-ship-7
+    ! archon_branch_completed_run ""
+}
+
+@test "archon_branch_completed_run fails on an unreadable or truncated listing" {
+    export STUB_PAYLOAD="$NOT_A_REPO" STUB_RC=1
+    run --separate-stderr archon_branch_completed_run archon/task-archon-ship-17
+    [ "$status" -eq 1 ]
+    [[ "$stderr" == *"could not list completed runs"*"Not in a git repository"* ]]
+    export STUB_PAYLOAD="$COMPLETED_RUNS" STUB_RC=0
+    ARCHON_FAILED_RUNS_LIMIT=3
+    run --separate-stderr archon_branch_completed_run archon/task-archon-ship-17
+    [ "$status" -eq 1 ]
+    [[ "$stderr" == *"listing may be truncated: 3 runs at --limit 3"* ]]
+}

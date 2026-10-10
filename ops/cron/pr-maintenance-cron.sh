@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # pr-maintenance-cron.sh — Run from cron every 15 minutes.
-# Zero AI cost when nothing to do. Processes one PR per project per run.
+# Zero AI cost when nothing to do. At most one maintenance and one correction
+# launch per project per run.
 #
 # Usage:
 #   ./scripts/pr-maintenance-cron.sh                    # all projects
@@ -43,6 +44,8 @@ archon_runs_snapshot
 archon_failed_runs_snapshot
 # shellcheck source=lib/trust.sh
 source "$SCRIPT_DIR/lib/trust.sh"
+# shellcheck source=lib/lachesis.sh
+source "$SCRIPT_DIR/lib/lachesis.sh"
 BASE_DIR="${BASE_DIR:-/mnt/ext-fast}"
 LOG_PREFIX="[pr-maintenance]"
 # Same directory the crontab sends this script's own log to; survives a reboot
@@ -54,9 +57,18 @@ mkdir -p "$LOG_DIR"
 # unmerged — e.g. an asset-upload PR whose head another workflow fetches from.
 HOLD_LABEL="hold"
 # One marker per project and PR holding the "<headRefOid> <mergeStateStatus>"
-# Phase 2 last launched archon-pr-maintenance for.
+# Phase 2 last launched archon-pr-maintenance for. Also Phase 1's approval
+# notice and Phase 3's correction/notice markers.
 MAINTENANCE_STATE_DIR="$HOME/.archon/state/pr-maintenance"
 mkdir -p "$MAINTENANCE_STATE_DIR"
+# Correction launches per PR before Phase 3 escalates instead. Each launch is a
+# whole archon-deliver run with its own bounded correction loop, which fails
+# when it cannot converge; this only bounds a later standalone review that
+# disagrees with a run that ended ready. One retry covers that; a third launch
+# would replay the same disagreement.
+PR_CORRECTION_MAX_RUNS="${PR_CORRECTION_MAX_RUNS:-2}"
+# The first line of the canonical review comment archon's review publishes.
+REVIEW_MARKER='<!-- archon-review-report -->'
 
 # Use arguments if provided, otherwise all projects
 if [ $# -gt 0 ]; then
@@ -96,12 +108,14 @@ maintenance_launched_for() {
 }
 
 # pr_owned_by_live_run <number> <headRefName> <body>
-# True when the PR's head is an archon task branch and a running or paused
-# archon-ship / archon-fix-github-issue run for this project still owns it
-# (matched on the run's "fix #N" message via the PR's closing keyword, or any
-# such run for the project when the body has no closing keyword). Also true,
-# with a log line, when this tick has no run snapshot: an archon branch whose
-# run state is unknown is deferred rather than merged.
+# True when the PR's head is an archon task branch and a running or paused run
+# for this project still owns it: a Phase 3 correction run (archon-deliver,
+# matched on "PR #N" in its message) for any archon/task-* head, or the
+# archon-ship / archon-fix-github-issue run that opened it (matched on the
+# run's "fix #N" message via the PR's closing keyword, or any such run for the
+# project when the body has no closing keyword). Also true, with a log line,
+# when this tick has no run snapshot: an archon branch whose run state is
+# unknown is deferred rather than merged.
 #
 # Such a PR is still being worked: the run's review, corrections, CI wait and
 # ready flip have not finished. Merging it here with --delete-branch deletes
@@ -111,10 +125,11 @@ maintenance_launched_for() {
 # and its three Important review findings were never applied). Leave the flip
 # and the merge until the run has exited.
 pr_owned_by_live_run() {
-  local pr="$1" head="$2" body="$3" wf issue
+  local pr="$1" head="$2" body="$3" wf='' issue
   case "$head" in
     archon/task-archon-ship-*) wf='^archon-ship$' ;;
     archon/task-archon-fix-github-issue-*) wf='^archon-fix-github-issue$' ;;
+    archon/task-*) ;;
     *) return 1 ;;
   esac
   # Merging is the destructive branch (--delete-branch removes the run's
@@ -124,6 +139,8 @@ pr_owned_by_live_run() {
     log "$PROJECT: PR #$pr ($head) — no archon run snapshot this tick, treating as owned by a live run"
     return 0
   fi
+  archon_run_active "$REPO_DIR" "$PROJECT" '^archon-deliver$' "PR #${pr}([^0-9]|$)" && return 0
+  [ -n "$wf" ] || return 1
   issue=$(printf '%s' "$body" \
     | grep -oiE '(close[sd]?|fix(e[sd])?|resolve[sd]?) #[0-9]+' | head -1 \
     | grep -oE '[0-9]+$' || true)
@@ -173,6 +190,70 @@ abandon_reviews() {
       log "$PROJECT: PR #$pr — could not abandon review run $id on the merged PR"
     fi
   done < <(archon_run_active_ids "$REPO_DIR" "$PROJECT" '^archon-(review|smart-pr-review)$' "#${pr}([^0-9]|$)")
+}
+
+# pr_review_verdict <number> — prints "<ready> <action> <reviewed-sha>" from the
+# PR's newest canonical review report ($REVIEW_MARKER) by an author the trust
+# gate admits; a stranger can post a report too. The report is model-written
+# markdown, so emphasis is stripped and the first ready:/action: after the
+# Verdict heading and the first full SHA after the "Reviewed head SHA" heading
+# are taken. Exit 1 when there is no such report, a part is missing, or ready
+# and action contradict each other: an unreadable verdict acts on nothing.
+pr_review_verdict() {
+  local json login body text ready action sha
+  json=$(gh pr view "$1" --json comments 2>/dev/null) || return 1
+  while IFS=$'\t' read -r login body; do
+    trust_commenter_ok "$login" || continue
+    text=$(printf '%s' "$body" | base64 -d 2>/dev/null | tr -d '*`') || return 1
+    ready=$(printf '%s\n' "$text" | sed -n '/^#.*Verdict/,$p' \
+      | grep -oE 'ready:[[:space:]]*(true|false)' | head -1 | grep -oE '(true|false)$' || true)
+    action=$(printf '%s\n' "$text" | sed -n '/^#.*Verdict/,$p' \
+      | grep -oE 'action:[[:space:]]*(none|correct|replan)' | head -1 | grep -oE '[a-z]+$' || true)
+    sha=$(printf '%s\n' "$text" | sed -n '/[Rr]eviewed head SHA/,$p' \
+      | grep -oE '[0-9a-f]{40}' | head -1 || true)
+    case "$ready $action" in
+      "true none"|"false correct"|"false replan") ;;
+      *) return 1 ;;
+    esac
+    [ -n "$sha" ] || return 1
+    echo "$ready $action $sha"
+    return 0
+  done < <(printf '%s' "$json" | jq -r --arg m "$REVIEW_MARKER" \
+    '[.comments[]? | select((.body // "") | startswith($m))] | reverse[] | [(.author.login // ""), (.body | @base64)] | @tsv' 2>/dev/null)
+  return 1
+}
+
+# owner_notice_once <key> <title> <question> <context> — hand the owner one
+# thing to do, once per (project, key): a Lachesis question, which Lachesis
+# pushes to the owner and lists first in the morning briefing, or one ntfy when
+# Lachesis cannot take it (both would push twice). The marker is written only
+# once a notice went out, or when there is no ntfy topic either (logged only),
+# so a failed notice is retried next tick.
+owner_notice_once() {
+  local key="$1" title="$2" question="$3" context="$4"
+  local marker="$MAINTENANCE_STATE_DIR/$PROJECT-$key.notified"
+  [ -e "$marker" ] && return 0
+  if lachesis_note "$PROJECT" "$question" "$context"; then
+    log "$PROJECT: $question — asked the owner in Lachesis"
+  elif [ -z "${NTFY_TOPIC:-}" ]; then
+    log "$PROJECT: $question — logged only"
+  elif curl -s --fail -o /dev/null -H "Title: $title" -H "Tags: eyes" \
+         -d "$question $context" "ntfy.sh/$NTFY_TOPIC" 2>/dev/null; then
+    log "$PROJECT: $question — Lachesis did not take the question; ntfy sent"
+  else
+    log "$PROJECT: $question — neither Lachesis nor ntfy took it, retrying next tick"
+    return 0
+  fi
+  : > "$marker"
+}
+
+# correction_escalate <number> <reason> — Phase 3 will not correct the PR again;
+# tell the owner once.
+correction_escalate() {
+  log "$PROJECT: PR #$1 still needs correction, not correcting it again: $2"
+  owner_notice_once "correction-stuck-$1" "PR correction stuck on $PROJECT" \
+    "PR #$1 on $PROJECT is CLEAN but its review still says action: correct, and the factory stopped correcting it: $2. Correct or close it by hand, then answer this question." \
+    "https://github.com/alexsiri7/$PROJECT/pull/$1"
 }
 
 # list_prs full|merge <jq select expression> — open PRs of the current repo
@@ -261,6 +342,7 @@ for PROJECT in "${PROJECTS[@]}"; do
 
   cd "$REPO_DIR"
   ensure_hold_label "$PROJECT"
+  MERGE_TRIED=" "
   gh label create "$TRUST_HELD_LABEL" --repo "alexsiri7/$PROJECT" \
     --color "d93f0b" --description "Held by the factory for the owner" 2>/dev/null || true
 
@@ -288,7 +370,7 @@ for PROJECT in "${PROJECTS[@]}"; do
   # --- Phase 1: Merge CLEAN PRs directly (bash only, zero AI cost) ---
   CLEAN_PRS=$(list_prs merge '.isDraft == false and .mergeStateStatus == "CLEAN"')
 
-  while IFS=$'\t' read -r PR HEAD HOLD _ _ BODY; do
+  while IFS=$'\t' read -r PR HEAD HOLD SHA _ BODY; do
     [ -n "$PR" ] || continue
     pr_on_hold "$PR" "$HOLD" && continue
     if pr_owned_by_live_run "$PR" "$HEAD" "$BODY"; then
@@ -298,6 +380,13 @@ for PROJECT in "${PROJECTS[@]}"; do
     pr_left_by_failed_run "$PR" "$HEAD" && continue
     if MERGE_HOLD=$(runas_merge_blocked "$PROJECT" "$PR"); then
       log "$PROJECT: PR #$PR is CLEAN but not auto-merged: $MERGE_HOLD"
+      # Only a human merges it: once its review at this head says ready, put it
+      # on the owner's list rather than leave it to be found by accident.
+      if [[ "$MERGE_HOLD" == touches\ * ]] && [ "$(pr_review_verdict "$PR")" = "true none $SHA" ]; then
+        owner_notice_once "approve-$PR" "PR ready for your merge on $PROJECT" \
+          "PR #$PR on $PROJECT is ready (its review at ${SHA:0:7} says ready: true) but touches ops/ or .github/, so the factory will not merge it. Merge it by hand, or say why not, then answer this question." \
+          "https://github.com/alexsiri7/$PROJECT/pull/$PR — $MERGE_HOLD"
+      fi
       continue
     fi
     log "$PROJECT: PR #$PR is CLEAN — merging directly"
@@ -336,6 +425,8 @@ for PROJECT in "${PROJECTS[@]}"; do
       MERGE_SUBJECT="Merge pull request #$PR"
     fi
     MERGE_BODY=$(strip_ci_skip_tokens "$(jq -r '.body // ""' <<<"$MERGE_JSON" || echo "")")
+    # An --auto merge can leave the PR open; Phase 3 must not correct it.
+    MERGE_TRIED="$MERGE_TRIED$PR "
     # Surface stderr to the cron log so actual failures (permissions, branch
     # protection, etc.) are diagnosable on the next tick instead of vanishing.
     if gh pr merge "$PR" --squash --auto --delete-branch \
@@ -379,16 +470,81 @@ for PROJECT in "${PROJECTS[@]}"; do
 
   if [ -z "$ACTIONABLE" ]; then
     log "$PROJECT: no PRs need AI maintenance"
-    continue
+  elif [ "$QUOTA_HELD" = 1 ]; then
+    log "$PROJECT: PR #$ACTIONABLE needs maintenance — held, Claude rate limit in effect"
+  else
+    log "$PROJECT: PR #$ACTIONABLE needs maintenance — launching archon"
+    echo "$ACTIONABLE_KEY" > "$MAINTENANCE_STATE_DIR/${PROJECT}-${ACTIONABLE}.launched"
+    archon workflow run archon-pr-maintenance --cwd "$REPO_DIR" "PR #$ACTIONABLE" &
   fi
 
-  if [ "$QUOTA_HELD" = 1 ]; then
-    log "$PROJECT: PR #$ACTIONABLE needs maintenance — held, Claude rate limit in effect"
-    continue
+  # --- Phase 3: correct one CLEAN PR whose review says action: correct ---
+  # A CLEAN PR that Phase 1 did not merge (an ops/ PR held for a human, a scope
+  # wait) and whose review at its head says action: correct was never worked
+  # again: Phase 2 only takes non-CLEAN PRs (#173). One archon-deliver run
+  # adopting the run that owns the branch fixes the findings and re-reviews,
+  # at most once per head SHA and PR_CORRECTION_MAX_RUNS times per PR; a
+  # correction that failed, pushed nothing or hit that cap is escalated to the
+  # owner once instead. The marker <project>-<pr>.correction holds
+  # "<head SHA at the last launch> <launches so far>". Only archon/task-*
+  # heads: a human branch has no run to adopt.
+  CORRECTABLE=$(list_prs full '.isDraft == false and .mergeStateStatus == "CLEAN"')
+
+  TO_CORRECT=""
+  while IFS=$'\t' read -r PR HEAD HOLD SHA _ BODY; do
+    [ -n "$PR" ] || continue
+    case "$MERGE_TRIED" in *" $PR "*) continue ;; esac
+    pr_on_hold "$PR" "$HOLD" && continue
+    case "$HEAD" in archon/task-*) ;; *) continue ;; esac
+    if pr_owned_by_live_run "$PR" "$HEAD" "$BODY"; then
+      log "$PROJECT: PR #$PR ($HEAD) is CLEAN but owned by a live archon run — leaving it to the run"
+      continue
+    fi
+    MARKER="$MAINTENANCE_STATE_DIR/$PROJECT-$PR.correction"
+    LAST_SHA="" LAUNCHES=0
+    [ -r "$MARKER" ] && { read -r LAST_SHA LAUNCHES < "$MARKER" || true; }
+    if [ -e "$MARKER" ] && RUN=$(archon_branch_failed_run "$HEAD"); then
+      correction_escalate "$PR" "correction run $RUN failed"
+      continue
+    fi
+    pr_left_by_failed_run "$PR" "$HEAD" && continue
+    VERDICT=$(pr_review_verdict "$PR") || continue
+    read -r _ R_ACTION R_SHA <<< "$VERDICT"
+    [ "$R_ACTION" = correct ] || continue
+    if [ "$R_SHA" != "$SHA" ]; then
+      log "$PROJECT: PR #$PR's latest review is for ${R_SHA:0:7}, head is ${SHA:0:7} — waiting for a re-review"
+      continue
+    fi
+    if [ "${LAUNCHES:-0}" -ge "$PR_CORRECTION_MAX_RUNS" ]; then
+      correction_escalate "$PR" "${LAUNCHES:-0} correction runs and its review still says action: correct"
+      continue
+    fi
+    if [ "$LAST_SHA" = "$SHA" ]; then
+      correction_escalate "$PR" "the correction run at ${SHA:0:7} ended without a new commit"
+      continue
+    fi
+    if ! trust_comments_ok "$PROJECT" pr "$PR"; then
+      log "$PROJECT: PR #$PR has untrusted comments or reviews — not handing it to archon"
+      continue
+    fi
+    TO_CORRECT="$PR" CORRECT_HEAD="$HEAD" CORRECT_SHA="$SHA" CORRECT_LAUNCHES="${LAUNCHES:-0}"
+    break
+  done <<< "$CORRECTABLE"
+
+  if [ -z "$TO_CORRECT" ]; then
+    log "$PROJECT: no CLEAN PRs need correction"
+  elif [ "$QUOTA_HELD" = 1 ]; then
+    log "$PROJECT: PR #$TO_CORRECT needs correction — held, Claude rate limit in effect"
+  elif ! ADOPT=$(archon_branch_completed_run "$CORRECT_HEAD"); then
+    log "$PROJECT: PR #$TO_CORRECT ($CORRECT_HEAD) needs correction but no completed archon run owns its branch to adopt — not correcting it"
+  else
+    # Written before the launch: the tick waits on its launches, so a second
+    # tick can start while this run is still being created.
+    echo "$CORRECT_SHA $((CORRECT_LAUNCHES + 1))" > "$MAINTENANCE_STATE_DIR/$PROJECT-$TO_CORRECT.correction"
+    log "$PROJECT: PR #$TO_CORRECT needs correction (review at ${CORRECT_SHA:0:7} says action: correct) — launching archon-deliver adopting run $ADOPT"
+    archon workflow run archon-deliver --cwd "$REPO_DIR" --adopt "$ADOPT" \
+      "Correct PR #$TO_CORRECT: its latest review report (the $REVIEW_MARKER comment on the PR, reviewed at $CORRECT_SHA) says ready: false, action: correct. Fix every open Critical and Important finding it records, on this pull request's branch, within the accepted contract recorded in that report's \"Accepted contract\" section (the issue the PR closes). Do not widen the scope." &
   fi
-  log "$PROJECT: PR #$ACTIONABLE needs maintenance — launching archon"
-  echo "$ACTIONABLE_KEY" > "$MAINTENANCE_STATE_DIR/${PROJECT}-${ACTIONABLE}.launched"
-  archon workflow run archon-pr-maintenance --cwd "$REPO_DIR" "PR #$ACTIONABLE" &
 
 done
 
