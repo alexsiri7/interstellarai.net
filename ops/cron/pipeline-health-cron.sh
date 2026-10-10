@@ -201,7 +201,7 @@ notify() { notify_checked "$@" || true; }
 #
 # Args:
 #   $1 repo             — "owner/repo" (e.g. "alexsiri7/word-coach-annie")
-#   $2 kind             — "main-ci" or "pr-ci"
+#   $2 kind             — "main-ci", "pr-ci" or "stuck-pr"
 #   $3 sha              — head SHA that is stuck
 #   $4 subject_summary  — short human-readable subject (e.g. "word-coach-annie main CI red")
 #   $5 evidence_link    — URL to the relevant CI run or PR
@@ -357,6 +357,64 @@ find_tracked_issue() {
 }
 
 # ----------------------------------------------------------------------------
+# open_escalations <repo>: echo "<number>\t<kind>\t<pr>" for each open issue
+# this script filed as an escalation — a "Main CI red" issue (kind main-ci) or a
+# file_stuck_issue one (kind from its **Kind** line, PR number from its
+# **Evidence** link; empty for main-ci). Lists open issues rather than
+# searching, so a just-filed issue the search index has not caught up with is
+# still seen.
+# ----------------------------------------------------------------------------
+open_escalations() {
+  local repo="$1" issues
+  # stderr: stdout is the TSV the callers read; cron sends both to the log.
+  if ! issues=$(gh issue list --repo "$repo" --state open --limit 200 \
+      --json number,title,body,labels 2>/dev/null); then
+    log "$repo: gh issue list failed — escalation close check skipped, retrying next tick" >&2
+    return
+  fi
+  echo "$issues" | jq -r '.[] | select((.body // "") | contains("Auto-filed by `pipeline-health-cron.sh`"))
+        | if (.title | startswith("Main CI red")) then [(.number|tostring), "main-ci", ""]
+          elif ([.labels[].name] | index("manual-review")) then
+            [(.number|tostring),
+             ((.body | capture("\\*\\*Kind\\*\\*: (?<k>[a-z-]+)") | .k) // ""),
+             ((.body | capture("\\*\\*Evidence\\*\\*: \\S*/pull/(?<n>[0-9]+)") | .n) // "")]
+          else empty end
+        | @tsv' 2>/dev/null
+}
+
+close_escalation() {
+  local repo="$1" issue_num="$2" reason="$3"
+  if gh issue close "$issue_num" --repo "$repo" \
+      --comment "Resolved: $reason Closed by \`pipeline-health-cron.sh\`, which filed this escalation." \
+      >/dev/null 2>&1; then
+    log "$repo: closed escalation #$issue_num — $reason"
+  else
+    log "$repo: could not close escalation #$issue_num — retrying next tick"
+  fi
+}
+
+# ----------------------------------------------------------------------------
+# close_resolved_pr_escalations <project>: close each open pr-ci / stuck-pr
+# escalation whose PR has since merged or closed (#148). An open PR keeps its
+# escalation, even at a newer SHA: the attempt budget there is a fresh one.
+# ----------------------------------------------------------------------------
+close_resolved_pr_escalations() {
+  local repo="alexsiri7/$1"
+  local issue_num kind pr_num state
+  while IFS=$'\t' read -r issue_num kind pr_num; do
+    case "$kind" in pr-ci|stuck-pr) ;; *) continue ;; esac
+    [ -n "$pr_num" ] || continue
+    state=$(gh pr view "$pr_num" --repo "$repo" --json state --jq '.state' 2>/dev/null || echo "")
+    case "$state" in
+      MERGED) close_escalation "$repo" "$issue_num" "PR #$pr_num has been merged." ;;
+      CLOSED) close_escalation "$repo" "$issue_num" "PR #$pr_num has been closed without merging." ;;
+      OPEN) ;;
+      *) log "$repo: gh pr view #$pr_num failed — escalation #$issue_num left open, retrying next tick" ;;
+    esac
+  done < <(open_escalations "$repo")
+}
+
+# ----------------------------------------------------------------------------
 # fire_ship_and_settle <project> <issue> <repo-dir> <log>: run archon-ship on
 # the issue in the background; the wrapper settles a no-PR verdict on it as
 # soon as the run exits (lib/settle-ship-outcome.sh parks health-filed issues,
@@ -423,6 +481,11 @@ check_main_ci() {
       rm -f "$marker" "$STATE_DIR/main-ci-cooldown-$project" 2>/dev/null || true
       find "$STATE_DIR/escalated-main" -maxdepth 1 -name "$project-*" -delete 2>/dev/null || true
       find "$STATE_DIR" -maxdepth 1 -name "main-ci-fired-$project-*" -delete 2>/dev/null || true
+      local issue_num kind
+      while IFS=$'\t' read -r issue_num kind _; do
+        [ "$kind" = main-ci ] || continue
+        close_escalation "alexsiri7/$project" "$issue_num" "main CI is green at \`$sha\`."
+      done < <(open_escalations "alexsiri7/$project")
     fi
     return
   fi
@@ -517,8 +580,9 @@ https://github.com/alexsiri7/$project/issues/$tracked_num" \
 
   local issue_body
   # lib/settle-ship-outcome.sh keys on the "Auto-filed by `pipeline-health-cron.sh`"
-  # line to never auto-close this issue, and find_tracked_issue to dedup on it;
-  # keep it verbatim.
+  # line to never auto-close this issue from a verdict, find_tracked_issue to
+  # dedup on it and open_escalations to close it once main is green; keep it
+  # verbatim.
   issue_body=$(cat <<EOF
 ## Main CI red
 
@@ -2472,6 +2536,7 @@ for project in "${REPOS[@]}"; do
   check_prod_deploy "$project"
   check_pr_ci_retry "$project"
   check_stuck_prs "$project"
+  close_resolved_pr_escalations "$project"
   check_deploy_http "$project"
   check_staging_deploy_http "$project"
   check_shipped_prs "$project"

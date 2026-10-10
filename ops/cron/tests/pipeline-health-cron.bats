@@ -69,6 +69,7 @@ stub_gh_for_main_ci() {
             "api repos/alexsiri7/test-project/commits/main") echo "$HEAD_SHA_FIXTURE" ;;
             "issue list") echo "${ISSUE_LIST_FIXTURE:-[]}" ;;
             "issue create") touch "$ISSUE_SENTINEL"; record_issue_body "$@"; echo "https://github.com/alexsiri7/test-project/issues/42" ;;
+            "issue close") echo "$3" >> "$STATE_DIR/closed" ;;
             *) echo "" ;;
         esac
     }
@@ -143,6 +144,8 @@ setup_main_ci_env() {
     load_fn find_tracked_issue
     load_fn sha_attempt_decide
     load_fn fire_ship_and_settle
+    load_fn open_escalations
+    load_fn close_escalation
     load_fn check_main_ci
 }
 
@@ -501,6 +504,102 @@ stub_gh_issues() {
 
     [ ! -f "$ISSUE_SENTINEL" ]
     [ -f "$STATE_DIR/main-ci/test-project" ]
+}
+
+# ── #148: closing escalations once their condition clears ───────────────────
+
+# One of each escalation this script files, plus a manual-review issue a human
+# filed by hand, which must never be touched.
+ESCALATIONS_FIXTURE='[
+  {"number":20,"title":"Main CI red: build","body":"## Main CI red\n\n**SHA**: `old`\n\nAuto-filed by `pipeline-health-cron.sh`.","labels":[{"name":"bug"},{"name":"archon:in-progress"}]},
+  {"number":21,"title":"factory stuck: test-project main CI red after 3 attempts (SHA old)","body":"**Kind**: main-ci\n**Evidence**: https://github.com/alexsiri7/test-project/actions/runs/5\n\nAuto-filed by `pipeline-health-cron.sh` after it gave up.","labels":[{"name":"manual-review"}]},
+  {"number":22,"title":"factory stuck: test-project PR #7 CI red after 3 attempts (SHA p7)","body":"**Kind**: pr-ci\n**Evidence**: https://github.com/alexsiri7/test-project/pull/7\n\nAuto-filed by `pipeline-health-cron.sh` after it gave up.","labels":[{"name":"manual-review"}]},
+  {"number":23,"title":"factory stuck: test-project PR #8 stuck (DIRTY) after 3 attempts (SHA p8)","body":"**Kind**: stuck-pr\n**Evidence**: https://github.com/alexsiri7/test-project/pull/8\n\nAuto-filed by `pipeline-health-cron.sh` after it gave up.","labels":[{"name":"manual-review"}]},
+  {"number":24,"title":"factory stuck: test-project PR #9 CI red after 3 attempts (SHA p9)","body":"**Kind**: pr-ci\n**Evidence**: https://github.com/alexsiri7/test-project/pull/9\n\nAuto-filed by `pipeline-health-cron.sh` after it gave up.","labels":[{"name":"manual-review"}]},
+  {"number":25,"title":"PR #7 needs a look","body":"**Kind**: pr-ci\n**Evidence**: https://github.com/alexsiri7/test-project/pull/7","labels":[{"name":"manual-review"}]}
+]'
+
+@test "open_escalations reads kind and PR off only the issues this script filed" {
+    load_fn open_escalations
+    ISSUE_LIST_FIXTURE="$ESCALATIONS_FIXTURE"
+    stub_gh_issues
+
+    run open_escalations "alexsiri7/test-project"
+
+    [ "$output" = "$(printf '20\tmain-ci\t\n21\tmain-ci\t\n22\tpr-ci\t7\n23\tstuck-pr\t8\n24\tpr-ci\t9')" ]
+}
+
+@test "close_resolved_pr_escalations closes escalations whose PR merged or closed, and no others" {
+    load_fn open_escalations
+    load_fn close_escalation
+    load_fn close_resolved_pr_escalations
+    gh() {
+        case "$1 $2" in
+            "issue list") echo "$ESCALATIONS_FIXTURE" ;;
+            "pr view") case "$3" in 7) echo MERGED ;; 8) echo CLOSED ;; 9) echo OPEN ;; esac ;;
+            "issue close") printf '%s %s\n' "$3" "$7" >> "$STATE_DIR/closed" ;;
+        esac
+    }
+
+    close_resolved_pr_escalations "test-project"
+
+    [ "$(cut -d' ' -f1 "$STATE_DIR/closed" | tr '\n' ' ')" = "22 23 " ]
+    grep -q "^22 Resolved: PR #7 has been merged\." "$STATE_DIR/closed"
+    grep -q "^23 Resolved: PR #8 has been closed without merging\." "$STATE_DIR/closed"
+}
+
+@test "close_resolved_pr_escalations leaves the escalation open when the PR lookup fails" {
+    load_fn open_escalations
+    load_fn close_escalation
+    load_fn close_resolved_pr_escalations
+    gh() {
+        case "$1 $2" in
+            "issue list") echo "$ESCALATIONS_FIXTURE" ;;
+            "pr view") return 1 ;;
+            "issue close") echo "$3" >> "$STATE_DIR/closed" ;;
+        esac
+    }
+    log() { printf '%s\n' "$*" >> "$STATE_DIR/log"; }
+
+    close_resolved_pr_escalations "test-project"
+
+    [ ! -f "$STATE_DIR/closed" ]
+    grep -q "gh pr view #7 failed — escalation #22 left open" "$STATE_DIR/log"
+}
+
+@test "open_escalations logs a failed issue listing to stderr and lists nothing" {
+    load_fn open_escalations
+    gh() { return 1; }
+    log() { echo "LOG: $*"; }
+
+    open_escalations "alexsiri7/test-project" > "$STATE_DIR/out" 2> "$STATE_DIR/err"
+
+    [ ! -s "$STATE_DIR/out" ]
+    grep -q "alexsiri7/test-project: gh issue list failed" "$STATE_DIR/err"
+}
+
+@test "check_main_ci closes the main-CI escalations once main is green, not the PR ones" {
+    setup_main_ci_env
+    RUNS_FIXTURE='[{"databaseId":1,"conclusion":"success","headSha":"aaa","workflowName":"CI"}]'
+    ISSUE_LIST_FIXTURE="$ESCALATIONS_FIXTURE"
+    stub_gh_for_main_ci
+
+    check_main_ci "test-project"
+
+    [ "$(tr '\n' ' ' < "$STATE_DIR/closed")" = "20 21 " ]
+}
+
+@test "check_main_ci closes nothing while main is red or in flight" {
+    setup_main_ci_env
+    ISSUE_LIST_FIXTURE="$ESCALATIONS_FIXTURE"
+    stub_gh_for_main_ci
+    for runs in '[{"databaseId":1,"conclusion":"failure","headSha":"aaa","workflowName":"CI"}]' \
+                '[{"databaseId":1,"conclusion":"","headSha":"aaa","workflowName":"CI"}]'; do
+        RUNS_FIXTURE="$runs"
+        check_main_ci "test-project"
+    done
+
+    [ ! -f "$STATE_DIR/closed" ]
 }
 
 # ── check_main_ci 2h cooldown ────────────────────────────────────────────────
