@@ -22,7 +22,7 @@ Required keys (see individual scripts for which ones each uses):
 
 - `ANNIE_DB_URL`, `RELI_DB_URL`, `FILMDUEL_DB_URL`, `KINDRED_DB_URL`, `LACHESIS_DB_URL`, `MUSENMINGLE_DB_URL` — Supabase connection strings used by `backup-dbs.sh` (`KINDRED_DB_URL` serves two entries: `kindred` and `kindred-auth`). Missing entries cause that DB to be skipped (not a hard failure). The URL is parsed into the libpq `PG*` environment (`lib/pg-backup.sh`) so it never appears on a command line.
 - `MUSENMINGLE_DB_URL` — read-only use by `musenmingle-digest.sh` (the `events` schema of Muse & Mingle, formerly Thaleia). Falls back to `THALEIA_DB_URL` while secrets.env still carries only the old name.
-- `LACHESIS_FACTORY_TOKEN` — a Lachesis factory token (`create_factory_token`), used by `lachesis-report.sh` to report fuel and run usage to Lachesis, and by `lib/lachesis.sh` (only that line is read) when Lachesis pickup is on. Without it nothing is reported. The plan-usage plugin never writes fuel in headless sessions, so `lachesis-report.sh` refreshes an account's `plan-usage.json` older than 25 minutes itself with `archon-as-archon [--account main] fuel-probe` (one 1-token haiku request, #165). That verb exists only once the owner has run `sudo -n /usr/local/sbin/archon-ops-promote` and then `sudo -n /usr/local/sbin/archon-user-install`; main is probed only while the owner's `ARCHON_MAIN_ACCOUNT=on` (see `lib/main-account.sh`) and also needs its credential (`--set-claude-token --account main`).
+- `LACHESIS_FACTORY_TOKEN` — a Lachesis factory token (`create_factory_token`), used by `lachesis-report.sh` to report fuel and run usage to Lachesis, and by `lib/lachesis.sh` (only that line is read) when Lachesis pickup is on. Without it nothing is reported. The plan-usage plugin never writes fuel in headless sessions, so `lachesis-report.sh` refreshes an account's `plan-usage.json` older than 25 minutes itself with `archon-as-archon [--account main] fuel-probe` (one 1-token haiku request, #165). That verb exists only once `archon-ops-promote` and `archon-user-install` have run (ops-self-update does both itself after an `ops/host` change, #182); main is probed only while the owner's `ARCHON_MAIN_ACCOUNT=on` (see `lib/main-account.sh`) and also needs its credential (`--set-claude-token --account main`).
 - `NTFY_TOPIC` — private ntfy.sh topic for notifications. No fallback default; scripts fail loud if missing, except `lachesis-report.sh`, which sends one escalation per account per stale-fuel episode (no current reading within 2h, even after a probe), naming why the probe failed or did not run. Without the topic, or while ntfy.sh is unreachable, it still reports, only logs `cannot escalate: …` and retries every tick.
 
 Set perms: `chmod 600 ~/.config/archon-cron/secrets.env`.
@@ -204,7 +204,7 @@ With `archon`:
 - the Claude probes (`check_claude_auth`, the sweep's account choice) use the factory's own credential ("archon");
 - the stale-worktree trim also runs as archon over its own layout;
 - `pr-maintenance-cron.sh` never auto-merges an interstellarai.net PR that touches `ops/**` or `.github/**`;
-- `ops-self-update.sh` holds any update touching `ops/**` for `ops-self-update.sh --approve`.
+- `ops-self-update.sh` holds any update touching `ops/**` for `ops-self-update.sh --approve` (unless every commit is the owner's pull request), and after a fast-forward that changes `ops/host/**` runs `archon-ops-promote` and `archon-user-install` itself.
 
 Setup, cutover, verification and the one-step rollback: [`../host/archon-user/README.md`](../host/archon-user/README.md).
 
@@ -324,7 +324,7 @@ Status lives in `~/.archon/pipeline-health-state/archon-update-status` (`last_ru
 | `lib/ci-skip.sh` | sourced by `pr-maintenance-cron.sh`, `pipeline-health-cron.sh` | the CI-skip tokens GitHub honours: detect one, strip them from a subject or a body |
 | `lib/pg-backup.sh` | sourced by `backup-dbs.sh`, `restore-test.sh` | the project list (`PG_BACKUP_PROJECTS`), URL → `PG*` env, pg client/server version selection, archive validation |
 | `archon-projects.txt` | data | canonical list of managed project slugs under `alexsiri7/` |
-| `ops-self-update.sh` | every 10 min | keeps this checkout on origin/main (`git pull --ff-only`); under `ARCHON_RUN_AS=archon` an update touching `ops/**` waits for the owner's `ops-self-update.sh --approve` at the console (one ntfy per held commit) |
+| `ops-self-update.sh` | every 10 min | keeps this checkout on origin/main (`git pull --ff-only`); under `ARCHON_RUN_AS=archon` an update touching `ops/**` waits for the owner's `ops-self-update.sh --approve` at the console (one ntfy per held commit); after a fast-forward that changes `ops/host/**` it runs `sudo -n archon-ops-promote` then `archon-user-install` itself (one ntfy on failure) |
 | `lib/run-as.sh`, `lib/archon-shim/archon` | sourced by the archon-calling scripts | the `ARCHON_RUN_AS` flag (see "Factory user") and the owner-side `archon` that forwards to the factory user |
 
 ## Tests

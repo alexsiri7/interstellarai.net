@@ -11,8 +11,9 @@ sudo ops/host/install.sh                        # from the checkout, with the pa
 
 The first form runs `ops/host/install.sh` from the root-owned snapshot in
 `/usr/local/lib/archon-ops`. It is set up once by
-`sudo ops/host/archon-user/install.sh --install-sudo-ops`; refresh the snapshot
-after an approved ops update with `sudo -n /usr/local/sbin/archon-ops-promote`.
+`sudo ops/host/archon-user/install.sh --install-sudo-ops`. ops-self-update
+refreshes the snapshot itself (`archon-ops-promote`) after an update that
+changes `ops/host/**`; run the promote by hand only if it reports a failure.
 See [archon-user/README.md](archon-user/README.md#passwordless-sudo). The
 `sudo ops/host/install.sh` lines below work either way.
 
