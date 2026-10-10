@@ -365,17 +365,21 @@ find_tracked_issue() {
 # still seen.
 # ----------------------------------------------------------------------------
 open_escalations() {
-  local repo="$1"
-  gh issue list --repo "$repo" --state open --limit 200 \
-    --json number,title,body,labels 2>/dev/null \
-    | jq -r '.[] | select((.body // "") | contains("Auto-filed by `pipeline-health-cron.sh`"))
+  local repo="$1" issues
+  # stderr: stdout is the TSV the callers read; cron sends both to the log.
+  if ! issues=$(gh issue list --repo "$repo" --state open --limit 200 \
+      --json number,title,body,labels 2>/dev/null); then
+    log "$repo: gh issue list failed — escalation close check skipped, retrying next tick" >&2
+    return
+  fi
+  echo "$issues" | jq -r '.[] | select((.body // "") | contains("Auto-filed by `pipeline-health-cron.sh`"))
         | if (.title | startswith("Main CI red")) then [(.number|tostring), "main-ci", ""]
           elif ([.labels[].name] | index("manual-review")) then
             [(.number|tostring),
              ((.body | capture("\\*\\*Kind\\*\\*: (?<k>[a-z-]+)") | .k) // ""),
              ((.body | capture("\\*\\*Evidence\\*\\*: \\S*/pull/(?<n>[0-9]+)") | .n) // "")]
           else empty end
-        | @tsv' 2>/dev/null || echo ""
+        | @tsv' 2>/dev/null
 }
 
 close_escalation() {
@@ -404,6 +408,8 @@ close_resolved_pr_escalations() {
     case "$state" in
       MERGED) close_escalation "$repo" "$issue_num" "PR #$pr_num has been merged." ;;
       CLOSED) close_escalation "$repo" "$issue_num" "PR #$pr_num has been closed without merging." ;;
+      OPEN) ;;
+      *) log "$repo: gh pr view #$pr_num failed — escalation #$issue_num left open, retrying next tick" ;;
     esac
   done < <(open_escalations "$repo")
 }

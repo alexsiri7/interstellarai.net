@@ -559,10 +559,23 @@ ESCALATIONS_FIXTURE='[
             "issue close") echo "$3" >> "$STATE_DIR/closed" ;;
         esac
     }
+    log() { printf '%s\n' "$*" >> "$STATE_DIR/log"; }
 
     close_resolved_pr_escalations "test-project"
 
     [ ! -f "$STATE_DIR/closed" ]
+    grep -q "gh pr view #7 failed — escalation #22 left open" "$STATE_DIR/log"
+}
+
+@test "open_escalations logs a failed issue listing to stderr and lists nothing" {
+    load_fn open_escalations
+    gh() { return 1; }
+    log() { echo "LOG: $*"; }
+
+    open_escalations "alexsiri7/test-project" > "$STATE_DIR/out" 2> "$STATE_DIR/err"
+
+    [ ! -s "$STATE_DIR/out" ]
+    grep -q "alexsiri7/test-project: gh issue list failed" "$STATE_DIR/err"
 }
 
 @test "check_main_ci closes the main-CI escalations once main is green, not the PR ones" {
