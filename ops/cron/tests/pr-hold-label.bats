@@ -213,6 +213,8 @@ merge_argv() { grep -E "^pr merge $1 " "$STUB_GH_ARGV"; }
     [[ "$output" == *"proj: PR #299 is on hold — skipping"* ]]
     [[ "$output" == *"fired archon-review"* ]]
     [[ "$output" == *"1 on-hold, 1 fired"* ]]
+    # The review launches as a disowned background job, so poll for its record.
+    for _ in $(seq 1 100); do grep -q 'review PR #300' "$STUB_ARCHON_ARGV" && break; sleep 0.05; done
     grep -q 'review PR #300' "$STUB_ARCHON_ARGV"
     ! grep -q 'review PR #299' "$STUB_ARCHON_ARGV"
     [ ! -f "$HOME/.archon/state/pr-review/proj-299.pid" ]
