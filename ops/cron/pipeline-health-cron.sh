@@ -2707,7 +2707,7 @@ check_lachesis_next_issue() {
 # alert carries that instead of archon's stale "re-run the failing check".
 # ----------------------------------------------------------------------------
 check_parked_runs() {
-  local marker_dir="$STATE_DIR/parked"
+  local marker_dir="$ARCHON_PARKED_MARKER_DIR"
   local run_id class wf origin msg deadline step need seen="" ack marker id overdue
   # A failed listing has no paused rows and would read as a quiet pipeline —
   # never let that delete markers or look like a recovery.
