@@ -2702,7 +2702,9 @@ check_lachesis_next_issue() {
 # An `attention` pause is owed an outside action before its resume; for the CI
 # attention step that action is CI turning green, which pr-maintenance watches
 # for and answers with the resume itself, so it reaches this check only after
-# it has waited a day without that happening.
+# it has waited a day without that happening. When it was green but the resume
+# failed, pr-maintenance's ci-resume-failed-<run_id> marker says so, and the
+# alert carries that instead of archon's stale "re-run the failing check".
 # ----------------------------------------------------------------------------
 check_parked_runs() {
   local marker_dir="$STATE_DIR/parked"
@@ -2731,6 +2733,7 @@ check_parked_runs() {
       continue
     fi
     [ -e "$marker_dir/alerted-$run_id" ] && continue
+    [ -s "$marker_dir/ci-resume-failed-$run_id" ] && need=$(<"$marker_dir/ci-resume-failed-$run_id")
     log "parked-runs: $wf $run_id parked ($class) with no automated recovery left — alerting"
     notify "Archon run parked: ${origin##*/}" \
       "$wf ($class${step:+ at $step}) — ${msg:-no user message}
@@ -2742,11 +2745,12 @@ archon workflow get $run_id --json" \
   done < <(archon_parked_runs "$PARKED_WAIT_MAX_SECONDS")
   # A nudged run that healthily re-parks leaves this tick's parked set with a
   # fresh deadline; drop its markers so the next stall starts from a resume.
-  for marker in "$marker_dir"/resumed-* "$marker_dir"/alerted-*; do
+  for marker in "$marker_dir"/resumed-* "$marker_dir"/alerted-* "$marker_dir"/ci-resume-failed-*; do
     [ -e "$marker" ] || continue
     id="${marker##*/}"
     id="${id#resumed-}"
     id="${id#alerted-}"
+    id="${id#ci-resume-failed-}"
     case " $seen " in *" $id "*) continue ;; esac
     rm -f "$marker"
   done

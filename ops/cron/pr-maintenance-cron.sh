@@ -289,15 +289,22 @@ for PROJECT in "${PROJECTS[@]}"; do
   if archon_runs_known; then
     ARCHON_PRS=$(list_prs merge '.headRefName | startswith("archon/task-")')
     while IFS=$'\t' read -r PR HEAD HOLD _; do
-      [ -n "$PR" ] && [ "$HOLD" != true ] || continue
+      [ -n "$PR" ] || continue
       RUN=$(archon_branch_ci_attention_run "$HEAD") || continue
+      pr_on_hold "$PR" "$HOLD" && continue
       if ! pr_checks_green "$PR"; then
         log "$PROJECT: PR #$PR — run $RUN is parked on CI attention and the checks are not all green yet"
         continue
       fi
       log "$PROJECT: PR #$PR is green — resuming run $RUN parked on CI attention"
-      ACK=$(CLAUDECODE=0 ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING=1 \
-        archon workflow resume "$RUN" --detach --json --cwd "$ARCHON_RUNS_CWD" 2>&1 | tail -1) || true
+      RESUME_FAILED="$ARCHON_PARKED_MARKER_DIR/ci-resume-failed-$RUN"
+      if ACK=$(CLAUDECODE=0 ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING=1 \
+          archon workflow resume "$RUN" --detach --json --cwd "$ARCHON_RUNS_CWD" 2>&1 | tail -1); then
+        rm -f "$RESUME_FAILED"
+      else
+        mkdir -p "$ARCHON_PARKED_MARKER_DIR"
+        printf 'PR #%s is green; archon workflow resume %s failed: %s\n' "$PR" "$RUN" "$ACK" > "$RESUME_FAILED"
+      fi
       log "$PROJECT: resume $RUN — $ACK"
     done <<< "$ARCHON_PRS"
   fi

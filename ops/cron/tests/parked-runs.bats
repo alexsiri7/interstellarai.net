@@ -5,6 +5,8 @@
 #
 # Run: bunx bats ops/cron/tests/parked-runs.bats
 
+bats_require_minimum_version 1.5.0
+
 setup() {
     export STATE_DIR="$BATS_TMPDIR/parked-$$"
     export PARKED_DIR="$STATE_DIR/parked"
@@ -103,6 +105,19 @@ parked_row() {
     [ ! -e "$ARCHON_ARGV" ]
 }
 
+@test "a CI attention run whose resume failed on a green PR is alerted with that failure" {
+    parked_row 5deb98da-aaaa attention deliver__ci-attention.attention-ci-pause \
+      "CI remains non-green for pull request #735: Re-run the failing check, then resume this run."
+    echo 'PR #735 is green; archon workflow resume 5deb98da-aaaa failed: Error: run is locked' \
+      > "$PARKED_DIR/ci-resume-failed-5deb98da-aaaa"
+    check_parked_runs
+
+    [ "$(wc -l < "$NOTIFIED")" -eq 1 ]
+    grep -q 'PR #735 is green; archon workflow resume 5deb98da-aaaa failed: Error: run is locked' "$NOTIFIED"
+    run ! grep -q 'Re-run the failing check' "$NOTIFIED"
+    [ ! -e "$ARCHON_ARGV" ]
+}
+
 @test "an unreadable pause is reported, and no resume is attempted" {
     parked_row 500946af-ffff unreadable
     check_parked_runs
@@ -122,12 +137,14 @@ parked_row() {
 }
 
 @test "markers for runs no longer parked are dropped, so a re-park starts over" {
-    touch "$PARKED_DIR/resumed-500946af-bbbb" "$PARKED_DIR/alerted-500946af-bbbb"
+    touch "$PARKED_DIR/resumed-500946af-bbbb" "$PARKED_DIR/alerted-500946af-bbbb" \
+          "$PARKED_DIR/ci-resume-failed-500946af-bbbb"
     parked_row 500946af-dddd gate
     check_parked_runs
 
     [ ! -e "$PARKED_DIR/resumed-500946af-bbbb" ]
     [ ! -e "$PARKED_DIR/alerted-500946af-bbbb" ]
+    [ ! -e "$PARKED_DIR/ci-resume-failed-500946af-bbbb" ]
     [ -e "$PARKED_DIR/alerted-500946af-dddd" ]
 }
 
