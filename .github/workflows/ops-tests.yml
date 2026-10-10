@@ -1,0 +1,49 @@
+name: Ops tests
+
+# ops/ runs on the workstation with every secret, so its bats and pytest suites
+# must pass before an ops change merges (#177).
+
+on:
+  pull_request:
+    paths:
+      - "ops/**"
+      - ".github/workflows/ops-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "ops/**"
+      - ".github/workflows/ops-tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ops-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ops-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bats shellcheck jq
+          python -m pip install --quiet pytest==8.3.5
+          bats --version
+
+      - name: Python tests
+        run: python -m pytest -q ops/cron/tests
+
+      - name: Shell tests
+        env:
+          OPS_TESTS_CI: "1"
+        run: bats --print-output-on-failure ops/cron/tests
