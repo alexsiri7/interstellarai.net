@@ -139,3 +139,16 @@ teardown() {
     # If we got here without error, the guard worked.
     [ -n "$_ARCHON_THROTTLE_SH" ]
 }
+
+@test "should_tick honours ARCHON_THROTTLE_CONF" {
+    export ARCHON_THROTTLE_CONF="$HOME/throttle.conf"
+    echo "TICK_INTERVAL_MINUTES=1" > "$ARCHON_THROTTLE_CONF"
+    mkdir -p "$HOME/.config/archon-cron/state"
+    local stamp="$HOME/.config/archon-cron/state/test-script.last_run"
+    echo $(( $(date +%s) - 120 )) > "$stamp"
+    run should_tick "test-script"
+    [ "$status" -eq 0 ]
+    echo $(( $(date +%s) - 30 )) > "$stamp"
+    run should_tick "test-script"
+    [ "$status" -eq 1 ]
+}

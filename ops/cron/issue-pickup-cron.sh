@@ -57,6 +57,8 @@ source "$SCRIPT_DIR/lib/human-labels.sh"
 # run the thread's comments must be trusted too (trust_comments_ok).
 # shellcheck source=lib/trust.sh
 source "$SCRIPT_DIR/lib/trust.sh"
+# shellcheck source=lib/heartbeat.sh
+source "$SCRIPT_DIR/lib/heartbeat.sh"
 # Bridge-filed issues are screened (heuristics + classifier) before any of the
 # phases below may act on them; see lib/screen.sh.
 # shellcheck source=lib/screen.sh
@@ -871,6 +873,10 @@ lachesis_may_triage() {
   esac
   return 0
 }
+
+# pipeline-health watches this script and pr-maintenance; this watches it back.
+# 30: its cron period in minutes, keep in sync with ops/cron/crontab.
+heartbeat_watch pipeline-health 30
 
 for PROJECT in "${PROJECTS[@]}"; do
   SUMMARY_IN_PROGRESS=0

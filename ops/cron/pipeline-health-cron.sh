@@ -43,6 +43,8 @@
 #  9e. Claude accounts: once a day, a real request against every config dir in
 #      CLAUDE_ACCOUNTS (lib/claude-auth.sh) → ntfy once per day per failing
 #      account + one `human-needed` tracking issue, closed on recovery
+#  9f. Work-loop crons silent: issue-pickup or pr-maintenance missed two
+#      expected ticks → ntfy once per episode (lib/heartbeat.sh)
 #
 # Crontab (logs live under ~/.local/state/archon-cron/logs, which survives a
 # reboot; /tmp does not):
@@ -98,6 +100,8 @@ source "$SCRIPT_DIR/lib/claude-auth.sh"
 # PRs lib/trust.sh rates `full`; a fork can name its branch `archon/…` too.
 # shellcheck source=lib/trust.sh
 source "$SCRIPT_DIR/lib/trust.sh"
+# shellcheck source=lib/heartbeat.sh
+source "$SCRIPT_DIR/lib/heartbeat.sh"
 BASE_DIR="${BASE_DIR:-/mnt/ext-fast}"
 STATE_DIR="$HOME/.archon/pipeline-health-state"
 # Where the crontab sends every script's stdout/stderr (see ops/cron/crontab).
@@ -2398,6 +2402,19 @@ check_claude_auth() {
 }
 
 # ----------------------------------------------------------------------------
+# Check 9f: work-loop crons silent. A cron that ticks and finds nothing still
+#   rewrites its throttle stamp; one that stops ticking (crontab lost, script
+#   dying before its gate) does not. Alerting and recovery are
+#   lib/heartbeat.sh's; pipeline-health's own heartbeat is watched by
+#   issue-pickup-cron.sh.
+# ----------------------------------------------------------------------------
+check_cron_heartbeats() {
+  # Cron periods in minutes; keep in sync with ops/cron/crontab.
+  heartbeat_watch issue-pickup 15
+  heartbeat_watch pr-maintenance 15
+}
+
+# ----------------------------------------------------------------------------
 # Check 10: Paused archon runs nothing will resume. reconcile_zombies reaps
 # stale `running` rows and deliberately leaves `paused` ones to the server's
 # continuation scheduler; this is the other half — the runs that scheduler has
@@ -2488,6 +2505,7 @@ check_db_backup
 check_system_maintenance
 check_archon_update
 check_restore_test
+check_cron_heartbeats
 check_claude_auth
 check_progress
 log "=== done ==="

@@ -15,26 +15,14 @@
 [ -n "${_ARCHON_THROTTLE_SH:-}" ] && return 0
 _ARCHON_THROTTLE_SH=1
 
-# Returns 0 (do work) or 1 (skip — too soon since last run).
-# Args: $1 = script-name (used as state file key)
-should_tick() {
+_ARCHON_THROTTLE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Prints TICK_INTERVAL_MINUTES from throttle.conf ($ARCHON_THROTTLE_CONF in
+# tests), 60 when the file or key is missing or the value is invalid.
+# Args: $1 = script-name (only names the caller in the warning)
+throttle_interval_minutes() {
     local _name="$1"
-
-    # A forced tick runs the script now and leaves the stamp alone, so a
-    # manual nudge (an operator loop re-running a script for one project)
-    # never consumes the system cron's own tick. Deleting the stamp instead
-    # starves every project the nudge did not name: a 20-minute nudge loop
-    # against the 30-minute interval kept the system cron skipping for
-    # 15 hours on 2026-09-11.
-    if [ "${ARCHON_CRON_FORCE_TICK:-}" = "1" ]; then
-        echo "$(date -Is) [throttle] ${_name}: forced tick (ARCHON_CRON_FORCE_TICK=1), stamp untouched"
-        return 0
-    fi
-    local _lib_dir
-    _lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local _conf="${_lib_dir}/../throttle.conf"
-
-    # Parse TICK_INTERVAL_MINUTES from config, defaulting to 60.
+    local _conf="${ARCHON_THROTTLE_CONF:-${_ARCHON_THROTTLE_LIB_DIR}/../throttle.conf}"
     local _interval=60
     if [ -f "$_conf" ]; then
         local _raw
@@ -50,8 +38,38 @@ should_tick() {
             *) _interval="$_raw" ;;
         esac
     fi
+    echo "$_interval"
+}
 
-    local _state_dir="$HOME/.config/archon-cron/state"
+# Prints the directory holding the <script-name>.last_run stamps.
+throttle_state_dir() {
+    echo "$HOME/.config/archon-cron/state"
+}
+
+# Returns 0 (do work) or 1 (skip — too soon since last run).
+# Args: $1 = script-name (used as state file key)
+#
+# The stamp is also the script's liveness heartbeat: lib/heartbeat.sh alerts
+# when it goes stale, so it must keep being written at the start of every real
+# tick, whether or not the tick finds work.
+should_tick() {
+    local _name="$1"
+
+    # A forced tick runs the script now and leaves the stamp alone, so a
+    # manual nudge (an operator loop re-running a script for one project)
+    # never consumes the system cron's own tick. Deleting the stamp instead
+    # starves every project the nudge did not name: a 20-minute nudge loop
+    # against the 30-minute interval kept the system cron skipping for
+    # 15 hours on 2026-09-11.
+    if [ "${ARCHON_CRON_FORCE_TICK:-}" = "1" ]; then
+        echo "$(date -Is) [throttle] ${_name}: forced tick (ARCHON_CRON_FORCE_TICK=1), stamp untouched"
+        return 0
+    fi
+    local _interval
+    _interval=$(throttle_interval_minutes "$_name")
+
+    local _state_dir
+    _state_dir=$(throttle_state_dir)
     if ! mkdir -p "$_state_dir" 2>/dev/null; then
         echo "$(date -Is) [throttle] ${_name}: WARNING — cannot create state dir $_state_dir, throttle disabled" >&2
     fi
