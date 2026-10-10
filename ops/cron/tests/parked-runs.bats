@@ -9,7 +9,10 @@ bats_require_minimum_version 1.5.0
 
 setup() {
     export STATE_DIR="$BATS_TMPDIR/parked-$$"
-    export PARKED_DIR="$STATE_DIR/parked"
+    # The lib derives the marker directory from $HOME, never from $STATE_DIR.
+    export HOME="$STATE_DIR/home"
+    export PARKED_DIR="$HOME/.archon/pipeline-health-state/parked"
+    export ARCHON_PARKED_MARKER_DIR="$PARKED_DIR"
     mkdir -p "$PARKED_DIR"
     export ARCHON_ARGV="$STATE_DIR/argv"
     export NOTIFIED="$STATE_DIR/notified"
