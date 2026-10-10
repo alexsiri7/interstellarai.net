@@ -50,6 +50,11 @@ ARCHON_RUNS_SNAPSHOT_OK=0
 # only after ARCHON_CI_ATTENTION_MAX_SECONDS.
 ARCHON_CI_ATTENTION_STEP_RE='(^|[._])attention-ci-pause$'
 ARCHON_CI_ATTENTION_MAX_SECONDS="${ARCHON_CI_ATTENTION_MAX_SECONDS:-86400}"
+# pipeline-health's $STATE_DIR/parked. pr-maintenance leaves
+# ci-resume-failed-<run_id> there while its resume of a green CI attention run
+# fails, so check_parked_runs alerts with that instead of the pause message.
+# shellcheck disable=SC2034  # consumed by pr-maintenance-cron.sh
+ARCHON_PARKED_MARKER_DIR="$HOME/.archon/pipeline-health-state/parked"
 
 # Snapshot all running + paused runs to $ARCHON_RUNS_SNAPSHOT as TSV:
 #   $1 workflow_name  $2 status  $3 origin_path  $4 user_message

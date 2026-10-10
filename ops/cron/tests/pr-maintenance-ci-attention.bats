@@ -6,7 +6,8 @@
 # Same harness as pr-maintenance-failed-run.bats: the real script end to end,
 # with `gh` and `archon` stubbed in $HOME/.local/bin under a temp HOME. The
 # archon stub answers `workflow runs --status paused` with $ARCHON_PAUSED_RUNS,
-# every other listing with no runs, and records every call.
+# every other listing with no runs, fails `workflow resume` with
+# $STUB_RESUME_ERROR when set, and records every call.
 #
 # Run: npx bats@1.13.0 ops/cron/tests/pr-maintenance-ci-attention.bats
 
@@ -27,6 +28,7 @@ setup() {
     export STUB_GH_ARGV="$T/gh-argv" STUB_ARCHON_ARGV="$T/archon-argv"
     : > "$STUB_GH_ARGV"
     : > "$STUB_ARCHON_ARGV"
+    export RESUME_FAILED="$HOME/.archon/pipeline-health-state/parked/ci-resume-failed-run-735"
     export ARCHON_PAUSED_RUNS='{"runs": [], "total": 0}'
     checks SUCCESS SUCCESS
 
@@ -51,7 +53,10 @@ if [ "$1 $2" = "workflow runs" ]; then
     *) printf '{"runs": [], "total": 0}' ;;
   esac
 fi
-[ "$1 $2" = "workflow resume" ] && printf '{"ok": true}'
+if [ "$1 $2" = "workflow resume" ]; then
+  [ -n "$STUB_RESUME_ERROR" ] && { echo "$STUB_RESUME_ERROR" >&2; exit 1; }
+  printf '{"ok": true}'
+fi
 exit 0
 STUB
     chmod +x "$STUB_BIN/gh" "$STUB_BIN/archon"
@@ -102,6 +107,21 @@ gh_not_called() { ! grep -qE "$1" "$STUB_GH_ARGV"; }
     [[ "$output" == *"leaving the ready flip to it"* ]]
     gh_not_called '^pr ready'
     gh_not_called '^pr merge'
+}
+
+@test "a failed resume of a green PR's run is left for the parked-run alert, and cleared once one takes" {
+    export GH_PR_LIST="$(pr)"
+    export ARCHON_PAUSED_RUNS="$(paused_run "$(attention)")"
+    STUB_RESUME_ERROR="Error: run run-735 is locked" run "$CRON_DIR/pr-maintenance-cron.sh"
+    [ "$status" -eq 0 ]
+    resumed
+    [ "$(cat "$RESUME_FAILED")" = "PR #735 is green; archon workflow resume run-735 failed: Error: run run-735 is locked" ]
+    gh_not_called '^pr ready'
+
+    rm -rf "$HOME/.config/archon-cron/state" # next tick, past the throttle
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    [ "$status" -eq 0 ]
+    [ ! -e "$RESUME_FAILED" ]
 }
 
 @test "a red check keeps the run parked" {

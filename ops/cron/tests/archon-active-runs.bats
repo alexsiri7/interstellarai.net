@@ -246,10 +246,13 @@ no_running() { export STUB_PAYLOAD='{"runs": []}'; }
 
 @test "any other attention pause is parked immediately" {
     no_running
-    export STUB_PAYLOAD_PAUSED="$(paused_run 5deb98da-cccc "$(ci_attention 60 deploy-approval-pause)")"
-    archon_runs_snapshot
-    [ "$(snapshot_field 6)" = "attention" ]
-    [ "$(archon_parked_runs 1800 | cut -f7)" = "deliver__ci-attention.deploy-approval-pause" ]
+    # redeploy-attention-ci-pause only ends like the CI attention step.
+    for step in deploy-approval-pause redeploy-attention-ci-pause; do
+        export STUB_PAYLOAD_PAUSED="$(paused_run 5deb98da-cccc "$(ci_attention 60 "$step")")"
+        archon_runs_snapshot
+        [ "$(snapshot_field 6)" = "attention" ]
+        [ "$(archon_parked_runs 1800 | cut -f7)" = "deliver__ci-attention.$step" ]
+    done
 }
 
 @test "archon_branch_ci_attention_run names the CI attention run whose worktree is the branch" {
@@ -265,7 +268,8 @@ no_running() { export STUB_PAYLOAD='{"runs": []}'; }
     run ! archon_branch_ci_attention_run archon/task-archon-ship-7
     run ! archon_branch_ci_attention_run ""
 
-    for meta in "$(ci_attention 60 deploy-approval-pause)" "$(ci_wait 240 60)" \
+    for meta in "$(ci_attention 60 deploy-approval-pause)" "$(ci_attention 60 redeploy-attention-ci-pause)" \
+                "$(ci_wait 240 60)" \
                 '"approval": {"nodeId": "attention-ci-pause", "message": "Ship it?", "type": "approval"}'; do
         export STUB_PAYLOAD_PAUSED="{\"runs\": [$(attention_on run-other "$meta")]}"
         archon_runs_snapshot
