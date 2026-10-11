@@ -48,9 +48,27 @@ fi
 [ -r "$run_log" ] || exit 1
 
 # The two ship outcome reports that end without a PR (see the ship workflow's
-# outcome script), printed verbatim by the outcome node: the verdict line, whose
-# triage summary may run onto further lines, then "Report: <path>".
-verdict=$(grep -m1 -E '^No delivery (needed|started): ' "$run_log" || true)
+# outcome script): the verdict line, whose triage summary may run onto further
+# lines, then "Report: <path>". Archon before 0.11 printed the report verbatim.
+# Since the 0.11.1 sync (2026-10-09) the outcome node prints it as one JSON line,
+#   {"delivered":false,"summary":"No delivery needed: ...\nReport: <path>"}
+# and grepping for the plain line found nothing: every such run fell through to
+# unstick_stale, which released the issue to be triaged again (101 runs by
+# 2026-10-11). When the log carries that JSON line it is the authority: its
+# decoded summary is the report, and delivered:true (a PR) settles nothing.
+# Otherwise the plain report is read, as from --recheck's parked verdict.
+outcome_text="$run_log"
+outcome_json=$(grep -E '^\{.*"delivered" *:' "$run_log" \
+  | jq -cR 'fromjson? | select(type == "object" and (.delivered | type) == "boolean")' 2>/dev/null \
+  | tail -n 1)
+if [ -n "$outcome_json" ]; then
+  outcome_text=$(mktemp) || exit 1
+  trap 'rm -f "$outcome_text"' EXIT
+  jq -r 'select(.delivered == false and (.summary | type) == "string"
+           and (.summary | test("^No delivery (needed|started): "))) | .summary' \
+    <<<"$outcome_json" > "$outcome_text" 2>/dev/null || exit 1
+fi
+verdict=$(grep -m1 -E '^No delivery (needed|started): ' "$outcome_text" || true)
 [ -n "$verdict" ] || exit 1
 
 repo="alexsiri7/$project"
@@ -93,7 +111,7 @@ if [ "$health_filed" = 0 ] && [[ "$verdict" == "No delivery needed: "* ]]; then
   # Bare same-repo refs only ("owner/repo#N" is excluded), self dropped, the
   # first five checked to bound the API calls.
   mapfile -t refs < <(
-    awk '/^No delivery needed: /{p=1} p && /^(Report: |Parked as archon:skipped)/{exit} p' "$run_log" \
+    awk '/^No delivery needed: /{p=1} p && /^(Report: |Parked as archon:skipped)/{exit} p' "$outcome_text" \
       | grep -oE '(^|[^A-Za-z0-9/_.-])#[0-9]+' | grep -oE '[0-9]+$' \
       | awk -v self="$issue" '$0 != self && !seen[$0]++' | head -5)
   declare -A kind=()

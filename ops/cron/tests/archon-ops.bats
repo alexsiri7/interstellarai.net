@@ -131,7 +131,10 @@ promote() { "$A" archon-ops-promote "$@"; }
     for i in 1 2 3 4 5 6; do
         echo "$i" >> "$L/ops/cron/data.txt"; commit "c$i"
         git -C "$L" update-ref refs/remotes/origin/main HEAD
-        touch -d "-$((10 - i)) min" "$R"/releases/* 2>/dev/null || true
+        # Age only the release about to stop being current, so every release
+        # keeps a distinct, ordered mtime (touching all of them tied the oldest
+        # and left which one prune kept to hash order: a flaky test).
+        touch -d "-$((10 - i)) min" "$R/$(readlink "$R/current")"
         promote >/dev/null
     done
     [ "$(find "$R/releases" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 5 ]
