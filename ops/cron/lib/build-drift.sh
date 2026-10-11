@@ -31,8 +31,10 @@
 #      green CI — rerunning an older CI run would roll prod back), and its file
 #      grants no write permission (checks: write excepted), runs no
 #      `gh workflow run` and uses no `environment:`.
-#      A dispatch is event=workflow_dispatch, which those gates all reject, so
-#      only rules 1-2 apply to it.
+#      A dispatch is event=workflow_dispatch, which those gates all reject; it
+#      needs only that no workflow_run consumer lacks the push-only guard and
+#      that no other workflow names its file (a watchdog that redeploys on any
+#      green ci.yml run, as Annie's does).
 #
 # State in $STATE_DIR/build-drift/:
 #   <project>-<YYYYMMDD>            the project's daily pass completed
@@ -127,6 +129,32 @@ build_drift_rerun_blocker() {
   done
 }
 
+# build_drift_dispatch_blocker <name> <content-dir> <file> <path>: prints why a
+# workflow_dispatch run could set something else off; nothing when it could not.
+# Deploy gates in the fleet require workflow_run.event == 'push', so a consumer
+# carrying that guard is fine; one without it, or any workflow that names this
+# file (Annie's pipeline watchdog redeploys on any green ci.yml run), is not.
+build_drift_dispatch_blocker() {
+  local name="$1" dir="$2" file="$3" base re other target
+  base="${4##*/}"
+  re=$(printf '%s' "$base" | sed 's/[.]/[.]/g')
+  for other in "$dir"/*.yml; do
+    [ -e "$other" ] && [ "$other" != "$file" ] || continue
+    if build_drift_uncommented < "$other" | grep -qE "(^|[^A-Za-z0-9_.-])$re([^A-Za-z0-9_.-]|\$)"; then
+      echo "another workflow (${other##*/}) references $base"
+      return
+    fi
+    grep -q 'workflow_run' "$other" || continue
+    grep -qE "workflow_run\.event[[:space:]]*==[[:space:]]*['\"]push" "$other" && continue
+    while IFS= read -r target; do
+      if [ "$target" = "$name" ]; then
+        echo "another workflow (${other##*/}) runs on its completion without a push-only guard"
+        return
+      fi
+    done < <(build_drift_workflow_run_targets < "$other")
+  done
+}
+
 build_drift_epoch() {
   date -d "$1" +%s 2>/dev/null || echo 0
 }
@@ -200,8 +228,9 @@ build_drift_workflow() {
     return 0
   fi
 
-  local dispatchable=0 dispatch_run=""
-  if build_drift_dispatchable < "$file"; then
+  local dispatchable=0 dispatch_run="" dispatch_blocker=""
+  dispatch_blocker=$(build_drift_dispatch_blocker "$name" "$dir" "$file" "$path")
+  if [ -z "$dispatch_blocker" ] && build_drift_dispatchable < "$file"; then
     dispatchable=1
     if ! dispatch_run=$(gh api "repos/alexsiri7/$project/actions/workflows/$id/runs?branch=main&event=workflow_dispatch&per_page=1" \
          --jq '.workflow_runs[0] // empty' 2>/dev/null); then
@@ -283,7 +312,7 @@ build_drift_workflow() {
     [ "$rc" = 2 ] || return 1
     why_not="gh refused the rerun"
   fi
-  log "$project: drift: skip \"$name\" — cannot re-run it safely (${why_not:-no workflow_dispatch}) and it has no usable workflow_dispatch"
+  log "$project: drift: skip \"$name\" — cannot re-run it safely (${why_not:-no workflow_dispatch}) and cannot dispatch it (${dispatch_blocker:-no workflow_dispatch})"
   return 0
 }
 

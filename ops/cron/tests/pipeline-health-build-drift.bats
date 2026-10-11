@@ -120,6 +120,8 @@ workflow() {
 PLAIN_CI=$'on:\n  push:\n    branches: [main]\n  pull_request:\npermissions:\n  contents: read\njobs:\n  test:\n    runs-on: ubuntu-latest'
 DISPATCH_CI=$'on:\n  push:\n    branches: [main]\n  workflow_dispatch:\npermissions:\n  contents: read\njobs:\n  test:\n    runs-on: ubuntu-latest'
 
+GUARDED_DEPLOY=$'on:\n  workflow_run:\n    workflows: ["CI"]\n    types: [completed]\njobs:\n  deploy:\n    if: >-\n      github.event.workflow_run.conclusion == \'success\' &&\n      github.event.workflow_run.event == \'push\''
+
 today() { date +%Y%m%d; }
 writes() { grep -cE '^(run rerun|workflow run|issue create|issue close)' "$GH_LOG" || true; }
 
@@ -294,14 +296,49 @@ EOF
     check_build_drift proj
     [ "$(writes)" -eq 0 ]
 
-    # Same at HEAD, and with workflow_dispatch: a dispatch, which deploy gates reject.
-    rm -f "$STATE_DIR/build-drift/proj-"*
+    # Same at HEAD, with workflow_dispatch and a deploy gated on push runs: a
+    # dispatch, which that gate rejects.
+    rm -f "$STATE_DIR/build-drift/proj-"* "$FIX/workflows.json"
     : > "$GH_LOG"
     workflow 10 CI ci.yml "$DISPATCH_CI"
+    workflow 11 "Staging → Production Pipeline" staging-pipeline.yml "$GUARDED_DEPLOY"
     push_runs 10 "$(run_json 500 "$HEAD_SHA" completed success 90000 90000)"
     check_build_drift proj
     ! grep -q "run rerun" "$GH_LOG"
     grep -qx "workflow run 10 --repo alexsiri7/proj --ref main" "$GH_LOG"
+}
+
+@test "dispatch blocker: a workflow_run consumer without a push-only guard" {
+    d="$STATE_DIR/c"; mkdir -p "$d"
+    printf '%s\n' "$DISPATCH_CI" > "$d/1.yml"
+    printf 'on:\n  workflow_run:\n    workflows: [CI]\n' > "$d/2.yml"
+    [[ "$(build_drift_dispatch_blocker CI "$d" "$d/1.yml" .github/workflows/ci.yml)" == *"push-only guard"* ]]
+
+    printf '%s\n' "$GUARDED_DEPLOY" > "$d/2.yml"
+    [ -z "$(build_drift_dispatch_blocker CI "$d" "$d/1.yml" .github/workflows/ci.yml)" ]
+}
+
+@test "dispatch blocker: another workflow naming the file (Annie's pipeline watchdog)" {
+    d="$STATE_DIR/c"; mkdir -p "$d"
+    printf '%s\n' "$DISPATCH_CI" > "$d/1.yml"
+    printf 'on:\n  schedule:\n    - cron: "*/5 * * * *"\njobs:\n  w:\n    steps:\n      - run: gh run list --workflow=ci.yml --status success\n' > "$d/2.yml"
+    [[ "$(build_drift_dispatch_blocker CI "$d" "$d/1.yml" .github/workflows/ci.yml)" == *"references ci.yml"* ]]
+
+    # Another file name that merely contains it, or a comment, is not a reference.
+    printf 'jobs:\n  w:\n    steps:\n      - run: echo openspec-ci.yml\n# ci.yml\n' > "$d/2.yml"
+    [ -z "$(build_drift_dispatch_blocker CI "$d" "$d/1.yml" .github/workflows/ci.yml)" ]
+}
+
+@test "a dispatchable CI a watchdog redeploys from is neither re-run nor dispatched" {
+    workflow 10 CI ci.yml $'on:\n  push:\n  workflow_dispatch:\npermissions:\n  actions: write'
+    workflow 11 "Pipeline Deploy Watchdog" pipeline-watchdog.yml \
+        $'on:\n  schedule:\n    - cron: "*/5 * * * *"\njobs:\n  w:\n    steps:\n      - run: gh run list --workflow=ci.yml'
+    push_runs 10 "$(run_json 500 "$HEAD_SHA" completed success 90000 90000)"
+
+    check_build_drift proj
+
+    [ "$(writes)" -eq 0 ]
+    grep -q 'cannot dispatch it (another workflow (11.yml) references ci.yml)' "$STATE_DIR/log"
 }
 
 @test "a stale Release workflow is never touched" {
