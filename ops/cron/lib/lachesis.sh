@@ -101,3 +101,16 @@ lachesis_ask_once() {
   mkdir -p "$LACHESIS_STATE_DIR" 2>/dev/null && : > "$marker"
   return 0
 }
+
+# lachesis_note <project> <question> [context] — record a question for the
+# author about alexsiri7/<project> that blocks no issue (ask_question, kind
+# clarification, no default, so it waits for the author). Lachesis pushes it to
+# the author and lists it first in the morning briefing: the factory's way to
+# hand the owner something to do. True when the question was recorded.
+lachesis_note() {
+  local project="$1" question="$2" context="${3:-}" args
+  args=$(jq -nc --arg repo "alexsiri7/$project" --arg q "$question" --arg c "$context" \
+    '{repo: $repo, question: $q, kind: "clarification", asker: "factory",
+      blocks: [], context: $c}') || return 1
+  lachesis_call ask_question "$args" >/dev/null
+}

@@ -266,7 +266,7 @@ GitHub cannot tell the factory's token from the owner: both act as `alexsiri7`, 
 branch protection's admin bypass covers both. So, under `ARCHON_RUN_AS=archon`, two local
 gates apply:
 
-- `pr-maintenance-cron.sh` never auto-merges an `interstellarai.net` PR that touches `ops/**` or `.github/**`. It logs `not auto-merged: … needs a human merge`. Merge those yourself after reading them.
+- `pr-maintenance-cron.sh` never auto-merges an `interstellarai.net` PR that touches `ops/**` or `.github/**`. It logs `not auto-merged: … needs a human merge`, and once that PR's review at its head says ready, the factory asks you once to merge it (a Lachesis question, or one ntfy when Lachesis cannot take it; see `ops/cron/README.md`'s "Factory user" section). Merge those yourself after reading them.
 - `ops/cron/ops-self-update.sh`, the crontab's self-update, fast-forwards the live checkout as before unless the incoming range touches `ops/**`. In that case it holds the update and sends one ntfy per commit. Release it at the console as asiri:
 
   ```bash

@@ -26,6 +26,7 @@
 #   archon_failed_runs_snapshot         # once per tick: failed runs nothing adopted
 #   run_id=$(archon_branch_failed_run "$head") # such a run left this branch
 #   archon_failed_runs_known || ...     # false when that listing failed
+#   run_id=$(archon_branch_completed_run "$head") # newest completed run on this branch
 #
 # Requires: archon >= 0.10 (workflow runs --json), python3, awk.
 
@@ -317,4 +318,38 @@ archon_branch_failed_run() {
   awk -F'\t' -v tail="/$1" '
     substr($2, length($2) - length(tail) + 1) == tail { print $1; found = 1; exit }
     END { exit found ? 0 : 1 }' "$ARCHON_FAILED_RUNS_SNAPSHOT"
+}
+
+# archon_branch_completed_run <branch> — print the id of the most recently
+# completed run (max completed_at) whose worktree is <branch>, the run a
+# follow-up adopts (`--adopt`) to work on that branch again. One listing per
+# call, so call it only when about to launch. Exit 1 when no run matches, or
+# with one stderr line when the listing fails or may be truncated.
+archon_branch_completed_run() {
+  [ -n "$1" ] || return 1
+  local raw
+  raw=$(CLAUDECODE=0 ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING=1 \
+    archon workflow runs --all --status completed --limit "$ARCHON_FAILED_RUNS_LIMIT" --json --cwd "$ARCHON_RUNS_CWD" 2>/dev/null) || true
+  printf '%s' "$raw" | python3 -c '
+import json, sys
+tail, limit = "/" + sys.argv[1], int(sys.argv[2])
+raw = sys.stdin.read()
+def fail(why):
+    sys.stderr.write(f"[archon-active-runs] could not list completed runs: {why}\n")
+    sys.exit(1)
+try:
+    d = json.loads(raw)
+except ValueError:
+    fail(raw.strip()[:200] or "no output from archon")
+runs = d.get("runs") if isinstance(d, dict) else None
+if not isinstance(runs, list):
+    err = d.get("error") if isinstance(d, dict) else None
+    fail(str(err or raw.strip()[:200]).replace("\n", " "))
+if len(runs) >= limit:
+    fail(f"listing may be truncated: {len(runs)} runs at --limit {limit}")
+mine = [r for r in runs if (r.get("working_path") or "").endswith(tail) and r.get("id")]
+if not mine:
+    sys.exit(1)
+print(max(mine, key=lambda r: r.get("completed_at") or "")["id"])
+' "$1" "$ARCHON_FAILED_RUNS_LIMIT"
 }

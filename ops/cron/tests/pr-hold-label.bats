@@ -304,3 +304,16 @@ merge_argv() { grep -E "^pr merge $1 " "$STUB_GH_ARGV"; }
     ! gh_called '^pr merge 300'
     ! grep -q 'workflow abandon' "$STUB_ARCHON_ARGV"
 }
+
+@test "review: a PR a correction run (archon-deliver) is working is not reviewed alongside it" {
+    export GH_PR_LIST="[$(pr 300 false CLEAN '[]')]"
+    export ARCHON_RUNNING_RUNS="[$(run_json deliver-300 archon-deliver 'Correct PR #300: its latest review')]"
+    export ARCHON_CRON_FORCE_TICK=1
+    run "$CRON_DIR/pr-review-cron.sh"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"1 skipped-running, 0 on-hold, 0 ship-merging, 0 fired"* ]]
+    ! grep -q 'review PR #300' "$STUB_ARCHON_ARGV"
+    export ARCHON_RUNNING_RUNS="[]"
+    run "$CRON_DIR/pr-review-cron.sh"
+    grep -q 'review PR #300' "$STUB_ARCHON_ARGV"
+}

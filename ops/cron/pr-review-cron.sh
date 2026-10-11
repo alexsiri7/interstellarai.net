@@ -173,7 +173,10 @@ process_project() {
       continue
     fi
     # Parked-run guard: DB-active run (running or paused) for this repo + PR.
-    if archon_run_active "$repo_dir" "$project" '^archon-(review|smart-pr-review)$' "#${pr_num}([^0-9]|$)"; then
+    # A correction run (pr-maintenance Phase 3, archon-deliver) reviews its own
+    # pushes; a second review alongside it would race it on the canonical
+    # review comment.
+    if archon_run_active "$repo_dir" "$project" '^archon-(review|smart-pr-review|deliver)$' "#${pr_num}([^0-9]|$)"; then
       skipped_running=$((skipped_running + 1))
       continue
     fi
