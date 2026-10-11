@@ -20,10 +20,10 @@
 # The usage read is the plugin's plan-usage.json in that dir. The owner's own
 # use of main (other machines, claude.ai) never reaches it, so a reading older
 # than MAIN_ACCOUNT_MAX_AGE seconds (30 min: pr-review asks every 5, and a probe
-# per ask would be 288 requests a day on main) is refreshed first with one haiku
-# request through the factory door (claude-probe), which writes a current one. A
-# reading that is still missing or stale after that holds the launch: an
-# unknown figure is never taken as room.
+# per ask would be 288 requests a day on main) is refreshed first with one 1-token
+# haiku request through the factory door (fuel-probe), which writes a current one
+# from the API's rate-limit headers. A reading that is still missing or stale
+# after that holds the launch: an unknown figure is never taken as room.
 
 [ -n "${_MAIN_ACCOUNT_SH:-}" ] && return 0
 _MAIN_ACCOUNT_SH=1
@@ -40,13 +40,14 @@ main_account_enabled() {
   [ "$(sed -nE 's/^[[:space:]]*ARCHON_MAIN_ACCOUNT=["'\'']?([a-z]+)["'\'']?[[:space:]]*(#.*)?$/\1/p' "$MAIN_ACCOUNT_FLAG" | tail -n 1)" = on ]
 }
 
-# main_account_probe — one haiku request on main, to refresh plan-usage.json.
+# main_account_probe — one 1-token haiku request on main (fuel-probe), to
+# refresh plan-usage.json from the API's rate-limit headers.
 main_account_probe() {
   if [ -n "${MAIN_ACCOUNT_PROBE_CMD:-}" ]; then
     $MAIN_ACCOUNT_PROBE_CMD >/dev/null 2>&1
   else
     ( cd / && sudo -n -u "${ARCHON_AS_USER:-archon}" "${ARCHON_AS_WRAPPER:-/usr/local/bin/archon-as-archon}" \
-        --account main claude-probe 60 ) >/dev/null 2>&1
+        --account main fuel-probe ) >/dev/null 2>&1
   fi
 }
 

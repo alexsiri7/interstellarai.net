@@ -146,6 +146,7 @@ mk_repos() {
     git clone -q "$T/origin.git" "$T/live"
 }
 commit_file() {  # commit_file <path>
+    mkdir -p "$(dirname "$T/work/$1")"
     echo "$RANDOM" > "$T/work/$1"
     git -C "$T/work" add "$1"
     git -C "$T/work" -c user.email=t@t -c user.name=t commit -q -m "change $1"
@@ -198,4 +199,94 @@ commit_file() {  # commit_file <path>
     before=$(git -C "$T/live" rev-parse HEAD)
     ARCHON_RUN_AS=archon OPS_CHECKOUT="$T/live" run "$CRON/ops-self-update.sh"
     [ "$(git -C "$T/live" rev-parse HEAD)" = "$before" ]
+}
+
+# ---------------------------------------------------- self-update: ops/host (#182)
+P=/usr/local/sbin/archon-ops-promote
+U=/usr/local/sbin/archon-user-install
+gh_says_owner() {  # every commit's pull request was opened by alexsiri7
+    printf '#!/usr/bin/env bash\necho "gh $*" >> "%s/argv"\necho alexsiri7\n' "$T" > "$T/bin/gh"
+}
+
+@test "self-update, archon mode: an owner's ops/host change is promoted, then installed" {
+    mk_repos
+    gh_says_owner
+    commit_file ops/host/archon-user/install.sh
+    target=$(git -C "$T/work" rev-parse HEAD)
+    ARCHON_RUN_AS=archon OPS_CHECKOUT="$T/live" run "$CRON/ops-self-update.sh"
+    [ "$status" -eq 0 ]
+    [ "$(git -C "$T/live" rev-parse HEAD)" = "$target" ]
+    [ "$(grep '^sudo' "$T/argv")" = "$(printf 'sudo -n %s\nsudo -n %s' "$P" "$U")" ]
+    [[ "$output" == *"sudo -n $U: ok"* ]]
+}
+
+@test "self-update, archon mode: --approve installs an approved ops/host change too" {
+    mk_repos
+    commit_file ops/host/archon-ops/archon-ops
+    target=$(git -C "$T/work" rev-parse HEAD)
+    ARCHON_RUN_AS=archon OPS_CHECKOUT="$T/live" run bash -c "echo y | '$CRON/ops-self-update.sh' --approve"
+    [ "$status" -eq 0 ]
+    [ "$(git -C "$T/live" rev-parse HEAD)" = "$target" ]
+    [ "$(grep '^sudo' "$T/argv")" = "$(printf 'sudo -n %s\nsudo -n %s' "$P" "$U")" ]
+}
+
+@test "self-update, archon mode: no ops/host change, nothing is installed" {
+    mk_repos
+    gh_says_owner
+    commit_file ops/cron/x.sh
+    commit_file src/page.astro
+    ARCHON_RUN_AS=archon OPS_CHECKOUT="$T/live" run "$CRON/ops-self-update.sh"
+    [ "$status" -eq 0 ]
+    [ "$(git -C "$T/live" rev-parse HEAD)" = "$(git -C "$T/work" rev-parse HEAD)" ]
+    ! grep -q '^sudo' "$T/argv"
+}
+
+@test "self-update, archon mode: promote fails, user-install is skipped, one ntfy, checkout kept" {
+    mk_repos
+    gh_says_owner
+    mkdir -p "$HOME/.config/archon-cron"
+    echo "NTFY_TOPIC=test-topic" > "$HOME/.config/archon-cron/secrets.env"
+    printf '#!/usr/bin/env bash\necho "sudo $*" >> "%s/argv"\necho "refusing: dirty"\nexit 3\n' "$T" > "$T/bin/sudo"
+    commit_file ops/host/archon-user/install.sh
+    target=$(git -C "$T/work" rev-parse HEAD)
+    ARCHON_RUN_AS=archon OPS_CHECKOUT="$T/live" run "$CRON/ops-self-update.sh"
+    [ "$status" -eq 1 ]
+    [ "$(git -C "$T/live" rev-parse HEAD)" = "$target" ]
+    [ "$(grep '^sudo' "$T/argv")" = "sudo -n $P" ]
+    [ "$(grep -c '^curl' "$T/argv")" -eq 1 ]
+    grep '^curl' "$T/argv" | grep -q "sudo -n $P exited 3"
+    [[ "$output" == *"sudo -n $P failed (exit 3)"* ]]
+    # the next tick is already at origin/main: no retry, no second ntfy
+    ARCHON_RUN_AS=archon OPS_CHECKOUT="$T/live" run "$CRON/ops-self-update.sh"
+    [ "$(grep -c '^curl' "$T/argv")" -eq 1 ]
+}
+
+@test "self-update, archon mode: --dry-run prints the install, runs nothing" {
+    mk_repos
+    gh_says_owner
+    before=$(git -C "$T/live" rev-parse HEAD)
+    commit_file ops/host/archon-user/install.sh
+    ARCHON_RUN_AS=archon OPS_CHECKOUT="$T/live" run "$CRON/ops-self-update.sh" --dry-run
+    [ "$status" -eq 0 ]
+    [ "$(git -C "$T/live" rev-parse HEAD)" = "$before" ]
+    [[ "$output" == *"DRY-RUN: would run: sudo -n $P"*"DRY-RUN: would run: sudo -n $U"* ]]
+    ! grep -q '^sudo' "$T/argv"
+}
+
+@test "self-update, archon mode: a new factory project is installed too" {
+    mk_repos
+    gh_says_owner
+    commit_file ops/cron/archon-projects.txt
+    ARCHON_RUN_AS=archon OPS_CHECKOUT="$T/live" run "$CRON/ops-self-update.sh"
+    [ "$status" -eq 0 ]
+    [ "$(grep '^sudo' "$T/argv")" = "$(printf 'sudo -n %s\nsudo -n %s' "$P" "$U")" ]
+}
+
+@test "self-update, archon mode: a held ops/host change installs nothing" {
+    mk_repos
+    commit_file ops/host/archon-user/install.sh
+    ARCHON_RUN_AS=archon OPS_CHECKOUT="$T/live" run "$CRON/ops-self-update.sh"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"holding origin/main"* ]]
+    ! grep -q '^sudo' "$T/argv"
 }

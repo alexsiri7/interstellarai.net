@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 import lachesis_report as lr  # noqa: E402
@@ -65,6 +67,175 @@ class FuelTest(unittest.TestCase):
         self.assertEqual(
             lr.parse_sources("factory=/a:/b; main=/c"), {"factory": ["/a", "/b"], "main": ["/c"]}
         )
+
+
+class FuelRefreshTest(unittest.TestCase):
+    """report_fuel_sources: probe a reading older than the refresh threshold, escalate
+    an account still stale after that once per episode."""
+
+    WEEK_END = NOW + timedelta(days=3)
+
+    def setUp(self) -> None:
+        self.dir = Path(tempfile.mkdtemp())
+        self.path = str(self.dir / "plan-usage.json")
+        self.probed: list[str] = []
+        self.alerts: list[tuple[str, str]] = []
+        self.reported: list[dict] = []
+        self.probe_writes = False
+        self.alert_delivers = True
+
+    def _write(self, age: timedelta) -> None:
+        _record(self.dir, "plan-usage.json", (NOW - age).isoformat(), 40, self.WEEK_END)
+
+    def probe(self, account: str) -> tuple[bool, str]:
+        self.probed.append(account)
+        if self.probe_writes:
+            self._write(timedelta(0))
+            return True, ""
+        return False, "x"
+
+    def alert(self, title: str, message: str) -> bool:
+        self.alerts.append((title, message))
+        return self.alert_delivers
+
+    def call(self, tool: str, arguments: dict) -> bool:
+        self.reported.append(arguments)
+        return True
+
+    def run_once(
+        self,
+        escalated: list[str],
+        account: str = "factory",
+        dry_run: bool = False,
+        may_probe: frozenset[str] = frozenset({"factory", "main"}),
+    ) -> list[str]:
+        return lr.report_fuel_sources(
+            {account: [self.path]},
+            NOW,
+            max_age=timedelta(hours=2),
+            refresh=timedelta(minutes=25),
+            call=self.call,
+            escalated=escalated,
+            dry_run=dry_run,
+            may_probe=set(may_probe),
+            probe=self.probe,
+            alert=self.alert,
+        )
+
+    def test_a_reading_past_the_refresh_threshold_is_probed_and_still_reported(self) -> None:
+        self._write(timedelta(minutes=40))
+        self.assertEqual(self.run_once([]), [])
+        self.assertEqual(self.probed, ["factory"])
+        self.assertEqual([r["account"] for r in self.reported], ["factory"])
+        self.assertEqual(self.alerts, [])
+
+    def test_a_fresh_reading_is_not_probed(self) -> None:
+        self._write(timedelta(minutes=10))
+        self.run_once([])
+        self.assertEqual(self.probed, [])
+        self.assertEqual(len(self.reported), 1)
+
+    def test_an_account_the_door_cannot_probe_is_never_probed(self) -> None:
+        self.run_once([], account="other")
+        self.assertEqual(self.probed, [])
+
+    def test_the_probes_fresh_reading_is_reported_and_nothing_escalated(self) -> None:
+        self.probe_writes = True
+        self.assertEqual(self.run_once([], account="main"), [])
+        self.assertEqual(self.probed, ["main"])
+        self.assertEqual(self.reported[0]["weekly_used_percent"], 40)
+        self.assertEqual(self.alerts, [])
+
+    def test_a_stale_episode_is_escalated_once_and_rearmed_by_a_current_reading(self) -> None:
+        escalated = self.run_once([])
+        self.assertEqual(escalated, ["factory"])
+        self.assertEqual(len(self.alerts), 1)
+        self.assertIn("factory", self.alerts[0][0])
+        self.assertIn("Probe: x", self.alerts[0][1])
+
+        escalated = self.run_once(escalated)
+        self.assertEqual(escalated, ["factory"])
+        self.assertEqual(len(self.alerts), 1)
+
+        self._write(timedelta(minutes=5))
+        escalated = self.run_once(escalated)
+        self.assertEqual(escalated, [])
+
+        Path(self.path).unlink()
+        self.assertEqual(self.run_once(escalated), ["factory"])
+        self.assertEqual(len(self.alerts), 2)
+
+    def test_an_undelivered_escalation_is_retried_next_tick(self) -> None:
+        self.alert_delivers = False
+        self.assertEqual(self.run_once([]), [])
+        self.assertEqual(self.run_once([]), [])
+        self.assertEqual(len(self.alerts), 2)
+
+    def test_an_account_no_longer_in_the_sources_is_dropped(self) -> None:
+        self._write(timedelta(minutes=5))
+        self.assertEqual(self.run_once(["gone"]), [])
+
+    def test_main_is_not_probed_while_the_owner_has_it_off_and_its_staleness_says_so(self) -> None:
+        self.assertEqual(self.run_once([], account="main", may_probe=frozenset({"factory"})), ["main"])
+        self.assertEqual(self.probed, [])
+        self.assertIn("ARCHON_MAIN_ACCOUNT is off", self.alerts[0][1])
+
+    def test_main_may_be_probed_only_when_the_owner_turned_it_on(self) -> None:
+        self.assertEqual(lr.probeable_accounts({}), {"factory"})
+        self.assertEqual(lr.probeable_accounts({"ARCHON_MAIN_ACCOUNT": "off"}), {"factory"})
+        self.assertEqual(lr.probeable_accounts({"ARCHON_MAIN_ACCOUNT": "on"}), {"factory", "main"})
+
+    def test_dry_run_neither_probes_nor_alerts(self) -> None:
+        self.assertEqual(self.run_once([], dry_run=True), [])
+        self.assertEqual(self.probed, [])
+        self.assertEqual(self.alerts, [])
+
+
+class ProbeFuelTest(unittest.TestCase):
+    """probe_fuel against a stand-in sudo: the argv it runs, and what each exit means."""
+
+    def setUp(self) -> None:
+        self.dir = Path(tempfile.mkdtemp())
+        sudo = self.dir / "sudo"
+        sudo.write_text(
+            '#!/bin/sh\nprintf "%s\\n" "$@" > "$(dirname "$0")/argv"\n'
+            'echo first >&2; echo "$PROBE_ERR" >&2; exit "$PROBE_RC"\n'
+        )
+        sudo.chmod(0o755)
+        self.env = mock.patch.dict(
+            os.environ,
+            {
+                "PATH": f"{self.dir}:{os.environ['PATH']}",
+                "ARCHON_AS_WRAPPER": "/w/archon-as-archon",
+                "PROBE_RC": "0",
+                "PROBE_ERR": "",
+            },
+        )
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def _argv(self) -> list[str]:
+        return (self.dir / "argv").read_text().splitlines()
+
+    def test_the_factory_and_main_are_probed_through_the_wrapper_as_archon(self) -> None:
+        self.assertEqual(lr.probe_fuel("factory"), (True, ""))
+        self.assertEqual(self._argv(), ["-n", "-u", "archon", "/w/archon-as-archon", "fuel-probe"])
+        self.assertEqual(lr.probe_fuel("main"), (True, ""))
+        self.assertEqual(
+            self._argv(), ["-n", "-u", "archon", "/w/archon-as-archon", "--account", "main", "fuel-probe"]
+        )
+
+    def test_each_failure_names_its_remedy(self) -> None:
+        os.environ["PROBE_RC"] = "64"
+        ok, why = lr.probe_fuel("factory")
+        self.assertFalse(ok)
+        self.assertIn("archon-ops-promote", why)
+        os.environ["PROBE_RC"] = "69"
+        ok, why = lr.probe_fuel("main")
+        self.assertFalse(ok)
+        self.assertIn("--set-claude-token --account main", why)
+        os.environ.update(PROBE_RC="1", PROBE_ERR="fuel-probe: no rate-limit headers")
+        self.assertEqual(lr.probe_fuel("factory"), (False, "exit 1: fuel-probe: no rate-limit headers"))
 
 
 class UsageTest(unittest.TestCase):
