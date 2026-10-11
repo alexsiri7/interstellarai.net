@@ -33,6 +33,7 @@ STUB
     # shellcheck disable=SC1091
     source "$CRON_DIR/lib/archon-active-runs.sh"
     ARCHON_RUNS_SNAPSHOT="$T/snapshot"
+    ARCHON_FAILED_RUNS_SNAPSHOT="$T/snapshot.failed"
 }
 
 teardown() {
@@ -300,4 +301,46 @@ no_running() { export STUB_PAYLOAD='{"runs": []}'; }
     archon_runs_snapshot
     archon_runs_known
     ! archon_worktrees_known
+}
+
+# ── failed runs nothing adopted (`workflow runs --open`) ─────────────────────
+
+FAILED_SHIP_RUN='{"runs": [{"id": "run-329", "workflow_name": "archon-ship", "status": "failed",
+  "working_path": "/w/un-reminder/worktrees/archon/task-archon-ship-17"}], "total": 1}'
+
+@test "failed-run snapshot asks for the unadopted failed runs of every project" {
+    export STUB_PAYLOAD='{"runs": [], "total": 0}'
+    archon_failed_runs_snapshot
+    archon_failed_runs_known
+    [[ "$(cat "$STUB_ARGV")" == "workflow runs --all --open --limit 10000 --json --cwd "* ]]
+}
+
+@test "archon_branch_failed_run names the failed run whose worktree is the branch" {
+    export STUB_PAYLOAD="$FAILED_SHIP_RUN"
+    archon_failed_runs_snapshot
+    [ "$(archon_branch_failed_run archon/task-archon-ship-17)" = "run-329" ]
+    # Whole path components only.
+    ! archon_branch_failed_run archon/task-archon-ship-7
+    ! archon_branch_failed_run ship-17
+    ! archon_branch_failed_run ""
+}
+
+@test "a failed-run listing error marks it unknown and says so on stderr" {
+    export STUB_PAYLOAD="$NOT_A_REPO" STUB_RC=1
+    run --separate-stderr archon_failed_runs_snapshot
+    [ "$status" -eq 0 ]
+    [[ "$stderr" == *"could not list failed runs"*"Not in a git repository"* ]]
+    archon_failed_runs_snapshot 2>/dev/null
+    ! archon_failed_runs_known
+    ! archon_branch_failed_run archon/task-archon-ship-17
+}
+
+@test "a failed-run listing that fills its limit is treated as truncated" {
+    export STUB_PAYLOAD="$FAILED_SHIP_RUN"
+    ARCHON_FAILED_RUNS_LIMIT=1
+    run --separate-stderr archon_failed_runs_snapshot
+    [[ "$stderr" == *"listing may be truncated: 1 runs at --limit 1"* ]]
+    archon_failed_runs_snapshot 2>/dev/null
+    ! archon_failed_runs_known
+    ! archon_branch_failed_run archon/task-archon-ship-17
 }

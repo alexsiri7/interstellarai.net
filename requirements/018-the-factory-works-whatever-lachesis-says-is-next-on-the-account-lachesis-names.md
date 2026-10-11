@@ -2,9 +2,9 @@
 created: '2026-10-07'
 github_issue: 156
 id: '018'
-status: idea
+status: done
 title: The factory works whatever Lachesis says is next, on the account Lachesis names
-updated: '2026-10-07'
+updated: '2026-10-10'
 ---
 
 ## Why

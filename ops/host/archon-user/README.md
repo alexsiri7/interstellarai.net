@@ -252,7 +252,7 @@ Removing it entirely:
 - **Adding a project.**
   1. Add it to `ops/cron/archon-projects.txt`.
   2. Add the repo to the PAT (GitHub → the token → Edit). Not needed with an all-repositories token.
-  3. Once the change is on main and approved (`ops/cron/ops-self-update.sh --approve`), run `sudo -n /usr/local/sbin/archon-ops-promote`, then `sudo -n /usr/local/sbin/archon-user-install` (rewrites `/etc/archon-user/projects`, the list the wrapper accepts, from the promoted snapshot).
+  3. Once the change is on main, ops-self-update fast-forwards to it (by itself for your own pull request, otherwise after `ops/cron/ops-self-update.sh --approve`) and then runs `sudo -n /usr/local/sbin/archon-ops-promote` and `sudo -n /usr/local/sbin/archon-user-install` itself, which rewrites `/etc/archon-user/projects`, the list the wrapper accepts, from the promoted snapshot. Nothing to type.
   4. The wrapper clones it on first use.
 - **Toolchains.** Toolchains are copies, owned by archon, so the factory cannot alter the owner's. Claude updates itself as archon, and bun is upgraded for both users by `tool-freshness.sh --apply`. Everything else (gh, JDK, Android SDK, rustup, Flutter, Playwright, uv): re-run `sudo -n /usr/local/sbin/archon-user-install` after upgrading the owner's copy. The copy is written *by archon* (`runuser`; rsync's receiving side runs as archon), so a symlink archon planted in its home cannot redirect a root write.
 - **Never run git as asiri inside `/mnt/ext-fast/archon-home`.** git executes hooks and config (`core.fsmonitor`, `core.hooksPath`) from the repository, which archon controls. asiri's `~/.gitconfig` has `safe.directory = *`, which switches off git's own guard against exactly that; `verify.sh` warns about it. Read files there, but run git as archon: `sudo -u archon -H git -C … log`.
@@ -272,6 +272,8 @@ gates apply:
   ```bash
   ops/cron/ops-self-update.sh --approve    # shows the ops/ diff, asks y/N, records the sha, fast-forwards
   ```
+
+  After a fast-forward (either way) whose range changes `ops/host/**` or `ops/cron/archon-projects.txt`, it then runs `sudo -n /usr/local/sbin/archon-ops-promote` and, if that succeeded, `sudo -n /usr/local/sbin/archon-user-install` itself (#182). Each result goes to `ops-self-update.log`; a failure sends one ntfy with the command and exit code and leaves the checkout where it is, so run that command by hand. `--dry-run` prints what a tick would do without doing it.
 
   Changes outside `ops/` (the website, the workers) flow as before. They are the factory's job and deploy through CI, not through this host.
 
@@ -293,8 +295,10 @@ window stops at 60%. Off until the owner turns it on.
 
 How it decides, per launch (`ops/cron/lib/main-account.sh`, called from
 `quota-pause.sh` and the shim): only while the factory is held; then main's
-`plan-usage.json` (refreshed by one haiku probe when older than 30 minutes, since the
-owner's own use elsewhere never reaches it) must be under the paced caps from that same
+`plan-usage.json` (refreshed when older than 30 minutes by the wrapper's `fuel-probe`, one
+1-token haiku request whose rate-limit headers carry the account-wide windows, since the
+owner's own use elsewhere never reaches it and headless sessions never write it; `lachesis-report`
+uses the same probe for the factory, and for main only while it is turned on) must be under the paced caps from that same
 `budget-guard.json`. The shim then hands the wrapper `--account main`, which uses
 main's token and `CLAUDE_CONFIG_DIR=~/.claude-main`, so the plugin's paced guard also stops
 a session that crosses the cap mid-run. To change the caps, edit that `budget-guard.json`
@@ -361,12 +365,10 @@ It refuses unless both of these hold:
 - nothing under `ops/` is modified or untracked in the live checkout;
 - `HEAD` is reachable from `refs/remotes/origin/main`. That means HEAD is what ops-self-update fast-forwarded to, which for an `ops/**` change means you approved it.
 
-git never runs as root. It runs as the checkout's owner, with `env -i`, `GIT_CONFIG_NOSYSTEM`, no global config, `core.hooksPath=/dev/null`, `core.fsmonitor=false` and `safe.directory`. Root checks the tar stream before extracting it: only regular files and directories under `ops/`. The usual sequence after an ops PR merges:
+git never runs as root. It runs as the checkout's owner, with `env -i`, `GIT_CONFIG_NOSYSTEM`, no global config, `core.hooksPath=/dev/null`, `core.fsmonitor=false` and `safe.directory`. Root checks the tar stream before extracting it: only regular files and directories under `ops/`. After an ops PR merges, ops-self-update fast-forwards the live checkout (by itself for the owner's pull request; a factory commit waits for `ops/cron/ops-self-update.sh --approve`). When that range changes `ops/host/**` or `ops/cron/archon-projects.txt`, it then runs the promote and `archon-user-install` itself, in that order (#182); nothing to type unless it ntfys a failure. `archon-host-install` is still yours to run when a change needs it:
 
 ```bash
-ops/cron/ops-self-update.sh --approve            # as asiri: review, fast-forward the live checkout
-sudo -n /usr/local/sbin/archon-ops-promote       # snapshot that commit
-sudo -n /usr/local/sbin/archon-user-install      # (or archon-host-install) if the change needs installing
+sudo -n /usr/local/sbin/archon-host-install      # only for changes to ops/host/install.sh's part
 ```
 
 `--status` shows the promoted sha, the releases, the live HEAD and whether it can
@@ -429,6 +431,7 @@ These were grepped for `secrets.env|railway|psql|SUPABASE|CLOUDFLARE|wrangler|DA
 |---|---|---|
 | `install.sh` | — | prepare / `--set-gh-token` / `--set-claude-token` / `--[no-]allow-all-repos-token` / `--drain` / `--cutover` / `--rollback` / `--status` / `--dry-run` |
 | `archon-as-archon` | `/usr/local/bin/archon-as-archon` (root 0755) | the wrapper |
+| `fuel_probe.py` | `/usr/local/lib/archon-user/fuel_probe.py` (root 0644) | the `fuel-probe` verb's rate-limit-header probe (#165) |
 | `sudoers-archon-user` | `/etc/sudoers.d/archon-user` (0440) | asiri → archon: the wrapper, and `NOPASSWD:NOSETENV: ALL`; asiri → root: `systemctl restart archon-serve.service` and the three entrypoints below |
 | `../archon-ops/archon-ops` | `/usr/local/sbin/archon-{user-install,host-install,ops-promote}` (root 0755, three copies) | run the snapshot's installers; promote the snapshot (`/usr/local/lib/archon-ops`) |
 | `archon-serve.service` | `/etc/systemd/system/archon-serve.service` | the server as archon |

@@ -1092,6 +1092,39 @@ load_trust() {
     [ ! -f "$STALL_MARKER" ]
 }
 
+# Archon >= 0.10 run logs end in "Workflow finished." (or, older, "Workflow
+# completed successfully."); the pino dag_workflow_finished line is gone.
+@test "check_progress counts a run log that ended since the last tick as progress" {
+    setup_progress_env
+    ISSUE_LIST_FIXTURE='[{"number":7,"author":{"login":"alexsiri7"},"createdAt":"2026-01-01T00:00:00Z","labels":[{"name":"archon:queued"}]}]'
+    stub_gh_for_progress
+    mkdir -p "$BASE_DIR/test-project/.archon-logs"
+    log() { echo "$*"; }
+    printf '[outcome] Completed (83ms)\n\nWorkflow finished.\n  Status: completed\n' \
+        > "$BASE_DIR/test-project/.archon-logs/cron-issue-7-20261011-094656.log"
+
+    run check_progress
+
+    [[ "$output" == *"0 commits on main, 1 archon completions"* ]]
+    [ ! -f "$STALL_MARKER" ]
+}
+
+@test "check_progress still counts a pre-0.10 completion line" {
+    setup_progress_env
+    ISSUE_LIST_FIXTURE='[{"number":7,"author":{"login":"alexsiri7"},"createdAt":"2026-01-01T00:00:00Z","labels":[{"name":"archon:queued"}]}]'
+    stub_gh_for_progress
+    mkdir -p "$BASE_DIR/test-project/.archon-logs"
+    log() { echo "$*"; }
+    printf 'Workflow completed successfully.\n' > "$BASE_DIR/test-project/.archon-logs/a.log"
+    printf '{"level":30,"msg":"dag_workflow_finished"}\n' > "$BASE_DIR/test-project/.archon-logs/b.log"
+    printf 'Workflow completed successfully. Let me verify.\n' > "$BASE_DIR/test-project/.archon-logs/c.log"
+
+    run check_progress
+
+    [[ "$output" == *"2 archon completions"* ]]
+    [ ! -f "$STALL_MARKER" ]
+}
+
 @test "check_progress does not count a PR opened after the last tick as pending" {
     setup_progress_env
     ISSUE_LIST_FIXTURE='[]'
