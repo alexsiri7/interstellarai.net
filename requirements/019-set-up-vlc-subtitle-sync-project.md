@@ -1,8 +1,8 @@
 ---
 created: '2026-10-11'
-github_issue: null
+github_issue: 190
 id: '019'
-status: draft
+status: idea
 title: Set up vlc-subtitle-sync project
 updated: '2026-10-11'
 ---
@@ -17,4 +17,4 @@ A private GitHub repo alexsiri7/vlc-subtitle-sync exists, contains the vlc-andro
 
 ## Issues
 
-_None yet._
+- #190 — Create and register the vlc-subtitle-sync project
