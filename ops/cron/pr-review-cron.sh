@@ -110,7 +110,7 @@ process_project() {
 
   local prs_json all_json
   all_json=$(gh pr list --repo "alexsiri7/$project" --state open \
-    --json number,headRefOid,isDraft,labels,updatedAt,author,isCrossRepository --limit 50 2>/dev/null || echo "[]")
+    --json number,headRefOid,headRefName,mergeStateStatus,isDraft,labels,updatedAt,author,isCrossRepository --limit 50 2>/dev/null || echo "[]")
 
   local n_open n_nondraft n_trusted
   n_open=$(echo "$all_json" | jq 'length' 2>/dev/null || echo 0)
@@ -122,20 +122,29 @@ process_project() {
   prs_json=$(trust_filter_prs "$project" full <<<"$all_json")
   n_trusted=$(echo "$prs_json" | jq '[.[] | select(.isDraft == false)] | length' 2>/dev/null || echo 0)
 
-  local reviewed=0 skipped_running=0 fired=0 in_flight=0 held=0 untrusted_comments=0
+  local reviewed=0 skipped_running=0 fired=0 in_flight=0 held=0 untrusted_comments=0 ship_merging=0
 
   # Third column: "true" when the PR carries the `hold` label (see
   # pr-maintenance-cron.sh) or needs-owner-review (the trust gate parked it)
   # — a held PR gets no automated review either.
+  # Fourth column: "true" for a CLEAN archon-ship PR. The ship run reviewed it
+  # itself before flipping it ready, and pr-maintenance merges it on its next
+  # tick: a review fired now only races that merge.
   local rows
-  rows=$(echo "$prs_json" | jq -r --arg held "$TRUST_HELD_LABEL" '.[] | select(.isDraft == false) | "\(.number) \(.headRefOid) \((.labels // []) | map(.name) | (index("hold") or index($held)))"' 2>/dev/null || true)
+  rows=$(echo "$prs_json" | jq -r --arg held "$TRUST_HELD_LABEL" '.[] | select(.isDraft == false) | "\(.number) \(.headRefOid) \((.labels // []) | map(.name) | (index("hold") or index($held))) \(.mergeStateStatus == "CLEAN" and ((.headRefName // "") | startswith("archon/task-archon-ship-")))"' 2>/dev/null || true)
 
-  while IFS=' ' read -r pr_num sha on_hold; do
+  while IFS=' ' read -r pr_num sha on_hold ship_clean; do
     [ -z "${pr_num:-}" ] && continue
 
     if [ "${on_hold:-false}" = "true" ]; then
       held=$((held + 1))
       log "$project: PR #$pr_num is on hold — skipping"
+      continue
+    fi
+
+    if [ "${ship_clean:-false}" = "true" ]; then
+      ship_merging=$((ship_merging + 1))
+      log "$project: PR #$pr_num is a CLEAN archon-ship PR, reviewed by its run and about to merge — skipping"
       continue
     fi
 
@@ -199,7 +208,7 @@ process_project() {
     fi
   done <<< "$rows"
 
-  log "$project: $n_open open, $n_nondraft non-draft, $((n_nondraft - n_trusted)) not-for-archon (untrusted or merge-only author), $untrusted_comments untrusted-comments, $reviewed reviewed-at-this-SHA, $in_flight in-flight, $skipped_running skipped-running, $held on-hold, $fired fired"
+  log "$project: $n_open open, $n_nondraft non-draft, $((n_nondraft - n_trusted)) not-for-archon (untrusted or merge-only author), $untrusted_comments untrusted-comments, $reviewed reviewed-at-this-SHA, $in_flight in-flight, $skipped_running skipped-running, $held on-hold, $ship_merging ship-merging, $fired fired"
 }
 
 for PROJECT in "${PROJECTS[@]}"; do
