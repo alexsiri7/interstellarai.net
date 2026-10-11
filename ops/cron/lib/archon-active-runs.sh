@@ -18,6 +18,7 @@
 #   archon_runs_snapshot                # once per tick, after PATH includes archon
 #   if archon_run_active "$repo_dir" "$project" '^archon-ship$' "#42\\b"; then ...
 #   msg=$(archon_run_active_msg "$repo_dir" "$project" '^archon-ship$') # first match's user_message
+#   ids=$(archon_run_active_ids "$repo_dir" "$project" '^archon-review$' "#42\\b") # every match's run_id
 #   if archon_worktree_active "$wt" "$(readlink -f "$wt")"; then ...   # a run owns this worktree
 #   archon_worktrees_known || ...       # false when some active run's worktree is unknown
 #   archon_runs_known || ...            # false when this tick's snapshot failed
@@ -173,18 +174,31 @@ archon_runs_known() {
   [ "$ARCHON_RUNS_SNAPSHOT_OK" = 1 ]
 }
 
-# archon_run_active_msg <repo_dir> <project> <name_regex> [msg_regex]
-# Matches an active run whose origin is the repo dir (or any path ending in
+# _archon_runs_match <field> <first_only> <repo_dir> <project> <name_regex> [msg_regex]
+# Matches active runs whose origin is the repo dir (or any path ending in
 # /<project>, covering worktree-origin variants) and whose workflow name and
-# user_message match the given EREs. Prints the first match's user_message.
+# user_message match the given EREs. Prints snapshot column <field> of the
+# first match, or of every match unless <first_only> is 1.
 # Exit 0 on match, 1 otherwise.
-archon_run_active_msg() {
-  local repo_dir="$1" project="$2" name_re="$3" msg_re="${4:-}"
+_archon_runs_match() {
+  local field="$1" first="$2" repo_dir="$3" project="$4" name_re="$5" msg_re="${6:-}"
   [ -s "$ARCHON_RUNS_SNAPSHOT" ] || return 1
-  awk -F'\t' -v repo="$repo_dir" -v proj="/$project" -v nre="$name_re" -v mre="$msg_re" '
+  awk -F'\t' -v f="$field" -v first="$first" -v repo="$repo_dir" -v proj="/$project" -v nre="$name_re" -v mre="$msg_re" '
     $1 ~ nre && ($3 == repo || substr($3, length($3) - length(proj) + 1) == proj) \
-      && (mre == "" || $4 ~ mre) { print $4; found = 1; exit }
+      && (mre == "" || $4 ~ mre) { print $f; found = 1; if (first == 1) exit }
     END { exit found ? 0 : 1 }' "$ARCHON_RUNS_SNAPSHOT"
+}
+
+# archon_run_active_msg <repo_dir> <project> <name_regex> [msg_regex]
+# Prints the first matching run's user_message (see _archon_runs_match).
+archon_run_active_msg() {
+  _archon_runs_match 4 1 "$@"
+}
+
+# archon_run_active_ids <repo_dir> <project> <name_regex> [msg_regex]
+# Prints the run_id of every matching run, one per line.
+archon_run_active_ids() {
+  _archon_runs_match 5 0 "$@"
 }
 
 # archon_run_active — same match, no output.
