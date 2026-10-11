@@ -589,6 +589,45 @@ ESCALATIONS_FIXTURE='[
     [ "$(tr '\n' ' ' < "$STATE_DIR/closed")" = "20 21 " ]
 }
 
+# A drift issue (lib/build-drift.sh) is about a workflow that may not run at HEAD
+# at all, so a green HEAD says nothing about it: only the drift check closes it.
+@test "check_main_ci leaves an open build-drift issue alone when main is green" {
+    setup_main_ci_env
+    RUNS_FIXTURE='[{"databaseId":1,"conclusion":"success","headSha":"aaa","workflowName":"CI"}]'
+    ISSUE_LIST_FIXTURE='[{"number":30,"title":"Main CI drift: OpenSpec","body":"## Main CI drift: OpenSpec\n\nAuto-filed by `pipeline-health-cron.sh` (build drift check).","labels":[{"name":"bug"},{"name":"archon:in-progress"}]}]'
+    stub_gh_for_main_ci
+
+    check_main_ci "test-project"
+
+    [ ! -f "$STATE_DIR/closed" ]
+}
+
+@test "check_main_ci does not let an open build-drift issue suppress a real Main CI red" {
+    setup_main_ci_env
+    RUNS_FIXTURE='[{"databaseId":1,"conclusion":"failure","headSha":"aaa","workflowName":"CI"}]'
+    ISSUE_LIST_FIXTURE='[{"number":30,"title":"Main CI drift: OpenSpec","body":"Auto-filed by `pipeline-health-cron.sh` (build drift check).","labels":[{"name":"archon:in-progress"}]}]'
+    stub_gh_for_main_ci
+
+    check_main_ci "test-project"
+
+    [ -f "$ISSUE_SENTINEL" ]
+    ! grep -q "build drift" "$STATE_DIR/issue-body"
+}
+
+@test "check_main_ci says build drift when the red run is a drift re-run at HEAD" {
+    setup_main_ci_env
+    RUNS_FIXTURE='[{"databaseId":1,"conclusion":"failure","headSha":"aaa","workflowName":"CI"}]'
+    stub_gh_for_main_ci
+    mkdir -p "$STATE_DIR/build-drift"
+    touch "$STATE_DIR/build-drift/rerun-1"
+
+    check_main_ci "test-project"
+
+    [ -f "$ISSUE_SENTINEL" ]
+    grep -q '^\*\*Cause\*\*: build drift, not a commit' "$STATE_DIR/issue-body"
+    grep -qF 'Auto-filed by `pipeline-health-cron.sh`' "$STATE_DIR/issue-body"
+}
+
 @test "check_main_ci closes nothing while main is red or in flight" {
     setup_main_ci_env
     ISSUE_LIST_FIXTURE="$ESCALATIONS_FIXTURE"

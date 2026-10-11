@@ -10,6 +10,11 @@
 #  1c. Scheduled workflows red on main → ntfy the operator only, no issue and no
 #      archon: a missing secret is not something a commit can fix
 #      (dedup per project+workflow in scheduled-health/ subdir)
+#  1d. Build drift (lib/build-drift.sh): once a day, re-run each CI/validation
+#      workflow whose newest main push run is >20h old (rerun at HEAD, or
+#      dispatch / rerun when that run is for an older SHA); a red drift run
+#      off HEAD files "Main CI drift: <workflow>" + fires archon, closed once
+#      it is green again. Release/deploy/side-effect workflows are never touched
 #   2. Prod deploy failed or lagging main HEAD → file issue + fire archon (dedup by SHA)
 #   3. Zombie archon DB runs (status=running, age >4h) → abandon
 #   4. Disk >85% on / or /mnt/ext-fast → autoclean, then ntfy only if still
@@ -102,6 +107,8 @@ source "$SCRIPT_DIR/lib/claude-auth.sh"
 source "$SCRIPT_DIR/lib/trust.sh"
 # shellcheck source=lib/heartbeat.sh
 source "$SCRIPT_DIR/lib/heartbeat.sh"
+# shellcheck source=lib/build-drift.sh
+source "$SCRIPT_DIR/lib/build-drift.sh"
 BASE_DIR="${BASE_DIR:-/mnt/ext-fast}"
 STATE_DIR="$HOME/.archon/pipeline-health-state"
 # Where the crontab sends every script's stdout/stderr (see ops/cron/crontab).
@@ -167,7 +174,8 @@ mkdir -p "$STATE_DIR" "$LOG_DIR"
 mkdir -p "$STATE_DIR/prciretry" "$STATE_DIR/escalated" \
          "$STATE_DIR/main-ci" "$STATE_DIR/escalated-main" \
          "$STATE_DIR/staging-health" "$STATE_DIR/scheduled-health" \
-         "$STATE_DIR/parked" "$STATE_DIR/main-ci-missing"
+         "$STATE_DIR/parked" "$STATE_DIR/main-ci-missing" \
+         "$STATE_DIR/build-drift/pending"
 
 # Max archon-remediation attempts against a single head SHA before we stop
 # re-firing and ntfy the operator that the factory is stuck.
@@ -579,6 +587,11 @@ https://github.com/alexsiri7/$project/issues/$tracked_num" \
   # first failing workflow. Title-based dedup means the others never get an
   # issue of their own, so name them all here.
   failed_workflows=$(echo "$at_head" | jq -r '[.[] | select(.conclusion == "failure") | .workflowName] | join(", ")')
+  # A run check_build_drift re-ran at an unchanged HEAD: say so, or the factory
+  # goes looking for the commit that broke it.
+  local drift_note=""
+  [ -f "$STATE_DIR/build-drift/rerun-$run_id" ] && \
+    drift_note="**Cause**: build drift, not a commit — this is the daily re-run of an unchanged HEAD (\`check_build_drift\`), so something outside the repo changed (an unpinned tool or action, a dependency release, the runner image). Fix the real cause; do not pin the tool to an old version."
 
   log "$project: main CI red ($failed_jobs) at $sha — filing issue + firing archon (attempt $attempts/$MAX_ATTEMPTS)"
 
@@ -596,6 +609,7 @@ https://github.com/alexsiri7/$project/issues/$tracked_num" \
 **Workflow**: $wf_name
 **Failing workflows at this SHA**: $failed_workflows
 **Failed jobs**: $failed_jobs
+$drift_note
 
 Auto-filed by \`pipeline-health-cron.sh\`. Main CI is a pipeline bottleneck, so archon has been fired immediately on this issue rather than queued. This issue is tagged \`archon:in-progress\` so the regular pickup cron will not double-fire.
 
@@ -2553,6 +2567,7 @@ log "=== pipeline health check ==="
 for project in "${REPOS[@]}"; do
   check_main_ci "$project"
   check_main_push_ci "$project"
+  check_build_drift "$project"
   check_scheduled_workflows "$project"
   check_prod_deploy "$project"
   check_pr_ci_retry "$project"
