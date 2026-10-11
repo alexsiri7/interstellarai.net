@@ -8,3 +8,7 @@ dist/
 
 # Local-only operator script; must never be published with the site.
 ops/cron/bug-bankruptcy.sh
+
+# Python bytecode
+__pycache__/
+*.pyc
