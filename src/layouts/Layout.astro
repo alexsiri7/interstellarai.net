@@ -1,6 +1,7 @@
 ---
 import '../styles/tokens.css';
 import '../styles/global.css';
+import { projects, projectHref } from '../data/projects';
 
 interface Props {
   title: string;
@@ -119,12 +120,9 @@ const ogImage = new URL(image, Astro.site);
           </div>
           <div>
             <div class="footer-h">Projects</div>
-            <a href="https://filmduel.interstellarai.net" target="_blank" rel="noreferrer">FilmDuel</a>
-            <a href="https://kindred.interstellarai.net" target="_blank" rel="noreferrer">Kindred</a>
-            <a href="https://reli.interstellarai.net" target="_blank" rel="noreferrer">Reli</a>
-            <a href="https://annie.interstellarai.net" target="_blank" rel="noreferrer">Annie</a>
-            <a href="https://github.com/alexsiri7/un-reminder" target="_blank" rel="noreferrer">un-reminder</a>
-            <a href="https://github.com/alexsiri7/cosmic-match" target="_blank" rel="noreferrer">Cosmic Match</a>
+            {projects.map((p) => (
+              <a href={projectHref(p)}>{p.namePre.trim()} {p.nameEm}{p.namePost}</a>
+            ))}
           </div>
           <div>
             <div class="footer-h">Elsewhere</div>

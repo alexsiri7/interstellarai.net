@@ -14,6 +14,7 @@
 17 */3 * * * /mnt/ext-fast/interstellarai.net/ops/cron/backup-dbs.sh >> /home/asiri/.local/state/archon-cron/logs/db-backup.log 2>&1
 30 4 * * 0 /mnt/ext-fast/interstellarai.net/ops/cron/restore-test.sh >> /home/asiri/.local/state/archon-cron/logs/restore-test.log 2>&1
 */30 * * * * /mnt/ext-fast/interstellarai.net/ops/cron/pipeline-health-cron.sh >> /home/asiri/.local/state/archon-cron/logs/pipeline-health.log 2>&1
+*/15 * * * * /mnt/ext-fast/interstellarai.net/ops/cron/lachesis-report.sh >> /home/asiri/.local/state/archon-cron/logs/lachesis-report.log 2>&1
 0 5 * * 0 /mnt/ext-fast/interstellarai.net/ops/cron/pipeline-health-cron.sh --trim >> /home/asiri/.local/state/archon-cron/logs/pipeline-health.log 2>&1
 0 8 * * * /mnt/ext-fast/interstellarai.net/ops/cron/daily-release-cron.sh >> /home/asiri/.local/state/archon-cron/logs/daily-release.log 2>&1
 0 9 * * * /mnt/ext-fast/interstellarai.net/ops/cron/musenmingle-digest.sh >> /home/asiri/.local/state/archon-cron/logs/musenmingle-digest.log 2>&1

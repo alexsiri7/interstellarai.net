@@ -1,0 +1,39 @@
+---
+import Layout from "../../layouts/Layout.astro";
+import { projects } from "../../data/projects";
+
+export function getStaticPaths() {
+  return projects.map((p) => ({ params: { id: p.id }, props: { p } }));
+}
+
+const { p } = Astro.props;
+const displayName = `${p.namePre}${p.nameEm}${p.namePost}`;
+const liveHost = p.url ? new URL(p.url).host : null;
+---
+
+<Layout title={`${displayName} · InterStellar AI`} description={p.desc}>
+  <section class="pf-hero">
+    <div class="wrap-prose">
+      <a class="eyebrow" href="/projects">← All projects</a>
+      <h1>{p.namePre}{p.nameEm && <em>{p.nameEm}</em>}{p.namePost}</h1>
+      <p class="lede">{p.blurb}</p>
+      <div class="proj-actions">
+        {p.url && <a class="btn btn-primary btn-md" href={p.url} target="_blank" rel="noreferrer">Open {liveHost} ↗</a>}
+        {p.repo && <a class="btn btn-secondary btn-md" href={p.repo} target="_blank" rel="noreferrer">Source on GitHub ↗</a>}
+      </div>
+    </div>
+  </section>
+  <section class="adr-body">
+    <div class="wrap-prose proj-body">
+      {p.about.map((para) => <p>{para}</p>)}
+      <h2>Highlights</h2>
+      <ul>{p.highlights.map((h) => <li>{h}</li>)}</ul>
+      <h2>Details</h2>
+      <dl class="proj-facts">
+        <dt>Status</dt><dd><span class={`badge badge-${p.status}`}>{p.status}</span></dd>
+        <dt>Stack</dt><dd>{p.stack}</dd>
+        <dt>Deploy shape</dt><dd>{p.shape === "web" ? "Web backend" : "Mobile"} · <a href="/mementos/003-per-project-deploy-targets">ADR-003</a></dd>
+      </dl>
+    </div>
+  </section>
+</Layout>

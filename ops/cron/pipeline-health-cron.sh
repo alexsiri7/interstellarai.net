@@ -21,7 +21,9 @@
 #      every failing step is logged
 #  4b. / at 80-84% → the light autoclean, at most once a day
 #  4c. Rust projects: keep <workspace>/.cargo/config.toml pointing each archon
-#      worktree's Cargo build-dir at $BASE_DIR/.archon/cargo-build
+#      worktree's Cargo build-dir at $BASE_DIR/.archon/cargo-build, and link
+#      ~/.cargo/tmp-build (the build-dir /tmp/.cargo/config.toml gives builds
+#      under /tmp) to $BASE_DIR/.archon/cargo-build/tmp
 #   5. No pipeline progress in last tick (no commits, no archon completions)
 #      while work is pending (queued/in-progress issues or actionable PRs):
 #        - If token-limit markers in recent logs → wait, retry next tick
@@ -121,6 +123,7 @@ declare -A DEPLOY_URLS=(
   ["lachesis"]="https://lachesis.interstellarai.net/healthz"
   ["kindred"]="https://kindred.up.railway.app/healthz"
   ["zoomies"]="https://zoomies.interstellarai.net/"
+  ["catscape"]="https://catscape.interstellarai.net/"
 )
 
 # Staging deploy URLs — subset of projects that have verified staging environments.
@@ -1483,6 +1486,25 @@ autoclean_worktrees() {
   autoclean_cargo_build_dirs
 }
 
+# tmp_top_consumers <mount> — the 5 biggest top-level entries of /tmp as
+# "<size> <owner> <path>" lines, when /tmp is on <mount>'s filesystem; nothing
+# otherwise. Sizes count only what this user can read (other users' private
+# dirs show as a lower bound); bounded to 2 minutes.
+tmp_top_consumers() {
+  local tmp_root="${PIPELINE_HEALTH_TMP_ROOT:-/tmp}"
+  [ -d "$tmp_root" ] || return 0
+  [ "$(stat -c %d "$tmp_root" 2>/dev/null)" = "$(stat -c %d "$1" 2>/dev/null)" ] || return 0
+  local size path
+  find "$tmp_root" -mindepth 1 -maxdepth 1 -print0 2>/dev/null \
+    | timeout 120 xargs -0 -r du -sxk 2>/dev/null \
+    | sort -rn | head -n 5 \
+    | while IFS=$'\t' read -r size path; do
+        printf '%s %s %s\n' "$(numfmt --to=iec --from-unit=1024 "$size" 2>/dev/null || echo "${size}K")" \
+          "$(stat -c %U "$path" 2>/dev/null || echo '?')" "$path"
+      done
+  return 0
+}
+
 check_disk() {
   for mount in / /mnt/ext-fast; do
     local used
@@ -1513,11 +1535,33 @@ check_disk() {
     log "disk $mount ${before}% → ${after}% after cleanup"
     if [ "$after" -ge 85 ]; then
       log "disk $mount still at ${after}% after cleanup — ntfying"
+      # Name the biggest /tmp entries (after the cleanup) when /tmp lives on
+      # this filesystem (/ until ops/host/install.sh step 11 binds it from
+      # /mnt/ext-fast, #133).
+      local top
+      top=$(tmp_top_consumers "$mount")
+      [ -n "$top" ] && clean_body="$clean_body
+Top /tmp consumers:
+$top"
       notify "Disk warning: $mount ${after}% (was ${before}%)" "$clean_body" high warning
     else
       log "disk $mount recovered (${before}% → ${after}%) — no ntfy"
     fi
   done
+}
+
+# Every tick: archon's own /tmp and TMPDIR entries nothing wrote to for 12h
+# (archon-as-archon worktree-trim --tmp-only, no gh calls). asiri cannot
+# delete them, and agents build there under arbitrary names (#133).
+check_archon_tmp_trim() {
+  runas_archon || return 0
+  local out
+  if out=$(runas_wrapper worktree-trim --tmp-only 2>&1); then
+    [ -n "$out" ] && printf '%s\n' "$out" | while IFS= read -r l; do log "[archon] $l"; done
+  else
+    log "autoclean: archon worktree-trim --tmp-only failed: $(tail -n 1 <<<"$out")"
+  fi
+  return 0
 }
 
 # At 80-84% on / the light autoclean runs once a day instead of waiting for
@@ -1550,9 +1594,12 @@ check_daily_trim() {
 # the owner's own clone alone. `{workspace-path-hash}` gives each worktree its
 # own dir: one shared target-dir served a worktree another branch's binary,
 # since cargo judged the other build fresh by mtime. Final binaries still land
-# in the worktree's ./target.
+# in the worktree's ./target. A workspace dir that resolves to one already
+# configured this tick (a project symlinked to another) stays with the first
+# project, so two projects never flip each other's build-dir every tick.
 ensure_cargo_build_dir_config() {
-  local root="$BASE_DIR/.archon/cargo-build" repo_dir project ws want
+  local root="$BASE_DIR/.archon/cargo-build" repo_dir project ws want real
+  local -A configured=()
   for repo_dir in "$BASE_DIR"/*/; do
     [ -f "$repo_dir/Cargo.toml" ] || continue
     project=$(basename "$repo_dir")
@@ -1562,6 +1609,9 @@ ensure_cargo_build_dir_config() {
 build-dir = \"$root/$project/{workspace-path-hash}\""
     while IFS= read -r ws; do
       [ -d "$ws" ] || continue
+      real=$(readlink -f "$ws")
+      [ -n "${configured[$real]:-}" ] && continue
+      configured[$real]=1
       [ "$(cat "$ws/.cargo/config.toml" 2>/dev/null)" = "$want" ] && continue
       if mkdir -p "$ws/.cargo" && printf '%s\n' "$want" > "$ws/.cargo/config.toml"; then
         log "cargo: $ws/.cargo/config.toml → build-dir $root/$project/{workspace-path-hash}"
@@ -1570,6 +1620,39 @@ build-dir = \"$root/$project/{workspace-path-hash}\""
       fi
     done < <(archon_workspace_dirs "$project")
   done
+  return 0
+}
+
+# /tmp/.cargo/config.toml (ops/host/cargo-tmp-build-dir.conf, #133) sends any
+# build under /tmp to {cargo-cache-home}/tmp-build. This user's cargo home is
+# on /, so its tmp-build is a symlink to $BASE_DIR/.archon/cargo-build/tmp,
+# where autoclean_cargo_build_dirs reaps it like the per-project dirs.
+ensure_cargo_tmp_build_link() {
+  local home="${CARGO_HOME:-$HOME/.cargo}" want="$BASE_DIR/.archon/cargo-build/tmp" link mb
+  link="$home/tmp-build"
+  [ -d "$home" ] || return 0
+  if ! mkdir -p "$want"; then
+    log "cargo: mkdir $want failed"
+    return 0
+  fi
+  [ "$(readlink "$link" 2>/dev/null)" = "$want" ] && return 0
+  if [ -d "$link" ] && [ ! -L "$link" ]; then
+    if find "$link" -mmin -60 -print -quit 2>/dev/null | grep -q .; then
+      log "cargo: $link written in the last hour — linking it to $want on a later tick"
+      return 0
+    fi
+    mb=$(dir_size_mb "$link")
+    if ! rm -rf "$link"; then
+      log "cargo: rm -rf $link failed — not linking it to $want"
+      return 0
+    fi
+    log "cargo: removed $link built before the link — freed ${mb}MB"
+  fi
+  if ln -sfn "$want" "$link"; then
+    log "cargo: $link → $want"
+  else
+    log "cargo: linking $link to $want failed"
+  fi
   return 0
 }
 
@@ -1602,9 +1685,13 @@ check_progress() {
 
     local logdir="$BASE_DIR/$project/.archon-logs"
     [ -d "$logdir" ] || continue
+    # A finished run: the pino dag_workflow_finished line older archon logged,
+    # or the CLI's own end line. No run log has carried dag_workflow_finished
+    # since 2026-10-05, so counting it alone saw 0 completions every tick.
     local m
     m=$(find "$logdir" -name "*.log" -newermt "@$last_ts" \
-          -exec grep -l 'dag_workflow_finished' {} \; 2>/dev/null | wc -l)
+          -exec grep -lE 'dag_workflow_finished|^Workflow (finished|completed successfully)\.$' {} \; \
+          2>/dev/null | wc -l)
     completions=$((completions + m))
   done
 
@@ -2398,7 +2485,9 @@ reconcile_zombies
 check_parked_runs
 check_daily_trim
 check_disk
+check_archon_tmp_trim
 ensure_cargo_build_dir_config
+ensure_cargo_tmp_build_link
 check_db_backup
 check_system_maintenance
 check_archon_update

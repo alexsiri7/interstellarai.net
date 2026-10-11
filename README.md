@@ -9,7 +9,7 @@ the InterStellar AI project portfolio.
 - **Tenets** (`src/pages/tenets.astro`) — the non-negotiable principles
 - **Mementos** (`src/content/mementos/`) — architecture decision records for
   cross-project decisions
-- **Project index** (`src/pages/projects.astro`) — catalog with deploy targets,
+- **Project index** (`src/pages/projects/index.astro`, with a page per project at `/projects/<id>`) — catalog with deploy targets,
   rendered from `src/data/projects.ts` (the homepage grid and hero counters
   read the same file, so they cannot drift apart)
 

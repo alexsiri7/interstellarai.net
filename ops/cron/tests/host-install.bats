@@ -3,7 +3,8 @@
 # through the HOST_INSTALL_SUDOERS_D test hook with visudo and install stubbed:
 # a pre-existing sudoers problem is reported (and the offending file named)
 # without installing anything; a post-install failure still rolls back; the
-# happy path installs at 0440; --dry-run writes nothing.
+# happy path installs at 0440; --dry-run writes nothing. Step 11's tmpfiles
+# conf is applied to a sandbox root and cargo is shown to follow it.
 #
 # Run: bunx bats ops/cron/tests/host-install.bats
 
@@ -126,4 +127,24 @@ teardown() { rm -rf "$T"; }
     [[ "$output" == *"dry-run complete — nothing was changed"* ]]
     [ ! -e "$T/sudoers.d/archon-cron" ]
     [ ! -e "$INSTALL_ARGV" ]
+}
+
+@test "the tmpfiles conf makes cargo builds under /tmp use {cargo-cache-home}/tmp-build" {
+    command -v systemd-tmpfiles >/dev/null || skip "no systemd-tmpfiles"
+    command -v cargo >/dev/null || skip "no cargo"
+    # A rustup-managed cargo finds its toolchain through the real home.
+    export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+    local sb="$T/root"
+    mkdir -p "$sb/tmp"
+    sed 's/root root/- -/' "$HOST_DIR/cargo-tmp-build-dir.conf" > "$T/cargo-tmp.conf"
+    run systemd-tmpfiles --create --root="$sb" "$T/cargo-tmp.conf"
+    [ "$status" -eq 0 ]
+
+    mkdir -p "$sb/tmp/wt/src"
+    printf '[package]\nname = "wt"\nversion = "0.1.0"\nedition = "2021"\n' > "$sb/tmp/wt/Cargo.toml"
+    echo 'fn main() {}' > "$sb/tmp/wt/src/main.rs"
+    local dir
+    dir=$(cd "$sb/tmp/wt" && CARGO_HOME="$T/ch" cargo metadata --format-version 1 --no-deps --offline \
+        | python3 -c 'import json, sys; print(json.load(sys.stdin)["build_directory"])')
+    [[ "$dir" == "$T/ch/tmp-build/"* ]]
 }

@@ -5,8 +5,17 @@ sudo grant that lets the weekly `ops/cron/system-maintenance.sh` do host upkeep
 without a password. Everything here is applied by one command, run once:
 
 ```
-sudo ops/host/install.sh
+sudo -n /usr/local/sbin/archon-host-install     # no password: the root-owned ops snapshot
+sudo ops/host/install.sh                        # from the checkout, with the password
 ```
+
+The first form runs `ops/host/install.sh` from the root-owned snapshot in
+`/usr/local/lib/archon-ops`. It is set up once by
+`sudo ops/host/archon-user/install.sh --install-sudo-ops`. ops-self-update
+refreshes the snapshot itself (`archon-ops-promote`) after an update that
+changes `ops/host/**`; run the promote by hand only if it reports a failure.
+See [archon-user/README.md](archon-user/README.md#passwordless-sudo). The
+`sudo ops/host/install.sh` lines below work either way.
 
 Preview first, as any user (prints every command and every file it would write,
 changes nothing):
@@ -38,8 +47,11 @@ later step with its own script and cutover: [`archon-user/README.md`](archon-use
 | 6. NodeSource | `/etc/apt/sources.list.d/nodesource.sources` (backup kept alongside) | Rewrites `node_20.x` (or any other line) to `node_24.x` in the Suites/URIs (Node 20 is EOL, 24 is the current LTS line), `apt-get update`, `apt-get install -y nodejs`. |
 | 7. reboot | — | Prints whether `/var/run/reboot-required` exists (and which packages set it), and the gate's current decision. |
 | 8. safe-reboot | `/usr/local/sbin/safe-reboot` (0755) from [`safe-reboot/safe-reboot`](safe-reboot/safe-reboot); `/etc/systemd/system/safe-reboot.{service,timer}`, `safe-reboot-restore.service`; `/var/lib/safe-reboot/` | The reboot gate (every 15 min) and the restore after boot, see [Safe reboot](#safe-reboot) below. `systemctl enable --now safe-reboot.timer`, `systemctl enable safe-reboot-restore.service` (runs at the next boot). |
-| 9. systemd-oomd | `/etc/systemd/system/user@.service.d/20-oomd-pressure-limit.conf` from [`20-oomd-pressure-limit.conf`](20-oomd-pressure-limit.conf) | `ManagedOOMMemoryPressureLimit=80%` for every `user@<uid>.service` (Ubuntu's `/usr/lib/systemd/system/user@.service.d/10-oomd-user-service-defaults.conf` sets `ManagedOOMMemoryPressure=kill` at 50%; this drop-in sorts after it and overrides the limit only). `daemon-reload` and `systemctl restart systemd-oomd` (kills nothing); never a restart of `user@1000`. Asserts `systemctl show user@1000.service -p ManagedOOMMemoryPressureLimit` is 3435973836 (80% of 2^32; 50% shows as 2147483648). |
+| 9. systemd-oomd | `/etc/systemd/system/user@.service.d/20-oomd-pressure-limit.conf` from [`20-oomd-pressure-limit.conf`](20-oomd-pressure-limit.conf) | `ManagedOOMMemoryPressure=auto` for every `user@<uid>.service`, i.e. systemd-oomd no longer kills anything in a user manager on memory pressure. Ubuntu's `/usr/lib/systemd/system/user@.service.d/10-oomd-user-service-defaults.conf` sets `kill` at 50%; this drop-in sorts after it and overrides it. Why off rather than a higher limit: on this host the pressure is reclaim waiting on writeback to the root SSD while builds fill the page cache, with 57 GB available: #132's 80% limit was passed at 96% on 2026-09-27 and oomd killed the tmux scope running claude (42 processes). A real out-of-memory is still the kernel OOM killer's. The users with a user manager here are asiri (1000) and gdm (120); the archon factory runs in system units (no linger), so it is unaffected either way. Swap-based kills stay as Ubuntu ships them (`ManagedOOMSwap=auto` on `-.slice`, i.e. off). `daemon-reload` and `systemctl restart systemd-oomd` (kills nothing); never a restart of `user@1000`. Asserts `systemctl show user@1000.service -p ManagedOOMMemoryPressure` is `auto` and that `oomctl` no longer lists `user@1000.service` under Memory Pressure Monitored CGroups. `vm.min_free_kbytes` is left at the kernel default: free memory was ~4 GB when the stall hit, far above the watermarks, so a larger reserve would not have moved it. |
 | 10. sysctl | `/etc/sysctl.d/60-dirty-bytes.conf` from [`60-dirty-bytes.conf`](60-dirty-bytes.conf) | `vm.dirty_background_bytes=268435456` (256 MiB), `vm.dirty_bytes=1073741824` (1 GiB) instead of 10% / 20% of 62 GB RAM, then `sysctl -p` and an assert. |
+| 11. /tmp on the NVMe | `/mnt/ext-fast/.tmp-root` (root:root 1777, no ACL); `/etc/systemd/system/tmp.mount` from [`tmp-on-nvme/tmp.mount`](tmp-on-nvme/tmp.mount); `/run/tmp-on-nvme.defer`; `/var/run/reboot-required{,.pkgs}` | `/tmp` becomes a bind mount of the NVMe dir **from the next boot** (no live remount), and a reboot is marked pending (`tmp-on-nvme` in `.pkgs`) so the safe-reboot gate takes it in its next idle window. Once the bind is active (a re-run after that boot), empties the old `/tmp` on `/` that the bind hides. See [/tmp on the NVMe](#tmp-on-the-nvme) below. |
+| 12. tmpfiles | `/etc/tmpfiles.d/tmp.conf` from [`tmp-on-nvme/tmpfiles-tmp.conf`](tmp-on-nvme/tmpfiles-tmp.conf) | `D /tmp 1777 root root 2d` (Ubuntu ships 30d; same file name, so it replaces `/usr/lib/tmpfiles.d/tmp.conf`), with `x` exclusions for `/tmp/tmux-*`, `/tmp/ssh-*`, `/tmp/claude-*`. Applied by the daily `systemd-tmpfiles-clean.timer`; nothing is cleaned at install. |
+| 13. cargo /tmp build-dir | `/etc/tmpfiles.d/cargo-tmp-build-dir.conf` from [`cargo-tmp-build-dir.conf`](cargo-tmp-build-dir.conf) | A root-owned `/tmp/.cargo/config.toml`, recreated at every boot and kept out of `/tmp`'s 30-day aging, that sets `build.build-dir = "{cargo-cache-home}/tmp-build/{workspace-path-hash}"` for every Cargo build under `/tmp` (#133: review checkouts there wrote 9–16 GB each to `/`). `{cargo-cache-home}` is each user's `$CARGO_HOME`: archon's is already on `/mnt/ext-fast`, and the pipeline-health tick keeps asiri's `~/.cargo/tmp-build` a symlink to `/mnt/ext-fast/.archon/cargo-build/tmp`. archon's dirs are reaped by `archon-as-archon worktree-trim`, asiri's by the 2-day Cargo build-dir reaping. A `/tmp/.cargo` not owned by root is removed first; then `systemd-tmpfiles --create` and an assert. |
 
 ### smartd-ntfy
 
@@ -210,6 +222,73 @@ and ntfys. Window, deadline and paths are
 `SAFE_REBOOT_*` variables at the top of the script (e.g. a
 `systemctl edit safe-reboot.service` drop-in with `Environment=SAFE_REBOOT_WINDOW=01:00-05:00`).
 
+## /tmp on the NVMe
+
+Why (#133): `/` is `sdb2`, a 218 GB SATA SSD, and `/tmp` lived on it. Agent
+builds in `/tmp` under arbitrary names — `/tmp/cargotest-builddir` alone was
+47 GB of cargo output, plus `vam_check`, `review_*`, `pr159-check` — took `/`
+to 89% on 2026-09-27, despite `TMPDIR` and archon's cargo `build-dir` both
+pointing at `/mnt/ext-fast`: an agent that names `/tmp/...` explicitly, or sets
+`CARGO_TARGET_DIR`/`CARGO_BUILD_BUILD_DIR` itself, still lands on `/`. Moving
+`/tmp` itself covers every user and every path.
+
+**How.** `tmp.mount` binds `/mnt/ext-fast/.tmp-root` (root:root, 1777: the same
+sticky, world-writable semantics as `/tmp`, so no user can list-and-delete
+another's files) onto `/tmp`. It is a native unit, not an fstab line:
+
+- Every `PrivateTmp=` service `Wants=tmp.mount`. An fstab line would therefore
+  bind over the *live* `/tmp` on the next such service start after any
+  `daemon-reload` — hiding tmux and X11 sockets and running builds. Step 11
+  first creates `/run/tmp-on-nvme.defer`; the unit has
+  `ConditionPathExists=!/run/tmp-on-nvme.defer`, so until the reboot every
+  activation is *skipped*, not failed. `/run` is tmpfs, so the file is gone at
+  the next boot and the mount happens then.
+- `RequiresMountsFor=/mnt/ext-fast`, `Before=local-fs.target`,
+  `WantedBy=local-fs.target` (not `RequiredBy`): the bind is up before
+  `systemd-tmpfiles-setup` (which creates `/tmp/.X11-unix` etc.) and before any
+  ordinary service. If the NVMe fails to mount (its fstab line is `nofail`),
+  the unit fails its dependency and `/tmp` simply stays on `/` as before;
+  the boot does not drop to emergency mode.
+
+**When.** Not live: step 11 writes `/var/run/reboot-required` (if absent) and
+appends `tmp-on-nvme` to `/var/run/reboot-required.pkgs`, so the
+[safe-reboot gate](#safe-reboot) reboots in its next idle 02:30–06:30 window and
+the restore brings the flag, services and Claude sessions back as usual. Both
+files are on tmpfs, and step 11 marks them only while the bind is not active,
+so a re-run after that boot does not ask for another reboot. The restore does
+not depend on `/tmp`: Ubuntu already empties `/tmp` at every boot (`D /tmp` +
+`systemd-tmpfiles --remove`), the gate's state is in `/var/lib/safe-reboot`,
+and tmux servers are started fresh (new sockets in the new `/tmp/tmux-1000`).
+Mounting now instead would mean: new clients could no longer find the running
+tmux/X11/ssh-agent sockets, and builds writing to `/tmp` would keep writing to
+the hidden old dir — not worth it for something the gate does unattended.
+
+**After that boot, re-run `sudo ops/host/install.sh` once.** `systemd-tmpfiles`
+empties `/tmp` at boot only after the bind is up, so whatever sat in the old
+`/tmp` at the switch stays on `/`, hidden under the bind and invisible to
+`du /tmp`. Step 11, when the bind is active, binds `/` (non-recursively, so the
+root filesystem only) at a temp dir under `/run`, checks that its `tmp/` is on
+the root filesystem, empties it, and unmounts it again.
+
+Check: `findmnt /tmp` (SOURCE `/dev/nvme0n1p3[/.tmp-root]`), `df -h /tmp`,
+`systemctl status tmp.mount`.
+
+**Ageing.** Step 12 lowers Ubuntu's tmpfiles age for `/tmp` from 30 days to 2
+(anything nothing accessed, modified or changed for 2 days goes, daily), with
+tmux/ssh-agent sockets and Claude session dirs excluded. On top of that,
+`archon-as-archon worktree-trim --tmp-only` (every `pipeline-health` tick)
+removes archon's own top-level entries in `/tmp` and `~archon/tmp` that nothing
+wrote to for 12 hours, and `pipeline-health`'s `/tmp` autoclean still removes
+asiri's idle dirs. The disk-pressure ntfy (`pipeline-health`, >=85%) lists the
+five biggest `/tmp` entries and their owners for whichever mount `/tmp` is on.
+
+**Sandbox.** `/mnt/ext-fast/.tmp-root` is readable to archon exactly as `/tmp`
+is. `archon-user/install.sh` leaves it out of its ACL deny loop (a deny there
+would lock archon out of `/tmp` itself; step 11 also strips any ACL entries),
+and `verify.sh`'s selftest allows exactly that path (not its contents, which
+the existing `/tmp` leftovers WARN covers) and instead FAILs unless it is a
+directory, mode 1777, owned root:root.
+
 ## Troubleshooting
 
 **Step 1 fails with `pre-existing sudoers problem`** — `visudo -c` rejects the
@@ -249,8 +328,11 @@ The safe reboot: `systemctl disable --now safe-reboot.timer && systemctl disable
 (then nothing reboots by itself: set `Automatic-Reboot "true"` in `52-archon-updates` if you
 want the old behaviour back). oomd / sysctl: delete
 `/etc/systemd/system/user@.service.d/20-oomd-pressure-limit.conf` (then `daemon-reload`,
-`restart systemd-oomd`) or `/etc/sysctl.d/60-dirty-bytes.conf` (then `sysctl vm.dirty_ratio=20
+`restart systemd-oomd`; Ubuntu's pressure kill at 50% is back) or `/etc/sysctl.d/60-dirty-bytes.conf` (then `sysctl vm.dirty_ratio=20
 vm.dirty_background_ratio=10`).
+/tmp on the NVMe: `systemctl disable tmp.mount && rm /etc/systemd/system/tmp.mount && systemctl daemon-reload`,
+then reboot (`/tmp` is back on `/`; `/mnt/ext-fast/.tmp-root` can go afterwards); the
+age rule: `rm /etc/tmpfiles.d/tmp.conf` (Ubuntu's 30 days is back). The /tmp Cargo config: `rm /etc/tmpfiles.d/cargo-tmp-build-dir.conf && rm -rf /tmp/.cargo`.
 The NodeSource change is a one-way version bump; the pre-change file is kept as
 `nodesource.sources.bak-<date>`.
 
@@ -258,6 +340,7 @@ The NodeSource change is a one-way version bump; the pre-change file is kept as
 
 ```
 bunx bats ops/cron/tests/host-install.bats ops/cron/tests/system-maintenance.bats ops/cron/tests/pipeline-health-system-maintenance.bats ops/cron/tests/safe-reboot.bats
+systemd-analyze verify ops/host/tmp-on-nvme/tmp.mount
 shellcheck ops/host/install.sh ops/host/smartd-ntfy ops/host/safe-reboot/safe-reboot ops/cron/system-maintenance.sh
 visudo -c -f ops/host/sudoers-archon-cron
 ```

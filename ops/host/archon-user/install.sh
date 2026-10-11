@@ -2,16 +2,27 @@
 # ops/host/archon-user/install.sh — run the Archon factory's agent sessions as
 # the unprivileged user `archon` instead of the owner (asiri). See README.md.
 #
+# After `--install-sudo-ops` (once, with a password), the owner and the assistant
+# run this through the root-owned snapshot instead, without a password:
+#   sudo -n /usr/local/sbin/archon-user-install [args]     # = this script, from the snapshot
+#   sudo -n /usr/local/sbin/archon-ops-promote [--status]  # refresh the snapshot (ops/host/archon-ops/README.md)
+#
 #   sudo ops/host/archon-user/install.sh                   # 1. prepare (idempotent; safe while the factory runs)
 #   ops/host/archon-user/install.sh --dry-run              #    preview step 1 as any user
 #   sudo ops/host/archon-user/install.sh --set-gh-token    # 2. fine-grained PAT for archon (stdin)
 #   sudo ops/host/archon-user/install.sh --set-claude-token# 3. `claude setup-token` output for archon (stdin)
+#   sudo ops/host/archon-user/install.sh --set-claude-token --account main
+#                             # optional: a setup-token of the owner's MAIN account,
+#                             # the fallback while the factory is rate limited
+#                             # (ops/cron/lib/main-account.sh); also creates
+#                             # ~/.claude-main with its paced budget guard
 #   sudo ops/host/archon-user/install.sh --allow-all-repos-token     # owner opt-in: the PAT may reach
 #   sudo ops/host/archon-user/install.sh --no-allow-all-repos-token  #   every repo (Archon fork: WARN, not FAIL)
 #   sudo ops/host/archon-user/install.sh --drain           # 4. stop new launches, let runs finish
 #   sudo ops/host/archon-user/install.sh --cutover [--force]  # 5. switch (refuses while runs are live)
 #   sudo ops/host/archon-user/install.sh --rollback        #    one-step way back to running as asiri
 #   ops/host/archon-user/install.sh --status               #    where things stand (any user)
+#   sudo ops/host/archon-user/install.sh --install-sudo-ops   # only the passwordless-sudo part of step 7
 #
 # Prepare (no behaviour change for the running factory; nothing is started):
 #   1. user + group `archon` (system, nologin, home /mnt/ext-fast/archon-home 0750);
@@ -23,13 +34,20 @@
 #   4. the NTFS mounts (/mnt/steam-*: DB backups) lose umask=000 in /etc/fstab
 #      (-> umask=077) and are remounted when idle
 #   5. archon's home: ~/.archon (config.yaml, .env, workflows), ~/.gitconfig,
-#      ~/.claude/settings.json, tmp, repos
+#      ~/.claude/settings.json, ~/.cargo/config.toml (build-dir), tmp, repos
 #   6. toolchains copied into archon's home (bun, claude, gh, shellcheck, uv,
 #      JDK, Android SDK, Playwright browsers, rustup/cargo, Flutter SDK)
 #   7. /etc/archon-user/projects, /usr/local/lib/archon-user/bin/archon,
-#      /usr/local/bin/archon-as-archon, /etc/sudoers.d/archon-user (visudo
-#      checked, rolled back on failure), /etc/systemd/system/archon-serve.service
-#      (installed, not enabled)
+#      /usr/local/bin/archon-as-archon and its /usr/local/lib/archon-user/fuel_probe.py,
+#      the root-owned ops snapshot
+#      (/usr/local/lib/archon-ops, bootstrapped from the live checkout when absent)
+#      and its entrypoints /usr/local/sbin/archon-{user-install,host-install,ops-promote},
+#      /etc/sudoers.d/archon-user (visudo checked, rolled back on failure),
+#      /etc/systemd/system/archon-serve.service (installed, not enabled)
+#
+# Everything this writes inside archon's home (steps 5 and 6) is written BY
+# archon (runuser), so a symlink archon plants there can only lead where archon
+# could write anyway; root only reads the sources.
 #
 # Owner opt-ins live in /etc/archon-user/config (root 0644, KEY=VALUE, read as
 # data by the wrapper; archon can read it, not write it):
@@ -38,13 +56,22 @@
 #                             gh-probe (verify.sh, --set-gh-token, --cutover)
 #
 # Test hook (ops/cron/tests/archon-user-install.bats): ARCHON_USER_INSTALL_SANDBOX=<dir>
-# runs step 7's sudoers logic (or, with --[no-]allow-all-repos-token, the config
-# write to <dir>/etc-archon-user/config) against <dir> with a stubbed visudo, as any user.
+# runs step 7's sudoers logic (with --install-sudo-ops also the entrypoints into
+# <dir>/sbin and the snapshot bootstrap into <dir>/archon-ops; with
+# --[no-]allow-all-repos-token the config write to <dir>/etc-archon-user/config)
+# against <dir> with a stubbed visudo, as any user. It and ARCHON_USER_MIN_*_MB
+# are ignored when running as root.
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"   # the live checkout, or the root-owned snapshot
+# The checkout cron runs (the shim link, the crontab line): always the live one,
+# even when this runs from /usr/local/lib/archon-ops/releases/<sha>.
+LIVE_CHECKOUT=/mnt/ext-fast/interstellarai.net
+# Root never runs anything with a cwd someone else picked (python3 -c below
+# would import from it).
+cd / || exit 1
 
 ARCHON_USER=archon
 OWNER=asiri
@@ -56,25 +83,45 @@ UNIT_DST=/etc/systemd/system/$UNIT
 WRAPPER_DST=/usr/local/bin/archon-as-archon
 LIBDIR=/usr/local/lib/archon-user
 SANDBOX="${ARCHON_USER_INSTALL_SANDBOX:-}"
+if [ "$(id -u)" -eq 0 ]; then
+    [ -n "$SANDBOX" ] && echo "ignoring ARCHON_USER_INSTALL_SANDBOX (test hook) as root" >&2
+    SANDBOX=""
+    unset ARCHON_USER_MIN_ROOT_MB ARCHON_USER_MIN_BASE_MB
+fi
 ETC="${SANDBOX:+$SANDBOX/etc-archon-user}"; ETC="${ETC:-/etc/archon-user}"
 CONFIG="$ETC/config"
 SUDOERS_D="${SANDBOX:+$SANDBOX/sudoers.d}"; SUDOERS_D="${SUDOERS_D:-/etc/sudoers.d}"
 SUDOERS_DST="$SUDOERS_D/archon-user"
 HEALTH_URL=http://127.0.0.1:3090/
+# The passwordless-root entrypoints and the snapshot they run (ops/host/archon-ops).
+OPS_ROOT="${SANDBOX:+$SANDBOX/archon-ops}"; OPS_ROOT="${OPS_ROOT:-/usr/local/lib/archon-ops}"
+SBIN="${SANDBOX:+$SANDBOX/sbin}"; SBIN="${SBIN:-/usr/local/sbin}"
+OPS_ENTRY_SRC="$SCRIPT_DIR/../archon-ops/archon-ops"
+OPS_ENTRYPOINTS=(archon-user-install archon-host-install archon-ops-promote)
 # Top-level entries of $BASE archon may reach; everything else gets u:archon:---.
-BASE_ALLOW=(archon archon-home lost+found)
+# .tmp-root: the NVMe dir /tmp is bound from (ops/host/install.sh step 11),
+# root:root 1777 like /tmp itself. A deny ACL on it would lock archon out of /tmp.
+BASE_ALLOW=(archon archon-home lost+found .tmp-root)
 
 OWNER_HOME=$(getent passwd "$OWNER" | cut -d: -f6); OWNER_HOME=${OWNER_HOME:-/home/$OWNER}
 OWNER_UID=$(id -u "$OWNER" 2>/dev/null || echo 1000)
 FLAG_FILE="$OWNER_HOME/.config/archon-cron/run-as"
 LINK="$OWNER_HOME/.bun/bin/archon"
 LINK_PREV="$OWNER_HOME/.config/archon-cron/archon-link.prev"
-SHIM="$REPO_DIR/ops/cron/lib/archon-shim/archon"
+SHIM="$LIVE_CHECKOUT/ops/cron/lib/archon-shim/archon"
 PROJECTS_SRC="$REPO_DIR/ops/cron/archon-projects.txt"
 
-MODE=prepare DRY=0 FORCE=0
+MODE=prepare DRY=0 FORCE=0 ACCOUNT=factory
+want_account=0
 for a in "$@"; do
+    if [ "$want_account" -eq 1 ]; then
+        case "$a" in factory|main) ACCOUNT="$a" ;; *) echo "--account: factory or main, not '$a'" >&2; exit 2 ;; esac
+        want_account=0; continue
+    fi
     case "$a" in
+        --account) want_account=1 ;;
+        --account=*) ACCOUNT="${a#--account=}"
+                     case "$ACCOUNT" in factory|main) ;; *) echo "--account: factory or main, not '$ACCOUNT'" >&2; exit 2 ;; esac ;;
         --dry-run|-n) DRY=1 ;;
         --force) FORCE=1 ;;
         --set-gh-token) MODE=gh-token ;;
@@ -85,10 +132,13 @@ for a in "$@"; do
         --cutover) MODE=cutover ;;
         --rollback) MODE=rollback ;;
         --status) MODE=status ;;
-        -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
+        --install-sudo-ops) MODE=sudo-ops ;;
+        -h|--help) sed -n '2,62p' "$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"; exit 0 ;;
         *) echo "unknown argument: $a (see --help)" >&2; exit 2 ;;
     esac
 done
+[ "$want_account" -eq 0 ] || { echo "--account needs a value: factory or main" >&2; exit 2; }
+[ "$ACCOUNT" = factory ] || [ "$MODE" = claude-token ] || { echo "--account main goes with --set-claude-token only" >&2; exit 2; }
 
 if [ "$DRY" -eq 0 ] && [ "$MODE" != status ] && [ -z "$SANDBOX" ] && [ "$(id -u)" -ne 0 ]; then
     echo "run as root: sudo $0 $*   (or $0 --dry-run to preview)" >&2
@@ -145,6 +195,30 @@ write_file() {
     fi
     done_ "wrote $path"
 }
+# write_ah_file <path> <mode> <content> — like write_file, for a file inside
+# archon's home: archon itself writes it (mktemp + mv in its own directory), so
+# a symlink archon planted on the way can only lead where archon could write
+# anyway. Root never opens, chmods or chowns a path there. Content goes over
+# stdin, never argv.
+write_ah_file() {
+    local path="$1" mode="$2" content="$3" rc
+    if [ "$DRY" -eq 1 ]; then
+        printf '    DRY-RUN: would write %s (%s, as %s):\n' "$path" "$mode" "$ARCHON_USER"
+        printf '%s' "$content" | sed 's/^/        | /'; return 0
+    fi
+    # shellcheck disable=SC2016  # expanded by the inner sh, as archon
+    printf '%s' "$content" | runuser -u "$ARCHON_USER" -- sh -c '
+        t=$(mktemp "$1.XXXXXX") || exit 1
+        if ! { cat > "$t" && chmod "$2" "$t"; }; then rm -f "$t"; exit 1; fi
+        if [ ! -L "$1" ] && cmp -s "$t" "$1"; then rm -f "$t"; chmod "$2" "$1"; exit 3; fi
+        mv -f "$t" "$1"' sh "$path" "$mode"
+    rc=$?
+    case "$rc" in
+        0) done_ "wrote $path" ;;
+        3) done_ "$path already done" ;;
+        *) return 1 ;;
+    esac
+}
 finish() {
     echo
     if [ "${#FAILED[@]}" -gt 0 ]; then echo "FAILED steps: ${FAILED[*]} — fix and re-run (safe to repeat)." >&2; exit 1; fi
@@ -195,6 +269,33 @@ install_sudoers() {
     fi
 }
 
+# ---------------------------------------------------------------- ops sudo --
+# The root-owned entrypoints the sudoers drop-in names (ops/host/archon-ops), and
+# the snapshot they run. The snapshot is bootstrapped here only when there is
+# none; afterwards it moves only by archon-ops-promote, which checks that the
+# live checkout is clean under ops/ and on origin/main.
+install_ops_entrypoints() {
+    local own=root grp=root n out rc
+    [ -n "$SANDBOX" ] && { own=$(id -un); grp=$(id -gn); }
+    [ -r "$OPS_ENTRY_SRC" ] || { fail ops-sudo "$OPS_ENTRY_SRC missing"; return; }
+    run install -d -m 0755 -o "$own" -g "$grp" "$SBIN" "$OPS_ROOT" "$OPS_ROOT/releases"
+    for n in "${OPS_ENTRYPOINTS[@]}"; do
+        if [ -r "$SBIN/$n" ] && cmp -s "$OPS_ENTRY_SRC" "$SBIN/$n"; then done_ "$SBIN/$n already done"
+        else run install -m 0755 -o "$own" -g "$grp" "$OPS_ENTRY_SRC" "$SBIN/$n" && done_ "installed $SBIN/$n"; fi
+    done
+    if [ -L "$OPS_ROOT/current" ]; then
+        done_ "snapshot: $OPS_ROOT/current -> $(readlink "$OPS_ROOT/current") (refresh after an approved ops/ update: sudo -n $SBIN/archon-ops-promote)"
+    elif [ "$DRY" -eq 1 ]; then
+        done_ "DRY-RUN: would bootstrap the snapshot from $LIVE_CHECKOUT: $SBIN/archon-ops-promote"
+    else
+        local envs=()
+        [ -n "$SANDBOX" ] && envs=(ARCHON_OPS_TEST=1 "ARCHON_OPS_ROOT=$OPS_ROOT")
+        out=$(env "${envs[@]}" "$SBIN/archon-ops-promote" 2>&1); rc=$?
+        printf '%s\n' "$out" | sed 's/^/    /'
+        [ "$rc" -eq 0 ] || fail ops-sudo "could not bootstrap the snapshot in $OPS_ROOT (above); the entrypoints refuse until: sudo $SBIN/archon-ops-promote"
+    fi
+}
+
 # ---------------------------------------------------------------- config ----
 # set_config <KEY> <VALUE|""> — set (or with "" remove) one KEY=VALUE line in
 # $CONFIG, keeping every other line. root:root 0644: the wrapper reads it as archon.
@@ -225,8 +326,17 @@ if [ "$MODE" = allow-all-repos ] || [ "$MODE" = no-allow-all-repos ]; then
     finish
 fi
 
-if [ -n "$SANDBOX" ]; then   # test hook: the sudoers step only
+if [ -n "$SANDBOX" ]; then   # test hook: the sudoers step only (+ entrypoints with --install-sudo-ops)
+    [ "$MODE" = sudo-ops ] && install_ops_entrypoints
     install_sudoers; finish
+fi
+
+# ================================================================ sudo-ops ==
+if [ "$MODE" = sudo-ops ]; then
+    say "passwordless sudo: asiri -> archon (anything), asiri -> root (the snapshot's installers only)"
+    install_ops_entrypoints
+    install_sudoers
+    finish
 fi
 
 # ================================================================ status ====
@@ -239,6 +349,7 @@ if [ "$MODE" = status ]; then
     echo "owner unit:    $(systemctl --user -M "$OWNER@" is-enabled "$UNIT" 2>/dev/null || true) / $(systemctl --user -M "$OWNER@" is-active "$UNIT" 2>/dev/null || true)"
     echo "server:        $(curl -s -o /dev/null --max-time 5 -w '%{http_code}' "$HEALTH_URL" 2>/dev/null || echo down) on $HEALTH_URL"
     echo "archon link:   $LINK -> $(readlink "$LINK" 2>/dev/null || echo '?')"
+    echo "ops snapshot:  $OPS_ROOT/current -> $(readlink "$OPS_ROOT/current" 2>/dev/null || echo 'none (sudo ops/host/archon-user/install.sh --install-sudo-ops)')"
     echo "opt-ins:       ALLOW_ALL_REPOS_TOKEN=$(config_get ALLOW_ALL_REPOS_TOKEN || true) ($CONFIG; empty = not opted in)"
     exit 0
 fi
@@ -246,10 +357,13 @@ fi
 # ================================================================ tokens ====
 if [ "$MODE" = gh-token ]; then
     user_exists || { echo "user $ARCHON_USER missing — run: sudo $0" >&2; exit 1; }
-    say "GitHub fine-grained PAT for $ARCHON_USER"
-    [ -t 0 ] && echo "    Paste the token (github_pat_...), then Enter. It is not echoed." >&2
+    say "GitHub PAT for $ARCHON_USER"
+    [ -t 0 ] && echo "    Paste the token (github_pat_... or ghp_...), then Enter. It is not echoed." >&2
     tok=$(read_secret "token")
-    [[ "$tok" =~ ^github_pat_[A-Za-z0-9_]{20,}$ ]] || { echo "    not a fine-grained PAT (want github_pat_...); refusing — see README step (a)" >&2; exit 1; }
+    # github_pat_: a fine-grained PAT. ghp_: a classic PAT of the factory's own
+    # machine user (alexsiri7-factory), which fine-grained tokens cannot serve:
+    # they reach only repos the token's own account owns.
+    [[ "$tok" =~ ^(github_pat_|ghp_)[A-Za-z0-9_]{20,}$ ]] || { echo "    not a GitHub PAT (want github_pat_... or ghp_...); refusing — see README step (a)" >&2; exit 1; }
     ghbin="$AH/.local/bin/gh"
     [ -x "$ghbin" ] || { echo "    $ghbin missing — run: sudo $0" >&2; exit 1; }
     if printf '%s\n' "$tok" | runuser -u "$ARCHON_USER" -- env -i HOME="$AH" PATH="$AH/.local/bin:/usr/bin:/bin" \
@@ -265,15 +379,57 @@ fi
 
 if [ "$MODE" = claude-token ]; then
     user_exists || { echo "user $ARCHON_USER missing — run: sudo $0" >&2; exit 1; }
-    say "Claude credential for $ARCHON_USER (output of \`claude setup-token\`)"
+    if [ "$ACCOUNT" = main ]; then
+        say "Claude credential of the owner's MAIN account for $ARCHON_USER (output of \`claude setup-token\`, signed in as main)"
+        envfile=claude-main.env
+    else
+        say "Claude credential for $ARCHON_USER (output of \`claude setup-token\`)"
+        envfile=claude.env
+    fi
     [ -t 0 ] && echo "    Paste the token printed by 'claude setup-token' (sk-ant-oat...), then Enter. It is not echoed." >&2
     tok=$(read_secret "token")
     [[ "$tok" =~ ^sk-ant-[A-Za-z0-9._~+/=-]{20,}$ ]] || { echo "    does not look like a Claude OAuth token (sk-ant-...); refusing" >&2; exit 1; }
     dir="$AH/.config/archon-user"
-    install -d -m 0700 -o "$ARCHON_USER" -g "$ARCHON_USER" "$AH/.config" "$dir"
-    write_file "$dir/claude.env" 0600 "$ARCHON_USER:$ARCHON_USER" "CLAUDE_CODE_OAUTH_TOKEN=$tok
-" || { echo "    could not write $dir/claude.env" >&2; exit 1; }
+    runuser -u "$ARCHON_USER" -- install -d -m 0700 "$AH/.config" "$dir"
+    write_ah_file "$dir/$envfile" 0600 "CLAUDE_CODE_OAUTH_TOKEN=$tok
+" || { echo "    could not write $dir/$envfile" >&2; exit 1; }
     unset tok
+    if [ "$ACCOUNT" = main ]; then
+        # Main's own config dir: no connectors, the plan-usage plugin, and its
+        # paced budget guard (65% of the week, paced; 5-hour 60%), which both
+        # the sessions and the cron's launch gate read. Kept when present, so
+        # the owner's edits to the caps survive a token renewal.
+        cm="$AH/.claude-main"
+        runuser -u "$ARCHON_USER" -- install -d -m 0750 "$cm"
+        if [ -f "$cm/settings.json" ]; then done_ "$cm/settings.json exists — kept"
+        else write_ah_file "$cm/settings.json" 0640 '{
+  "disableClaudeAiConnectors": true,
+  "env": { "ENABLE_CLAUDEAI_MCP_SERVERS": "false" },
+  "extraKnownMarketplaces": {
+    "lachesis": { "source": { "source": "github", "repo": "alexsiri7/lachesis" }, "autoUpdate": true }
+  },
+  "enabledPlugins": { "plan-usage@lachesis": true }
+}
+'; fi
+        if [ -f "$cm/budget-guard.json" ]; then done_ "$cm/budget-guard.json exists — kept"
+        else write_ah_file "$cm/budget-guard.json" 0640 '{ "enabled": true, "weeklyCapPercent": 65, "fiveHourCapPercent": 60, "pace": true }
+'; fi
+        cpath="$AH/.local/bin:/usr/local/bin:/usr/bin:/bin"
+        # shellcheck disable=SC2016  # $HOME must expand in the inner sh (env -i HOME=...), not here
+        if runuser -u "$ARCHON_USER" -- env -i HOME="$AH" PATH="$cpath" CLAUDE_CONFIG_DIR="$cm" \
+                sh -c 'cd "$HOME" && { claude plugin marketplace add alexsiri7/lachesis || claude plugin marketplace update lachesis; } >/dev/null 2>&1 && claude plugin install plan-usage@lachesis >/dev/null 2>&1'; then
+            done_ "plan-usage plugin installed in $cm"
+        else
+            echo "    could not install the plan-usage plugin in $cm: no plan-usage.json, so the launch gate holds every main launch" >&2
+        fi
+        if out=$(runuser -u "$ARCHON_USER" -- "$WRAPPER_DST" --account main claude-probe 90 2>&1); then
+            done_ "probe OK on main: $(tail -n 1 <<<"$out")"
+        else
+            echo "    probe FAILED on main: $(tail -n 1 <<<"$out")" >&2; exit 1
+        fi
+        done_ "main is still off: as $OWNER, put ARCHON_MAIN_ACCOUNT=on in $OWNER_HOME/.config/archon-cron/main-account to turn it on"
+        exit 0
+    fi
     if out=$(runuser -u "$ARCHON_USER" -- "$WRAPPER_DST" claude-probe 90 2>&1); then
         done_ "probe OK: $(tail -n 1 <<<"$out")"
     else
@@ -352,7 +508,7 @@ if [ "$MODE" = cutover ]; then
         for st in running paused; do
             n=$(runuser -u "$OWNER" -- env -i HOME="$OWNER_HOME" PATH="$OWNER_HOME/.bun/bin:/usr/bin:/bin" CLAUDECODE=0 \
                 ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING=1 "$OWNER_HOME/.bun/bin/bun" "$ENGINE/packages/cli/src/cli.ts" \
-                workflow runs --all --status "$st" --limit 100 --json --cwd "$REPO_DIR" 2>/dev/null \
+                workflow runs --all --status "$st" --limit 100 --json --cwd "$LIVE_CHECKOUT" 2>/dev/null \
                 | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("runs",[])))' 2>/dev/null || echo unknown)
             done_ "$OWNER's DB: $st runs: $n"
             [ "$n" = 0 ] || busy="$busy $st=$n"
@@ -403,10 +559,10 @@ if [ "$MODE" = cutover ]; then
     else
         done_ "$LINK already -> $SHIM"
     fi
-    if crontab -u "$OWNER" -l 2>/dev/null | grep -q "git -C $REPO_DIR pull --ff-only -q origin main"; then
+    if crontab -u "$OWNER" -l 2>/dev/null | grep -q "git -C $LIVE_CHECKOUT pull --ff-only -q origin main"; then
         if [ "$DRY" -eq 1 ]; then done_ "DRY-RUN: would point the crontab's self-update line at ops/cron/ops-self-update.sh"
         else
-            crontab -u "$OWNER" -l | sed "s#git -C $REPO_DIR pull --ff-only -q origin main#$REPO_DIR/ops/cron/ops-self-update.sh#" \
+            crontab -u "$OWNER" -l | sed "s#git -C $LIVE_CHECKOUT pull --ff-only -q origin main#$LIVE_CHECKOUT/ops/cron/ops-self-update.sh#" \
                 | crontab -u "$OWNER" - && done_ "crontab: self-update now runs ops/cron/ops-self-update.sh (holds ops/** changes for --approve)"
         fi
     else
@@ -506,34 +662,55 @@ done
 
 # ------------------------------------------------------------ 5. home -------
 say "5. $ARCHON_USER's home: ~/.archon, ~/.gitconfig, ~/.claude, repos, tmp"
-for d in .archon .config .config/archon-user .claude .local .local/bin .local/opt .local/share .bun .bun/bin .cache repos tmp; do
-    run install -d -m 0750 -o "$ARCHON_USER" -g "$ARCHON_USER" "$AH/$d"
+for d in .archon .config .config/archon-user .claude .local .local/bin .local/opt .local/share .bun .bun/bin .cache .cargo repos tmp; do
+    as_archon install -d -m 0750 "$AH/$d"
 done
-run chmod 0700 "$AH/.config/archon-user"
+as_archon chmod 0700 "$AH/.config/archon-user"
 cfg=""
 [ -r "$OWNER_HOME/.archon/config.yaml" ] && cfg=$(sed -e "s#$OWNER_HOME/.local/bin/claude#$AH/.local/bin/claude#g" \
                                                     -e "s#/mnt/ext-fast/.archon/worktrees#$AH/.archon/worktrees#g" \
                                                     -e "s#$OWNER_HOME#$AH#g" "$OWNER_HOME/.archon/config.yaml")
 [ -n "$cfg" ] || cfg="{assistants: {claude: {claudeBinaryPath: $AH/.local/bin/claude}}}"
 cfg="${cfg%$'\n'}"$'\n'
-write_file "$AH/.archon/config.yaml" 0640 "$ARCHON_USER:$ARCHON_USER" "$cfg"
-write_file "$AH/.archon/.env" 0600 "$ARCHON_USER:$ARCHON_USER" "CLAUDE_USE_GLOBAL_AUTH=true
+write_ah_file "$AH/.archon/config.yaml" 0640 "$cfg"
+write_ah_file "$AH/.archon/.env" 0600 "CLAUDE_USE_GLOBAL_AUTH=true
 DEFAULT_AI_ASSISTANT=claude
 CLAUDE_BIN_PATH=$AH/.local/bin/claude
 "
+# Cargo reads $CARGO_HOME/config.toml for every build, whatever the cwd, so this
+# also covers `git worktree add /tmp/x && cargo test`, which the per-worktree
+# config (pipeline-health-cron.sh, #131) never reaches: /tmp is on the slow
+# root SSD (#133). A worktree's own .cargo/config.toml still wins. Final
+# binaries stay in ./target; worktree-trim drops build dirs idle 2 days.
+write_ah_file "$AH/.cargo/config.toml" 0640 "# Managed by ops/host/archon-user/install.sh (step 5), issue #133.
+[build]
+build-dir = \"$AH/.cache/cargo-build/{workspace-path-hash}\"
+"
+
 # Global workflow overrides: owned by the owner (who edits them without sudo),
-# readable by archon, not writable by it.
-run install -d -m 0755 -o "$OWNER" -g "$ARCHON_USER" "$AH/.archon/workflows"
-for w in "$OWNER_HOME"/.archon/workflows/*.yaml; do
-    [ -f "$w" ] || continue
-    dst="$AH/.archon/workflows/$(basename "$w")"
-    if [ -f "$dst" ]; then done_ "$dst exists — kept (edit it there; the owner's copy is no longer read)"
-    else run install -m 0644 -o "$OWNER" -g "$ARCHON_USER" "$w" "$dst" && done_ "copied workflow $(basename "$w")"; fi
-done
+# readable by archon, not writable by it. (Nominally: archon owns the parent
+# ~/.archon, so it can rename the directory away and make its own.) The only
+# step that writes into archon's home as root: it creates the directory and
+# copies files that do not exist yet, never through a symlink it can see.
+# A race with archon swapping a component between the check and the write
+# remains; it only matters on a first install or for a newly added override.
+wf="$AH/.archon/workflows"
+if [ -L "$AH/.archon" ] || [ -L "$wf" ] || { [ -e "$wf" ] && [ ! -d "$wf" ]; }; then
+    fail home "$AH/.archon or $wf is a symlink or not a directory — not writing there as root; look at it (archon made it)"
+else
+    if [ -d "$wf" ]; then done_ "$wf already there"
+    else run install -d -m 0755 -o "$OWNER" -g "$ARCHON_USER" "$wf"; fi
+    for w in "$OWNER_HOME"/.archon/workflows/*.yaml; do
+        [ -f "$w" ] || continue
+        dst="$wf/$(basename "$w")"
+        if [ -e "$dst" ] || [ -L "$dst" ]; then done_ "$dst exists — kept (edit it there; the owner's copy is no longer read)"
+        else run install -m 0644 -o "$OWNER" -g "$ARCHON_USER" "$w" "$dst" && done_ "copied workflow $(basename "$w")"; fi
+    done
+fi
 owner_git() { if [ "$(id -u)" = "$OWNER_UID" ]; then git config --global "$1"; else runuser -u "$OWNER" -- git config --global "$1"; fi; }
 gname=$(owner_git user.name 2>/dev/null || echo "Archon factory")
 gmail=$(owner_git user.email 2>/dev/null || echo "archon@localhost")
-write_file "$AH/.gitconfig" 0640 "$ARCHON_USER:$ARCHON_USER" "[user]
+write_ah_file "$AH/.gitconfig" 0640 "[user]
 	name = $gname
 	email = $gmail
 [init]
@@ -549,7 +726,7 @@ write_file "$AH/.gitconfig" 0640 "$ARCHON_USER:$ARCHON_USER" "[user]
 	directory = $ENGINE
 "
 if [ -f "$AH/.claude/settings.json" ]; then done_ "$AH/.claude/settings.json exists — kept"
-else write_file "$AH/.claude/settings.json" 0640 "$ARCHON_USER:$ARCHON_USER" '{
+else write_ah_file "$AH/.claude/settings.json" 0640 '{
   "disableClaudeAiConnectors": true,
   "env": { "ENABLE_CLAUDEAI_MCP_SERVERS": "false" }
 }
@@ -557,34 +734,45 @@ else write_file "$AH/.claude/settings.json" 0640 "$ARCHON_USER:$ARCHON_USER" '{
 
 # ------------------------------------------------------------ 6. toolchains -
 say "6. toolchains for $ARCHON_USER (copied from $OWNER's installs; re-run to resync)"
+# Root reads the owner's copies; archon writes its own (see write_ah_file).
 copy_bin() {  # copy_bin <src> <dst>
     local src="$1" dst="$2"
     [ -e "$src" ] || { done_ "skip $(basename "$dst"): $src missing"; return 0; }
     src=$(readlink -f "$src")
-    if [ -f "$dst" ] && cmp -s "$src" "$dst"; then done_ "$(basename "$dst") already current"; return 0; fi
-    run install -m 0755 -o "$ARCHON_USER" -g "$ARCHON_USER" "$src" "$dst" && done_ "$(basename "$dst") <- $src"
+    if [ -f "$dst" ] && [ ! -L "$dst" ] && cmp -s "$src" "$dst"; then done_ "$(basename "$dst") already current"; return 0; fi
+    if [ "$DRY" -eq 1 ]; then printf '    DRY-RUN: would copy %s to %s (0755, written as %s)\n' "$src" "$dst" "$ARCHON_USER"; return 0; fi
+    # shellcheck disable=SC2016  # expanded by the inner sh, as archon
+    if runuser -u "$ARCHON_USER" -- sh -c 't=$(mktemp "$1.XXXXXX") || exit 1
+            if cat > "$t" && chmod 0755 "$t" && mv -f "$t" "$1"; then exit 0; fi
+            rm -f "$t"; exit 1' sh "$dst" < "$src"; then
+        done_ "$(basename "$dst") <- $src"
+    else
+        fail toolchain "could not copy $src to $dst (as $ARCHON_USER)"
+    fi
 }
 sync_tree() {  # sync_tree <src-dir> <dst-dir> [rsync excludes...]
     local src="$1" dst="$2"; shift 2
     [ -d "$src" ] || { done_ "skip $dst: $src missing"; return 0; }
     src=$(readlink -f "$src")
-    run install -d -m 0750 -o "$ARCHON_USER" -g "$ARCHON_USER" "$(dirname "$dst")"
-    if run rsync -a --delete --chown="$ARCHON_USER:$ARCHON_USER" "$@" "$src/" "$dst/"; then done_ "$dst <- $src"
+    as_archon install -d -m 0750 "$(dirname "$dst")"
+    # The receiving rsync runs as archon: -e makes it a "remote" one, started
+    # by runuser, and the host part `env` is the command runuser execs.
+    if run rsync -rlpt --delete "$@" -e "runuser -u $ARCHON_USER --" "$src/" "env:$dst/"; then done_ "$dst <- $src"
     else fail toolchain "rsync $src -> $dst failed"; fi
 }
 copy_bin "$OWNER_HOME/.bun/bin/bun" "$AH/.bun/bin/bun"
-run ln -sfn bun "$AH/.bun/bin/bunx"
+as_archon ln -sfn bun "$AH/.bun/bin/bunx"
 # archon's own `archon` on its PATH (the one its agents may call) -> the engine checkout
-run ln -sfn "$ENGINE/packages/cli/src/cli.ts" "$AH/.bun/bin/archon"
+as_archon ln -sfn "$ENGINE/packages/cli/src/cli.ts" "$AH/.bun/bin/archon"
 cl=$(readlink -f "$OWNER_HOME/.local/bin/claude" 2>/dev/null || true)
 if [ -n "$cl" ] && [ -f "$cl" ]; then
     v=$(basename "$cl")
-    run install -d -m 0750 -o "$ARCHON_USER" -g "$ARCHON_USER" "$AH/.local/share/claude" "$AH/.local/share/claude/versions"
+    as_archon install -d -m 0750 "$AH/.local/share/claude" "$AH/.local/share/claude/versions"
     copy_bin "$cl" "$AH/.local/share/claude/versions/$v"
     if [ -e "$AH/.local/bin/claude" ] && [ "$(readlink "$AH/.local/bin/claude")" != "$AH/.local/share/claude/versions/$v" ]; then
         done_ "claude: keeping archon's own (self-updated) $(readlink "$AH/.local/bin/claude")"
     else
-        run ln -sfn "$AH/.local/share/claude/versions/$v" "$AH/.local/bin/claude"
+        as_archon ln -sfn "$AH/.local/share/claude/versions/$v" "$AH/.local/bin/claude"
     fi
 else
     fail toolchain "claude binary not found at $OWNER_HOME/.local/bin/claude"
@@ -599,12 +787,11 @@ sync_tree "$OWNER_HOME/.cargo/bin" "$AH/.cargo/bin"
 sync_tree "$OWNER_HOME/snap/flutter/common/flutter" "$AH/.local/opt/flutter"
 sync_tree "$OWNER_HOME/.cache/ms-playwright" "$AH/.cache/ms-playwright"
 sync_tree "$OWNER_HOME/Android/Sdk" "$AH/Android/Sdk"
-run chown -h "$ARCHON_USER:$ARCHON_USER" "$AH/.bun/bin/bunx" "$AH/.bun/bin/archon" "$AH/.local/bin/claude" 2>/dev/null
 [ -d "$AH/.local/opt/flutter" ] && as_archon git config --global --add safe.directory "$AH/.local/opt/flutter" 2>/dev/null
 true
 
 # ------------------------------------------------------------ 7. system ----
-say "7. wrapper, project list, sudoers, systemd unit"
+say "7. wrapper, project list, ops snapshot + entrypoints, sudoers, systemd unit"
 run install -d -m 0755 -o root -g root "$ETC" "$LIBDIR" "$LIBDIR/bin"
 if [ -r "$PROJECTS_SRC" ]; then
     write_file "$ETC/projects" 0644 root:root "# Factory projects archon may work on (from ops/cron/archon-projects.txt at install time).
@@ -617,6 +804,9 @@ fi
 run ln -sfn "$ENGINE/packages/cli/src/cli.ts" "$LIBDIR/bin/archon"
 if [ -r "$WRAPPER_DST" ] && cmp -s "$SCRIPT_DIR/archon-as-archon" "$WRAPPER_DST"; then done_ "$WRAPPER_DST already done"
 else run install -m 0755 -o root -g root "$SCRIPT_DIR/archon-as-archon" "$WRAPPER_DST" && done_ "installed $WRAPPER_DST"; fi
+if [ -r "$LIBDIR/fuel_probe.py" ] && cmp -s "$SCRIPT_DIR/fuel_probe.py" "$LIBDIR/fuel_probe.py"; then done_ "$LIBDIR/fuel_probe.py already done"
+else run install -m 0644 -o root -g root "$SCRIPT_DIR/fuel_probe.py" "$LIBDIR/fuel_probe.py" && done_ "installed $LIBDIR/fuel_probe.py"; fi
+install_ops_entrypoints
 install_sudoers
 if [ -r "$UNIT_DST" ] && cmp -s "$SCRIPT_DIR/$UNIT" "$UNIT_DST"; then done_ "$UNIT_DST already done"
 else

@@ -45,6 +45,12 @@ source "$SCRIPT_DIR/lib/run-as.sh"
 source "$SCRIPT_DIR/lib/throttle.sh"
 should_tick "sweep-audits" || exit 0
 runas_may_launch "sweep-audits" || exit 0
+# shellcheck source=lib/ship-breaker.sh
+source "$SCRIPT_DIR/lib/ship-breaker.sh"
+# shellcheck source=lib/quota-pause.sh
+source "$SCRIPT_DIR/lib/quota-pause.sh"
+# Every sweep is an archon run: none while the Claude account is rate limited.
+quota_may_launch "sweep-audits" || exit 0
 # shellcheck source=lib/claude-auth.sh
 source "$SCRIPT_DIR/lib/claude-auth.sh"
 BASE_DIR="/mnt/ext-fast"

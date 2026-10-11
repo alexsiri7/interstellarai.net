@@ -2,9 +2,9 @@
 created: '2026-05-15'
 github_issue: 31
 id: '017'
-status: idea
+status: done
 title: Staging environment gates all production deployments
-updated: '2026-05-15'
+updated: '2026-09-28'
 ---
 
 ## Why

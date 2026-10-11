@@ -48,9 +48,27 @@ fi
 [ -r "$run_log" ] || exit 1
 
 # The two ship outcome reports that end without a PR (see the ship workflow's
-# outcome script), printed verbatim by the outcome node: the verdict line, whose
-# triage summary may run onto further lines, then "Report: <path>".
-verdict=$(grep -m1 -E '^No delivery (needed|started): ' "$run_log" || true)
+# outcome script): the verdict line, whose triage summary may run onto further
+# lines, then "Report: <path>". Archon before 0.11 printed the report verbatim.
+# Since the 0.11.1 sync (2026-10-09) the outcome node prints it as one JSON line,
+#   {"delivered":false,"summary":"No delivery needed: ...\nReport: <path>"}
+# and grepping for the plain line found nothing: every such run fell through to
+# unstick_stale, which released the issue to be triaged again (101 runs by
+# 2026-10-11). When the log carries that JSON line it is the authority: its
+# decoded summary is the report, and delivered:true (a PR) settles nothing.
+# Otherwise the plain report is read, as from --recheck's parked verdict.
+outcome_text="$run_log"
+outcome_json=$(grep -E '^\{.*"delivered" *:' "$run_log" \
+  | jq -cR 'fromjson? | select(type == "object" and (.delivered | type) == "boolean")' 2>/dev/null \
+  | tail -n 1)
+if [ -n "$outcome_json" ]; then
+  outcome_text=$(mktemp) || exit 1
+  trap 'rm -f "$outcome_text"' EXIT
+  jq -r 'select(.delivered == false and (.summary | type) == "string"
+           and (.summary | test("^No delivery (needed|started): "))) | .summary' \
+    <<<"$outcome_json" > "$outcome_text" 2>/dev/null || exit 1
+fi
+verdict=$(grep -m1 -E '^No delivery (needed|started): ' "$outcome_text" || true)
 [ -n "$verdict" ] || exit 1
 
 repo="alexsiri7/$project"
@@ -93,7 +111,7 @@ if [ "$health_filed" = 0 ] && [[ "$verdict" == "No delivery needed: "* ]]; then
   # Bare same-repo refs only ("owner/repo#N" is excluded), self dropped, the
   # first five checked to bound the API calls.
   mapfile -t refs < <(
-    awk '/^No delivery needed: /{p=1} p && /^(Report: |Parked as archon:skipped)/{exit} p' "$run_log" \
+    awk '/^No delivery needed: /{p=1} p && /^(Report: |Parked as archon:skipped)/{exit} p' "$outcome_text" \
       | grep -oE '(^|[^A-Za-z0-9/_.-])#[0-9]+' | grep -oE '[0-9]+$' \
       | awk -v self="$issue" '$0 != self && !seen[$0]++' | head -5)
   declare -A kind=()
@@ -115,6 +133,26 @@ if [ "$health_filed" = 0 ] && [[ "$verdict" == "No delivery needed: "* ]]; then
 fi
 [ "$recheck" = 1 ] && exit 1
 
+# With Lachesis pickup on (lib/lachesis.sh) archon:skipped gates nothing:
+# next_issue would offer the issue again and pay for the same triage. The park
+# is a question for the author, which labels it needs-author; archon:skipped
+# stays as the record settle_parked re-checks. Asked before the park comment,
+# so that comment stays the last one settle_parked reads. A question that could
+# not be recorded leaves archon:in-progress in place, so unstick_stale settles
+# it again on a later tick.
+rerun_note="Remove the label and add archon:queued to run it again."
+# shellcheck source=lib/lachesis.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lachesis.sh"
+if lachesis_pickup_enabled; then
+  if ! lachesis_ask "$project" "$issue" \
+      "archon-ship finished on #$issue without a PR, and GitHub does not confirm that nothing is needed. Close the issue, or answer this question to let the factory run it again." \
+      "The run's verdict: ${verdict:0:600}"; then
+    echo "$(date -Is) [issue-pickup] $project: #$issue — could not record a question in Lachesis; left archon:in-progress, settled again later"
+    exit 0
+  fi
+  rerun_note="Waiting on the author's answer to the question above (Lachesis)."
+fi
+
 if ! gh issue edit "$issue" --repo "$repo" \
     --remove-label "archon:in-progress" --add-label "archon:skipped" >/dev/null 2>&1; then
   echo "$(date -Is) [issue-pickup] $project: #$issue — could not park as archon:skipped"
@@ -125,5 +163,5 @@ health_note=""
   && health_note=" Not auto-closed: the issue was filed by pipeline-health-cron.sh (CI/deploy state), or its body could not be read, so a human decides."
 gh issue comment "$issue" --repo "$repo" --body "archon-ship finished without a PR: ${verdict}
 
-Parked as archon:skipped. Remove the label and add archon:queued to run it again.${health_note} Run log: \`${run_log}\`" >/dev/null 2>&1 || true
+Parked as archon:skipped. ${rerun_note}${health_note} Run log: \`${run_log}\`" >/dev/null 2>&1 || true
 echo "$(date -Is) [issue-pickup] $project: #$issue settled as archon:skipped (${verdict:0:120})"

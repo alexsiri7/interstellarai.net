@@ -2,9 +2,20 @@
 # archon-as-archon — the only door from the owner's cron jobs into the factory
 # user. Installed root-owned at /usr/local/bin/archon-as-archon by
 # ops/host/archon-user/install.sh; /etc/sudoers.d/archon-user lets `asiri` run
-# exactly this file as user `archon` (never as root):
+# this file as user `archon` (never as root):
 #
-#   sudo -n -u archon /usr/local/bin/archon-as-archon <verb> [args...]
+#   sudo -n -u archon /usr/local/bin/archon-as-archon [--account main] <verb> [args...]
+#
+# --account main runs the verb on the owner's main Claude account instead of
+# the factory's: the token from claude-main.env (install.sh --set-claude-token
+# --account main) and its own config dir, ~/.claude-main, which carries the
+# paced budget guard and the plan-usage.json the cron's launch gate reads
+# (ops/cron/lib/main-account.sh). Without it, or with --account factory, the
+# factory's own credential as before.
+#
+# (Since --install-sudo-ops the drop-in also lets asiri run anything as archon,
+# NOSETENV, for interactive and assistant use. The cron path stays here: it is
+# what gives agent sessions env -i, no_new_privs and the fixed verbs.)
 #
 # It runs as `archon`. It never evaluates its arguments as shell: each verb has
 # a fixed argument grammar, anything else is refused (exit 64), and the archon
@@ -26,8 +37,16 @@
 #   --version | version                                           archon CLI
 #   doctor                                                        archon doctor
 #   claude-probe [timeout-seconds]   one real `claude -p --model haiku` request
+#   fuel-probe                       one 1-token haiku API request; writes the
+#                                    account's plan-usage.json from its rate-limit
+#                                    headers (fuel_probe.py, #165)
 #   gh-probe                         gh auth + push access per factory repo
-#   worktree-trim [--dry-run]        remove stale task worktrees (no open PR, idle 4h)
+#   worktree-trim [--dry-run] [--tmp-only]
+#                                    remove stale task worktrees (no open PR, idle 4h),
+#                                    cargo build dirs idle 2 days, /tmp Cargo build
+#                                    dirs idle 2d, and archon's own top-level entries
+#                                    in /tmp and ~/tmp idle 12h;
+#                                    --tmp-only: just the last (no gh calls, every tick)
 #   bun-upgrade                      `bun upgrade` of archon's own bun
 #   ensure-clones                    clone every factory repo that is missing
 #   selftest [abs-path...]           prove what archon can and cannot read; the
@@ -36,6 +55,7 @@
 #                                    probed on top of the built-in list
 #
 # Exit codes: 64 refused (bad verb/argument), 65 not running as archon,
+# 69 --account main without its credential or config dir,
 # 66 project not in /etc/archon-user/projects, otherwise the command's own.
 #
 # Test hook: ARCHON_AS_TEST=1 (honoured only when not started by sudo, i.e.
@@ -54,7 +74,9 @@ PROJECTS_FILE=/etc/archon-user/projects
 # can read it, never write it, so an agent cannot opt itself in.
 CONFIG_FILE=/etc/archon-user/config
 OWNER_BASE=/mnt/ext-fast
+TMP_ROOT=/tmp
 ARCHON_BIN=/usr/local/lib/archon-user/bin/archon     # symlink -> <archon checkout>/packages/cli/src/cli.ts
+FUEL_PROBE=/usr/local/lib/archon-user/fuel_probe.py
 GH_OWNER=alexsiri7
 DRY_EXEC=0
 
@@ -64,12 +86,18 @@ if [ "${ARCHON_AS_TEST:-}" = 1 ] && [ -z "${SUDO_USER:-}" ]; then
     PROJECTS_FILE="${ARCHON_AS_PROJECTS_FILE:-$PROJECTS_FILE}"
     CONFIG_FILE="${ARCHON_AS_CONFIG_FILE:-$CONFIG_FILE}"
     OWNER_BASE="${ARCHON_AS_OWNER_BASE:-$OWNER_BASE}"
+    TMP_ROOT="${ARCHON_AS_TMP_ROOT:-$TMP_ROOT}"
     ARCHON_BIN="${ARCHON_AS_ARCHON_BIN:-$ARCHON_BIN}"
+    FUEL_PROBE="${ARCHON_AS_FUEL_PROBE:-$FUEL_PROBE}"
     DRY_EXEC="${ARCHON_AS_DRY_EXEC:-0}"
 fi
 
 REPOS_DIR="$ARCHON_HOME_DIR/repos"
+# The NVMe dir /tmp is bound from (ops/host/install.sh step 11): root:root
+# 1777, plain /tmp semantics, so the selftest allows exactly this path.
+TMP_BIND_SRC="$OWNER_BASE/.tmp-root"
 CLAUDE_TOKEN_ENV="$ARCHON_HOME_DIR/.config/archon-user/claude.env"
+CLAUDE_CONFIG_DIR_ARG=""
 
 # Debian's daily dpkg/apt/alternatives backups in /var/backups: world-readable
 # by design on every Ubuntu host and only package lists, so the selftest sweep
@@ -156,13 +184,14 @@ archon_env() {
         tok=$(sed -nE 's/^CLAUDE_CODE_OAUTH_TOKEN=["'\'']?([A-Za-z0-9._~+/=-]+)["'\'']?[[:space:]]*$/\1/p' "$CLAUDE_TOKEN_ENV" | tail -n 1)
         [ -n "$tok" ] && ENV+=("CLAUDE_CODE_OAUTH_TOKEN=$tok")
     fi
+    [ -n "$CLAUDE_CONFIG_DIR_ARG" ] && ENV+=("CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR_ARG")
     return 0
 }
 
 # run_in <dir> <cmd...> — exec <cmd> in <dir> with the archon environment.
 run_in() {
     local dir="$1"; shift
-    [ -n "$dir" ] && [ -d "$dir" ] || die 1 "no directory to run in (${dir:-empty})"
+    if ! { [ -n "$dir" ] && [ -d "$dir" ]; }; then die 1 "no directory to run in (${dir:-empty})"; fi
     archon_env
     mkdir -p "$ARCHON_HOME_DIR/tmp" 2>/dev/null || true
     cd "$dir" || die 1 "cannot cd to $dir"
@@ -240,9 +269,9 @@ check_value() {
     local f="$1" v="$2"
     case "$f" in
         --branch|-b|--from|--from-branch|--base)
-            [[ "$v" =~ $re_ref ]] && [[ "$v" != -* ]] || refuse "$f value '$v'" ;;
+            if ! { [[ "$v" =~ $re_ref ]] && [[ "$v" != -* ]]; }; then refuse "$f value '$v'"; fi ;;
         --input)
-            [[ "$v" =~ ^[A-Za-z0-9_.-]{1,64}= ]] && [ "${#v}" -le 8000 ] || refuse "$f value (want name=value)" ;;
+            if ! { [[ "$v" =~ ^[A-Za-z0-9_.-]{1,64}= ]] && [ "${#v}" -le 8000 ]; }; then refuse "$f value (want name=value)"; fi ;;
         --model)
             [[ "$v" =~ ^[A-Za-z0-9@_.-]{1,64}=[A-Za-z0-9@_.:/\[\]-]{1,128}$ ]] || refuse "$f value '$v'" ;;
         --adopt|--supersedes|--conversation-id)
@@ -337,6 +366,11 @@ verb_claude_probe() {
     run_in "$ARCHON_HOME_DIR" timeout "$t" claude -p --model haiku "ok"
 }
 
+verb_fuel_probe() {
+    [ "$#" -eq 0 ] || refuse "fuel-probe takes no arguments"
+    run_in "$ARCHON_HOME_DIR" timeout 60 python3 "$FUEL_PROBE"
+}
+
 # write_status <owner/repo> — HTTP status of a write the token can never
 # complete: creating a ref at the all-zero sha. 422 = the token may write here
 # (GitHub got as far as validating the object); 403/404 = it may not. Unlike
@@ -356,9 +390,18 @@ verb_gh_probe() {
     else
         echo "FAIL gh: not authenticated (sudo ops/host/archon-user/install.sh --set-gh-token)"; return 1
     fi
+    local login
     tok=$(sub_in "$ARCHON_HOME_DIR" gh auth token 2>/dev/null || true)
+    login=$(sub_in "$ARCHON_HOME_DIR" gh api user --jq .login 2>/dev/null || true)
     case "$tok" in
         github_pat_*) echo "PASS gh: fine-grained token (github_pat_...)" ;;
+        # A classic token is fine only on the factory's own machine user: its
+        # reach is the repos it collaborates on, which the checks below verify.
+        ghp_*) if [ -n "$login" ] && [ "$login" != "$GH_OWNER" ]; then
+                   echo "PASS gh: classic token of machine user $login (reach limited by collaborator access)"
+               else
+                   echo "FAIL gh: classic token on $GH_OWNER's own account — it reaches every repo; use the machine user"; rc=1
+               fi ;;
         *) echo "FAIL gh: not a fine-grained PAT (${tok:0:4}...) — use one limited to the factory repos"; rc=1 ;;
     esac
     unset tok
@@ -387,10 +430,31 @@ verb_gh_probe() {
 # Port of pipeline-health-cron.sh autoclean_stale_worktrees for the factory's
 # own layout: task-archon-* worktrees whose archon/<dir> branch has no open PR
 # and that nothing touched for 4h. A project whose PR listing fails is skipped.
+# recently_written <path> <find tests...> — true when find reports a match,
+# and also when find cannot run cleanly: every caller deletes on false, so a
+# doubt must read as "keep". 2026-10-02/03: cron called this verb from asiri's
+# home, which archon cannot enter; GNU find failed on every path before testing
+# it, every freshness test read "idle", and the trim deleted the worktrees of
+# live runs (their next node failed "'uv' / 'bash' executable not found": the
+# spawn's cwd was gone) along with active cargo build dirs.
+recently_written() {
+    local out
+    out=$(find "$@" -print -quit 2>/dev/null) || return 0
+    [ -n "$out" ]
+}
+
+# Also drops the Cargo build dirs of builds under /tmp (ops/host/
+# cargo-tmp-build-dir.conf) that nothing wrote to for 2 days — archon owns
+# them, so the owner's cron cannot.
 verb_worktree_trim() {
-    local dry=0
-    case "${1:-}" in --dry-run) dry=1 ;; "") ;; *) refuse "worktree-trim [--dry-run]" ;; esac
-    local p open wt_base wt_path name removed candidates=0 total=0 size
+    local dry=0 tmp_only=0 a
+    for a in "$@"; do
+        case "$a" in --dry-run) dry=1 ;; --tmp-only) tmp_only=1 ;; *) refuse "worktree-trim [--dry-run] [--tmp-only]" ;; esac
+    done
+    # A directory archon can always enter (see recently_written).
+    cd "$ARCHON_HOME_DIR" 2>/dev/null || cd / || exit 1
+    if [ "$tmp_only" = 1 ]; then trim_tmp "$dry"; return 0; fi
+    local p open wt_base wt_path name removed candidates=0 total=0 size d
     for p in "${PROJECTS[@]}"; do
         [ -d "$REPOS_DIR/$p/.git" ] || continue
         if ! open=$(sub_in "$ARCHON_HOME_DIR" gh pr list --repo "$GH_OWNER/$p" --state open --limit 200 \
@@ -403,7 +467,7 @@ verb_worktree_trim() {
             while IFS= read -r wt_path; do
                 name=$(basename "$wt_path")
                 grep -qxF "archon/$name" <<<"$open" && continue
-                find "$wt_path" -maxdepth 0 -mmin -240 2>/dev/null | grep -q . && continue
+                recently_written "$wt_path" -maxdepth 0 -mmin -240 && continue
                 if [ "$dry" = 1 ]; then
                     size=$(du -sm "$wt_path" 2>/dev/null | cut -f1 || true); size=${size:-0}
                     echo "autoclean: would remove $wt_path (${size}MB)"
@@ -419,7 +483,84 @@ verb_worktree_trim() {
             echo "autoclean: pruned $removed stale worktrees for $p"
         fi
     done
-    [ "$dry" = 1 ] && echo "autoclean: dry run — $candidates stale worktrees, ${total}MB total"
+    # Cargo build dirs ($ARCHON_HOME_DIR/.cargo/config.toml, written by
+    # install.sh step 5: build-dir = .cache/cargo-build/{workspace-path-hash},
+    # laid out <2 hex>/<rest of hash>/). Nothing else removes them; one nothing
+    # wrote to for 2 days goes, and cargo rebuilds it on demand.
+    local bd_root="$ARCHON_HOME_DIR/.cache/cargo-build" bd bd_removed=0 bd_mb=0
+    for bd in "$bd_root"/*/*/; do
+        [ -d "$bd" ] || continue
+        bd=${bd%/}
+        recently_written "$bd" -mmin -2880 && continue
+        size=$(du -sm "$bd" 2>/dev/null | cut -f1 || true); size=${size:-0}
+        if [ "$dry" = 1 ]; then
+            echo "autoclean: would remove cargo build dir $bd (${size}MB)"
+            candidates=$((candidates + 1)); total=$((total + size)); continue
+        fi
+        if rm -rf "$bd" 2>/dev/null; then bd_removed=$((bd_removed + 1)); bd_mb=$((bd_mb + size))
+        else echo "autoclean: rm -rf $bd failed"; fi
+    done
+    [ "$dry" = 1 ] || find "$bd_root" -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null || true
+    [ "$bd_removed" -gt 0 ] && echo "autoclean: removed $bd_removed idle cargo build dirs (${bd_mb}MB)"
+
+    # /tmp Cargo build dirs (root-owned /tmp/.cargo/config.toml, install.sh
+    # step 11): build-dir = {cargo-cache-home}/tmp-build/{workspace-path-hash},
+    # under archon's own $ARCHON_HOME_DIR/.cargo — nothing else removes them.
+    for d in "$ARCHON_HOME_DIR"/.cargo/tmp-build/*/*/; do
+        [ -d "$d" ] || continue
+        d=${d%/}
+        find "$d" -type f -mtime -2 -print -quit 2>/dev/null | grep -q . && continue
+        size=$(du -sm "$d" 2>/dev/null | cut -f1 || true); size=${size:-0}
+        if [ "$dry" = 1 ]; then
+            echo "autoclean: would remove $d (${size}MB)"
+            candidates=$((candidates + 1)); total=$((total + size)); continue
+        fi
+        if rm -rf "$d" 2>/dev/null; then echo "autoclean: removed $d (idle >2d) — freed ${size}MB"
+        else echo "autoclean: rm -rf $d failed"; fi
+    done
+    [ "$dry" = 1 ] || find "$ARCHON_HOME_DIR/.cargo/tmp-build" -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null || true
+    [ "$dry" = 1 ] && echo "autoclean: dry run — $candidates stale worktrees / cargo build dirs, ${total}MB total"
+    trim_tmp "$dry"
+    return 0
+}
+
+# trim_tmp <dry 0|1> — archon's own top-level entries in /tmp and in its
+# TMPDIR ($ARCHON_HOME_DIR/tmp) that nothing inside was written to for 12h:
+# review checkouts, venvs and explicit cargo build/target dirs agents create
+# there under arbitrary names (47 GB in /tmp/cargotest-builddir, #133). The
+# same "nothing written recently" test as the cargo build dirs, so an active
+# build is never touched; also kept: anything a live archon process has its
+# cwd in, sockets, and session/runtime dirs (claude-*, tmux-*, ...). Only
+# entries owned by archon, never followed through a symlink.
+trim_tmp() {
+    local dry="$1" root e name size n=0 mb=0 cwds=() c live
+    for c in /proc/[0-9]*/cwd; do
+        c=$(readlink "$c" 2>/dev/null) || continue
+        cwds+=("$c")
+    done
+    for root in "$TMP_ROOT" "$ARCHON_HOME_DIR/tmp"; do
+        [ -d "$root" ] || continue
+        while IFS= read -r -d '' e; do
+            name=${e##*/}
+            case "$name" in claude-*|tmux-*|ssh-*|pulse-*|dbus-*|systemd-*|snap-*) continue ;; esac
+            # find does not follow a starting-point symlink: it tests the link itself.
+            recently_written "$e" -mmin -720 && continue
+            live=0
+            for c in ${cwds[@]+"${cwds[@]}"}; do
+                if [ "$c" = "$e" ] || [[ "$c" == "$e"/* ]]; then live=1; break; fi
+            done
+            [ "$live" = 1 ] && continue
+            size=$(du -sm "$e" 2>/dev/null | cut -f1 || true); size=${size:-0}
+            if [ "$dry" = 1 ]; then
+                echo "autoclean: would remove tmp entry $e (${size}MB)"
+                n=$((n + 1)); mb=$((mb + size)); continue
+            fi
+            if rm -rf "$e" 2>/dev/null; then n=$((n + 1)); mb=$((mb + size))
+            else echo "autoclean: rm -rf $e failed"; fi
+        done < <(find "$root" -mindepth 1 -maxdepth 1 -user "$ARCHON_USER" \( -type d -o -type f -o -type l \) -print0 2>/dev/null)
+    done
+    if [ "$dry" = 1 ]; then echo "autoclean: dry run — $n idle tmp entries, ${mb}MB total"
+    elif [ "$n" -gt 0 ]; then echo "autoclean: removed $n idle tmp entries (${mb}MB)"; fi
     return 0
 }
 
@@ -463,6 +604,7 @@ verb_selftest() {
              /mnt/steam-slow/backups /mnt/steam-slow /mnt/steam-fast /root /etc/shadow /etc/sudoers \
              "${extra[@]}"; do
         [[ "$p" =~ ^($ARCHON_HOME_DIR|$OWNER_BASE/archon)(/|$) ]] && continue   # allowed trees
+        [ "$p" = "$TMP_BIND_SRC" ] && continue                                   # /tmp's source, checked below
         if [ ! -e "$p" ] && ! ls -d "$p" >/dev/null 2>&1; then
             # -e is false both for "absent" and for "parent not traversable"; either is fine.
             pass "unreachable: $p"
@@ -479,6 +621,7 @@ verb_selftest() {
         while IFS= read -r entry; do
             [[ "$entry" =~ $allow_re ]] && continue
             [ "$entry" = "$top" ] && continue
+            [ "$entry" = "$TMP_BIND_SRC" ] && continue   # /tmp's source (only the dir itself: maxdepth 2), checked below
             [[ "$entry" =~ $SYSTEM_BACKUPS_RE ]] && [ -f "$entry" ] && [ ! -L "$entry" ] && continue
             case "$entry" in /mnt|"$OWNER_BASE") continue ;; esac   # parents of allowed trees
             fail "readable outside the allowlist: $entry"; n=$((n + 1))
@@ -486,6 +629,14 @@ verb_selftest() {
         done < <(find "$top" -maxdepth 2 -mindepth 0 \( -type d -readable -o -type f -readable \) 2>/dev/null | sort)
     done
     [ "$n" -eq 0 ] && pass "sweep: nothing readable under /home /mnt /media /srv /var/backups outside the allowlist (Debian's dpkg/apt/alternatives backups excepted)"
+    # /tmp's NVMe source: listable like /tmp, so it must look exactly like /tmp
+    # (root-owned, sticky, world-writable; no ACL granting more). Its contents
+    # are the /tmp leftovers below.
+    if [ -e "$TMP_BIND_SRC" ] || [ -L "$TMP_BIND_SRC" ]; then
+        local st; st=$(stat -c '%F %a %U:%G' "$TMP_BIND_SRC" 2>/dev/null)
+        if [ "$st" = "directory 1777 root:root" ]; then pass "tmp source $TMP_BIND_SRC: $st (sticky, same as /tmp)"
+        else fail "tmp source $TMP_BIND_SRC is '${st:-unreadable}' (want directory 1777 root:root) — sudo ops/host/install.sh"; fi
+    fi
     n=0
     while IFS= read -r entry; do
         warn "readable in /tmp (owned by $(stat -c %U "$entry" 2>/dev/null)): $entry"; n=$((n + 1))
@@ -523,6 +674,12 @@ verb_selftest() {
                          *) fail "tool missing: $t" ;; esac
         fi
     done
+    # cargo intermediates off / wherever an agent builds, /tmp included (#133)
+    if grep -q '^build-dir = "'"$ARCHON_HOME_DIR"'/' "$ARCHON_HOME_DIR/.cargo/config.toml" 2>/dev/null; then
+        pass "cargo build-dir: $(grep -m1 '^build-dir' "$ARCHON_HOME_DIR/.cargo/config.toml")"
+    else
+        warn "cargo build-dir not set in $ARCHON_HOME_DIR/.cargo/config.toml — builds outside a factory worktree (/tmp) write to / (re-run install.sh)"
+    fi
     if out=$(cd "$ARCHON_HOME_DIR" && timeout 60 env -i "${ENV[@]}" claude mcp list 2>&1); then
         if grep -qi 'claude\.ai' <<<"$out"; then fail "claude.ai connectors visible to factory sessions: $(grep -i 'claude\.ai' <<<"$out" | head -3 | tr '\n' ';')"
         else pass "claude mcp list: no claude.ai connectors"; fi
@@ -536,6 +693,21 @@ verb_selftest() {
 
 # ------------------------------------------------------------- dispatch ----
 load_projects
+if [ "${1:-}" = --account ]; then
+    case "${2:-}" in
+        factory) ;;
+        main)
+            CLAUDE_TOKEN_ENV="$ARCHON_HOME_DIR/.config/archon-user/claude-main.env"
+            CLAUDE_CONFIG_DIR_ARG="$ARCHON_HOME_DIR/.claude-main"
+            # Never fall back to the factory's token or config dir: a run meant
+            # for main that silently spent the factory would hide the gate.
+            [ -r "$CLAUDE_TOKEN_ENV" ] || die 69 "no main-account credential ($CLAUDE_TOKEN_ENV) — run: sudo ops/host/archon-user/install.sh --set-claude-token --account main"
+            [ -d "$CLAUDE_CONFIG_DIR_ARG" ] || die 69 "no main-account config dir ($CLAUDE_CONFIG_DIR_ARG) — run: sudo ops/host/archon-user/install.sh --set-claude-token --account main"
+            ;;
+        *) refuse "account '${2:-}'" ;;
+    esac
+    shift 2
+fi
 verb="${1:-}"; shift || true
 case "$verb" in
     workflow)             verb_workflow "$@" ;;
@@ -545,6 +717,7 @@ case "$verb" in
     doctor)               [ "$#" -eq 0 ] || refuse "doctor takes no arguments"
                           run_in "$(first_clone)" "$ARCHON_BIN" doctor ;;
     claude-probe)         verb_claude_probe "$@" ;;
+    fuel-probe)           verb_fuel_probe "$@" ;;
     gh-probe)             verb_gh_probe "$@" ;;
     worktree-trim)        verb_worktree_trim "$@" ;;
     bun-upgrade)          [ "$#" -eq 0 ] || refuse "bun-upgrade takes no arguments"

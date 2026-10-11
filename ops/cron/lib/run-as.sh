@@ -75,8 +75,13 @@ runas_may_launch() {
 }
 
 # runas_wrapper <verb> [args...] — the factory user's door (see archon-as-archon).
+# Started from / : the wrapper's verbs that do not map a project directory
+# (worktree-trim) run where they are started, and the cron's own cwd, asiri's
+# home, is one archon cannot enter (2026-10-02/03: that made worktree-trim
+# delete live run worktrees; archon-as-archon now cds itself, this covers an
+# installed copy that predates that).
 runas_wrapper() {
-  sudo -n -u "$ARCHON_AS_USER" "$ARCHON_AS_WRAPPER" "$@"
+  ( cd / && sudo -n -u "$ARCHON_AS_USER" "$ARCHON_AS_WRAPPER" "$@" )
 }
 
 # runas_serve_restart [unit] — restart the archon server wherever it runs:

@@ -170,6 +170,14 @@ setup() {
     [ "$status" -eq 64 ]
 }
 
+@test "fuel-probe runs the root-owned probe with the account's token, no arguments" {
+    ARCHON_AS_FUEL_PROBE=/x/fuel_probe.py run "$W" fuel-probe
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ARGV: timeout 60 python3 /x/fuel_probe.py"* ]]
+    run "$W" fuel-probe 5
+    [ "$status" -eq 64 ]
+}
+
 @test "the factory's Claude token is passed from its token file, read as data" {
     mkdir -p "$T/home/.config/archon-user"
     printf 'CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-abcDEF_123\n' > "$T/home/.config/archon-user/claude.env"
@@ -258,6 +266,7 @@ STUB
 }
 
 @test "gh-probe: a classic token or one that reaches the fork fails" {
+    export ARCHON_AS_CONFIG_FILE="$T/no-config"   # not the host's /etc/archon-user/config (it may hold the opt-in)
     stub_gh gho_classic 404
     run "$W" gh-probe
     [ "$status" -eq 1 ]
@@ -298,4 +307,203 @@ STUB
         ! [[ "/var/backups/$f" =~ $SYSTEM_BACKUPS_RE ]] || { echo "wrongly skipped: $f"; return 1; }
     done
     ! [[ "/home/x/var/backups/dpkg.status.0" =~ $SYSTEM_BACKUPS_RE ]]
+}
+
+@test "worktree-trim drops cargo build dirs idle 2 days, keeps fresh ones; --dry-run removes nothing" {
+    echo notcloned > "$T/noprojects"   # no clone: the worktree half makes no gh calls
+    export ARCHON_AS_PROJECTS_FILE="$T/noprojects"
+    bd="$T/home/.cache/cargo-build"
+    mkdir -p "$bd/ab/old1/debug/deps" "$bd/cd/new1/debug/deps" "$bd/ab/mixed/debug"
+    touch -d '3 days ago' "$bd/ab/old1/debug/deps/libx.rlib" "$bd/ab/old1/debug/deps" "$bd/ab/old1/debug" "$bd/ab/old1"
+    touch "$bd/cd/new1/debug/deps/liby.rlib"
+    touch -d '3 days ago' "$bd/ab/mixed" "$bd/ab/mixed/debug"; touch "$bd/ab/mixed/debug/fresh"
+    run "$W" worktree-trim --dry-run
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"would remove cargo build dir $bd/ab/old1 "* ]]
+    [[ "$output" != *new1* && "$output" != *mixed* ]]
+    [ -d "$bd/ab/old1" ]
+    run "$W" worktree-trim
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"removed 1 idle cargo build dirs"* ]]
+    [ ! -e "$bd/ab/old1" ] && [ -d "$bd/ab/mixed" ] && [ -d "$bd/cd/new1" ]
+}
+
+# 2026-10-02/03: pipeline-health ran worktree-trim from asiri's home, which
+# archon cannot enter. The host's find (bfs) fails outright from there, every
+# freshness test read "idle", and live run worktrees were deleted. The stub find
+# fails the same way from $T/no-entry and is the real find anywhere else.
+stub_find_failing_in() {
+    mkdir -p "$T/fbin"
+    cat > "$T/fbin/find" <<STUB
+#!/usr/bin/env bash
+case "\$(pwd -P)" in $1|$1/*) echo "find: cannot open working directory" >&2; exit 1 ;; esac
+exec $(command -v find) "\$@"
+STUB
+    chmod +x "$T/fbin/find"
+    export PATH="$T/fbin:$PATH"
+}
+
+@test "worktree-trim started from a directory find cannot work in removes nothing fresh" {
+    echo testproj > "$T/projects"
+    mkdir -p "$T/home/repos/testproj/.git" "$T/no-entry"
+    wt="$T/home/.archon/workspaces/alexsiri7/testproj/worktrees/archon"
+    mkdir -p "$wt/task-archon-ship-1" "$wt/task-archon-ship-2"
+    touch -d '5 hours ago' "$wt/task-archon-ship-1"
+    bd="$T/home/.cache/cargo-build"
+    mkdir -p "$bd/cd/new1/debug"; touch "$bd/cd/new1/debug/x"
+    stub_find_failing_in "$T/no-entry"
+    # gh runs in the wrapper's own environment (archon's PATH): no open PRs.
+    mkdir -p "$T/home/.local/bin"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$T/home/.local/bin/gh"; chmod +x "$T/home/.local/bin/gh"
+    cd "$T/no-entry"
+    run "$W" worktree-trim
+    cd /
+    [ "$status" -eq 0 ]
+    [ ! -e "$wt/task-archon-ship-1" ]      # idle 5h: still trimmed
+    [ -d "$wt/task-archon-ship-2" ]        # fresh: a live run's
+    [ -d "$bd/cd/new1" ]
+}
+
+@test "worktree-trim keeps whatever find cannot vouch for" {
+    echo notcloned > "$T/noprojects"
+    export ARCHON_AS_PROJECTS_FILE="$T/noprojects"
+    bd="$T/home/.cache/cargo-build"
+    mkdir -p "$bd/ab/old1/debug"
+    touch -d '3 days ago' "$bd/ab/old1/debug" "$bd/ab/old1"
+    stub_find_failing_in ""     # fails everywhere
+    run "$W" worktree-trim
+    [ "$status" -eq 0 ]
+    [ -d "$bd/ab/old1" ]
+}
+
+# ── worktree-trim: /tmp and archon's own TMPDIR (#133) ──────────────────────
+# make_tmp_sandbox: an idle dir, an idle file, a dir idle on the outside with a
+# fresh file inside, a fresh dir and an idle session dir, in the /tmp stand-in
+# and in $ARCHON_AS_HOME/tmp.
+make_tmp_sandbox() {
+    echo notcloned > "$T/noprojects"   # no clone: the worktree half makes no gh calls
+    export ARCHON_AS_PROJECTS_FILE="$T/noprojects" ARCHON_AS_TMP_ROOT="$T/systmp"
+    S="$T/systmp" H="$T/home/tmp"
+    mkdir -p "$S/cargotest-builddir/ab/cdef/deps" "$S/review_5ea34/src" "$S/fresh" "$S/claude-1000/x" "$H/vam_check/target"
+    touch "$S/cargotest-builddir/ab/cdef/deps/libx.rlib" "$S/review_5ea34/src/fresh.rs" "$S/fresh/a" "$S/old.log" "$H/vam_check/target/y"
+    old='13 hours ago'
+    touch -d "$old" "$S/cargotest-builddir/ab/cdef/deps/libx.rlib" "$S/cargotest-builddir/ab/cdef/deps" \
+        "$S/cargotest-builddir/ab/cdef" "$S/cargotest-builddir/ab" "$S/cargotest-builddir" \
+        "$S/review_5ea34/src" "$S/review_5ea34" "$S/old.log" "$S/claude-1000/x" "$S/claude-1000" \
+        "$H/vam_check/target/y" "$H/vam_check/target" "$H/vam_check"
+}
+
+@test "worktree-trim --tmp-only: removes archon's entries idle 12h in /tmp and its TMPDIR, keeps active ones" {
+    make_tmp_sandbox
+    run "$W" worktree-trim --tmp-only
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"removed 3 idle tmp entries"* ]]
+    [ ! -e "$S/cargotest-builddir" ] && [ ! -e "$S/old.log" ] && [ ! -e "$H/vam_check" ]
+    [ -d "$S/review_5ea34" ]      # fresh file inside: a build still writing
+    [ -d "$S/fresh" ]
+    [ -d "$S/claude-1000" ]       # session dirs are never trimmed
+}
+
+@test "worktree-trim --tmp-only --dry-run lists candidates with sizes and removes nothing" {
+    make_tmp_sandbox
+    run "$W" worktree-trim --dry-run --tmp-only
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"would remove tmp entry $S/cargotest-builddir ("*"MB)"* ]]
+    [[ "$output" == *"would remove tmp entry $H/vam_check ("* ]]
+    [[ "$output" == *"dry run — 3 idle tmp entries"* ]]
+    [[ "$output" != *review_5ea34* && "$output" != *fresh* && "$output" != *claude-1000* ]]
+    [ -d "$S/cargotest-builddir" ] && [ -e "$S/old.log" ] && [ -d "$H/vam_check" ]
+}
+
+@test "worktree-trim keeps an idle tmp dir a live process has its cwd in, and sockets" {
+    make_tmp_sandbox
+    mkdir -p "$S/venv-server"; touch -d '13 hours ago' "$S/venv-server"
+    (cd "$S/venv-server" && exec sleep 30) & pid=$!
+    python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' "$S/agent.sock"
+    touch -h -d '13 hours ago' "$S/agent.sock"
+    run "$W" worktree-trim --tmp-only
+    kill "$pid" 2>/dev/null || true
+    [ "$status" -eq 0 ]
+    [ -d "$S/venv-server" ] && [ -S "$S/agent.sock" ]
+    [ ! -e "$S/cargotest-builddir" ]
+}
+
+@test "worktree-trim without --tmp-only trims the tmp roots too; unknown flags are refused" {
+    make_tmp_sandbox
+    run "$W" worktree-trim
+    [ "$status" -eq 0 ]
+    [ ! -e "$S/cargotest-builddir" ] && [ -d "$S/review_5ea34" ]
+    run "$W" worktree-trim --all
+    [ "$status" -eq 64 ]
+    run "$W" worktree-trim /tmp
+    [ "$status" -eq 64 ]
+}
+
+@test "worktree-trim never removes a symlink's target, only an idle link it owns" {
+    make_tmp_sandbox
+    mkdir -p "$T/precious"; touch "$T/precious/keep"
+    ln -s "$T/precious" "$S/link"; touch -h -d '13 hours ago' "$S/link"
+    run "$W" worktree-trim --tmp-only
+    [ "$status" -eq 0 ]
+    [ ! -L "$S/link" ] && [ -e "$T/precious/keep" ]
+}
+
+@test "worktree-trim drops /tmp Cargo build dirs idle 2 days and keeps fresh ones; --dry-run removes nothing" {
+    printf '#!/bin/sh\nexit 1\n' > "$T/home/.local/bin/gh"; chmod +x "$T/home/.local/bin/gh"
+    local tb="$T/home/.cargo/tmp-build"
+    mkdir -p "$tb/ab/0123456789abcd" "$tb/cd/fedcba98765432"
+    echo x > "$tb/ab/0123456789abcd/f"; touch -d "3 days ago" "$tb/ab/0123456789abcd/f"
+    echo x > "$tb/cd/fedcba98765432/f"
+
+    run "$W" worktree-trim --dry-run
+    [ "$status" -eq 0 ]
+    [ -f "$tb/ab/0123456789abcd/f" ]
+    [ -f "$tb/cd/fedcba98765432/f" ]
+    [[ "$output" == *"autoclean: would remove $tb/ab/0123456789abcd ("*"MB)"* ]]
+    [[ "$output" != *"$tb/cd/"* ]]
+
+    run "$W" worktree-trim
+    [ "$status" -eq 0 ]
+    [ ! -e "$tb/ab" ]
+    [ -f "$tb/cd/fedcba98765432/f" ]
+    [[ "$output" == *"autoclean: removed $tb/ab/0123456789abcd (idle >2d) — freed "*"MB"* ]]
+}
+
+@test "--account main: main's token file and config dir, never the factory's" {
+    mkdir -p "$T/home/.config/archon-user" "$T/home/.claude-main"
+    printf 'CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-factoryTOKEN_1\n' > "$T/home/.config/archon-user/claude.env"
+    printf 'CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-mainTOKEN_22\n' > "$T/home/.config/archon-user/claude-main.env"
+    cd "$T/owner/reli"
+    run "$W" --account main workflow run archon-ship "fix #12"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ENV=CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-mainTOKEN_22"* ]]
+    [[ "$output" != *factoryTOKEN* ]]
+    [[ "$output" == *"ENV=CLAUDE_CONFIG_DIR=$T/home/.claude-main"* ]]
+    [[ "$output" == *"ARGV: /usr/local/lib/archon-user/bin/archon workflow run archon-ship fix #12"* ]]
+    run "$W" --account main fuel-probe
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ENV=CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-mainTOKEN_22"* ]]
+    [[ "$output" != *factoryTOKEN* ]]
+    [[ "$output" == *"ENV=CLAUDE_CONFIG_DIR=$T/home/.claude-main"* ]]
+    run "$W" --account factory claude-probe
+    [[ "$output" == *factoryTOKEN* ]]
+    [[ "$output" != *CLAUDE_CONFIG_DIR* ]]
+}
+
+@test "--account main without its credential or config dir: refused, no fallback to the factory" {
+    mkdir -p "$T/home/.config/archon-user"
+    printf 'CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-factoryTOKEN_1\n' > "$T/home/.config/archon-user/claude.env"
+    run "$W" --account main claude-probe
+    [ "$status" -eq 69 ]
+    [[ "$output" != *factoryTOKEN* ]]
+    printf 'CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-mainTOKEN_22\n' > "$T/home/.config/archon-user/claude-main.env"
+    run "$W" --account main claude-probe
+    [ "$status" -eq 69 ]
+}
+
+@test "--account takes only factory or main" {
+    run "$W" --account other claude-probe
+    [ "$status" -eq 64 ]
+    run "$W" --account
+    [ "$status" -eq 64 ]
 }

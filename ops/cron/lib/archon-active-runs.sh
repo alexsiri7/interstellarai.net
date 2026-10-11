@@ -22,6 +22,9 @@
 #   archon_worktrees_known || ...       # false when some active run's worktree is unknown
 #   archon_runs_known || ...            # false when this tick's snapshot failed
 #   archon_parked_runs 1800             # rows for paused runs nothing will resume
+#   archon_failed_runs_snapshot         # once per tick: failed runs nothing adopted
+#   run_id=$(archon_branch_failed_run "$head") # such a run left this branch
+#   archon_failed_runs_known || ...     # false when that listing failed
 #
 # Requires: archon >= 0.10 (workflow runs --json), python3, awk.
 
@@ -237,4 +240,67 @@ archon_parked_runs() {
     $6 == "gate" || $6 == "resolved" || $6 == "unreadable" { report(); next }
     $6 == "wait" && (now - $7 > stale || ($8 > 0 && now - $8 > hard)) { report() }
   ' "$ARCHON_RUNS_SNAPSHOT"
+}
+
+# Failed runs nothing has adopted, as "<run_id>\t<working_path>" lines.
+ARCHON_FAILED_RUNS_SNAPSHOT="${ARCHON_FAILED_RUNS_SNAPSHOT:-$ARCHON_RUNS_SNAPSHOT.failed}"
+# The open-work inbox is never paged and only grows (346 rows on 2026-10-09),
+# so ask for far more than it holds and treat a full page as unreadable.
+ARCHON_FAILED_RUNS_LIMIT=10000
+ARCHON_FAILED_RUNS_OK=0
+
+# archon_failed_runs_snapshot — once per tick: snapshot every failed run
+# nothing has adopted (`workflow runs --open`, all projects) to
+# $ARCHON_FAILED_RUNS_SNAPSHOT. A listing failure leaves the snapshot empty and
+# ARCHON_FAILED_RUNS_OK=0 with one stderr line, as archon_runs_snapshot does.
+# Always returns 0.
+archon_failed_runs_snapshot() {
+  : > "$ARCHON_FAILED_RUNS_SNAPSHOT"
+  ARCHON_FAILED_RUNS_OK=0
+  local raw problem
+  raw=$(CLAUDECODE=0 ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING=1 \
+    archon workflow runs --all --open --limit "$ARCHON_FAILED_RUNS_LIMIT" --json --cwd "$ARCHON_RUNS_CWD" 2>/dev/null) || true
+  if problem=$(printf '%s' "$raw" | python3 -c '
+import json, sys
+limit = int(sys.argv[1])
+raw = sys.stdin.read()
+try:
+    d = json.loads(raw)
+except ValueError:
+    sys.stderr.write(raw.strip()[:200] or "no output from archon")
+    sys.exit(3)
+runs = d.get("runs") if isinstance(d, dict) else None
+if not isinstance(runs, list):
+    err = d.get("error") if isinstance(d, dict) else None
+    sys.stderr.write(str(err or raw.strip()[:200]).replace("\n", " "))
+    sys.exit(3)
+if len(runs) >= limit:
+    sys.stderr.write(f"listing may be truncated: {len(runs)} runs at --limit {limit}")
+    sys.exit(3)
+for r in runs:
+    run_id = r.get("id") or ""
+    wpath = (r.get("working_path") or "").replace("\t", " ").replace("\n", " ")
+    print(f"{run_id}\t{wpath}")
+' "$ARCHON_FAILED_RUNS_LIMIT" 2>&1 > "$ARCHON_FAILED_RUNS_SNAPSHOT"); then
+    ARCHON_FAILED_RUNS_OK=1
+    return 0
+  fi
+  : > "$ARCHON_FAILED_RUNS_SNAPSHOT"
+  echo "$(date -Is) [archon-active-runs] could not list failed runs — guards cannot see failed archon runs this tick: ${problem}" >&2
+  return 0
+}
+
+# archon_failed_runs_known — exit 0 when this tick's failed-run snapshot is trustworthy.
+archon_failed_runs_known() {
+  [ "$ARCHON_FAILED_RUNS_OK" = 1 ]
+}
+
+# archon_branch_failed_run <branch> — print the id of a failed, unadopted run
+# whose worktree is <branch>: archon names each run's worktree after its branch
+# (.../worktrees/archon/task-<workflow>-<ts>). Exit 0 on match, 1 otherwise.
+archon_branch_failed_run() {
+  [ -n "$1" ] && [ -s "$ARCHON_FAILED_RUNS_SNAPSHOT" ] || return 1
+  awk -F'\t' -v tail="/$1" '
+    substr($2, length($2) - length(tail) + 1) == tail { print $1; found = 1; exit }
+    END { exit found ? 0 : 1 }' "$ARCHON_FAILED_RUNS_SNAPSHOT"
 }

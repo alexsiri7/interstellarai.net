@@ -456,3 +456,12 @@ html[data-dir="b"] .dec:focus-visible { background: rgba(255,255,255,0.03); }
   .portfolio-grid { grid-template-columns: 1fr; }
   .footer-cols { grid-template-columns: 1fr; }
 }
+
+/* Project pages */
+.proj-actions { display: flex; flex-wrap: wrap; gap: var(--sp-3); margin-top: var(--sp-5); }
+.proj-body p { font-size: 17px; line-height: 1.7; }
+.proj-body h2 { font-family: var(--font-display); font-weight: 400; margin-top: var(--sp-7); }
+.proj-body li { line-height: 1.7; }
+.proj-facts { display: grid; grid-template-columns: max-content 1fr; gap: var(--sp-2) var(--sp-5); }
+.proj-facts dt { font-family: var(--font-mono); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-muted); }
+.proj-facts dd { margin: 0; }

@@ -112,6 +112,7 @@ load_trust() {
 @test "lib: PR levels — owner full, dependabot and workflows merge-only, forks and strangers none" {
     load_trust
     [ "$(trust_pr_level alexsiri7 false)" = full ]
+    [ "$(trust_pr_level alexsiri7-factory false)" = full ]
     [ "$(trust_pr_level app/dependabot false)" = merge ]
     [ "$(trust_pr_level 'dependabot[bot]' false)" = merge ]
     [ "$(trust_pr_level app/github-actions false)" = merge ]
@@ -175,6 +176,16 @@ load_trust() {
     grep -q 'pr #7 on proj has comments by untrusted authors (stranger)' "$STUB_CURL_ARGV"
     gh() { return 1; }
     ! trust_comments_ok proj issue 8 2>/dev/null
+}
+
+@test "lib: trust_comments_ok tells a stranger's comment (1) from a listing it could not read (2)" {
+    load_trust
+    echo stranger > "$GH_COMMENTS_DIR/pulls-7-reviews"
+    run trust_comments_ok proj pr 7
+    [ "$status" -eq 1 ]
+    gh() { return 1; }
+    run trust_comments_ok proj issue 8
+    [ "$status" -eq 2 ]
 }
 
 # ── pr-maintenance-cron.sh ───────────────────────────────────────────────────

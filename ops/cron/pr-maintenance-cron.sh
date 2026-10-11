@@ -27,11 +27,20 @@ load_archon_projects DEFAULT_PROJECTS
 source "$SCRIPT_DIR/lib/throttle.sh"
 should_tick "pr-maintenance" || exit 0
 runas_may_launch "pr-maintenance" || exit 0
+# shellcheck source=lib/ship-breaker.sh
+source "$SCRIPT_DIR/lib/ship-breaker.sh"
+# shellcheck source=lib/quota-pause.sh
+source "$SCRIPT_DIR/lib/quota-pause.sh"
+# Merging green PRs costs no tokens and still runs while the Claude account
+# is rate limited; only the archon launch below is held.
+QUOTA_HELD=0
+quota_may_launch "pr-maintenance" || QUOTA_HELD=1
 # shellcheck source=lib/ci-skip.sh
 source "$SCRIPT_DIR/lib/ci-skip.sh"
 # shellcheck source=lib/archon-active-runs.sh
 source "$SCRIPT_DIR/lib/archon-active-runs.sh"
 archon_runs_snapshot
+archon_failed_runs_snapshot
 # shellcheck source=lib/trust.sh
 source "$SCRIPT_DIR/lib/trust.sh"
 BASE_DIR="${BASE_DIR:-/mnt/ext-fast}"
@@ -106,6 +115,25 @@ pr_owned_by_live_run() {
   else
     archon_run_active "$REPO_DIR" "$PROJECT" "$wf"
   fi
+}
+
+# pr_left_by_failed_run <number> <headRefName>
+# True, with a log line, when the PR's head is an archon task branch whose run
+# failed and no later run has adopted it, or when this tick could not list
+# failed runs. Such a PR never passed the run's own review, validation and
+# ready flip, so CLEAN CI alone does not make it mergeable (2026-09-11:
+# un-reminder #329's ship run crashed on a review verdict of ready=false before
+# its validate node; this cron flipped the draft and merged it within a
+# minute). Adopting the run, or the owner merging by hand, releases it.
+pr_left_by_failed_run() {
+  local pr="$1" head="$2" run
+  case "$head" in archon/task-*) ;; *) return 1 ;; esac
+  if ! archon_failed_runs_known; then
+    log "$PROJECT: PR #$pr ($head) — no failed-run listing this tick, not promoting or merging it"
+    return 0
+  fi
+  run=$(archon_branch_failed_run "$head") || return 1
+  log "$PROJECT: PR #$pr ($head) was left by failed archon run $run — not promoting or merging it; adopt the run or merge by hand"
 }
 
 # list_prs full|merge <jq select expression> — open PRs of the current repo
@@ -210,6 +238,7 @@ for PROJECT in "${PROJECTS[@]}"; do
       log "$PROJECT: draft PR #$PR ($HEAD) is owned by a live archon run — leaving the ready flip to it"
       continue
     fi
+    pr_left_by_failed_run "$PR" "$HEAD" && continue
     log "$PROJECT: promoting draft PR #$PR to ready (CI CLEAN)"
     if ! gh pr ready "$PR" 2>>"$LOG_DIR/pr-maintenance-errors.log"; then
       log "$PROJECT: PR #$PR — could not mark ready (see $LOG_DIR/pr-maintenance-errors.log)"
@@ -226,6 +255,7 @@ for PROJECT in "${PROJECTS[@]}"; do
       log "$PROJECT: PR #$PR ($HEAD) is owned by a live archon run — merging after it exits"
       continue
     fi
+    pr_left_by_failed_run "$PR" "$HEAD" && continue
     if MERGE_HOLD=$(runas_merge_blocked "$PROJECT" "$PR"); then
       log "$PROJECT: PR #$PR is CLEAN but not auto-merged: $MERGE_HOLD"
       continue
@@ -309,6 +339,10 @@ for PROJECT in "${PROJECTS[@]}"; do
     continue
   fi
 
+  if [ "$QUOTA_HELD" = 1 ]; then
+    log "$PROJECT: PR #$ACTIONABLE needs maintenance — held, Claude rate limit in effect"
+    continue
+  fi
   log "$PROJECT: PR #$ACTIONABLE needs maintenance — launching archon"
   archon workflow run archon-pr-maintenance --cwd "$REPO_DIR" "PR #$ACTIONABLE" &
 

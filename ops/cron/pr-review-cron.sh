@@ -41,6 +41,13 @@ load_archon_projects DEFAULT_PROJECTS
 source "$SCRIPT_DIR/lib/throttle.sh"
 should_tick "pr-review" || exit 0
 runas_may_launch "pr-review" || exit 0
+# shellcheck source=lib/ship-breaker.sh
+source "$SCRIPT_DIR/lib/ship-breaker.sh"
+# shellcheck source=lib/quota-pause.sh
+source "$SCRIPT_DIR/lib/quota-pause.sh"
+# Every launch here is an archon run: none while the Claude account is rate
+# limited. Reaping waits for the next tick; nothing it does is urgent.
+quota_may_launch "pr-review" || exit 0
 # shellcheck source=lib/archon-active-runs.sh
 source "$SCRIPT_DIR/lib/archon-active-runs.sh"
 archon_runs_snapshot

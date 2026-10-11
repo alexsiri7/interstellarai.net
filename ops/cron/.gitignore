@@ -5,3 +5,6 @@
 # Any accidental secrets drop
 secrets.env
 *.creds.txt
+
+# Python bytecode (lib/lachesis_report.py, lib/lachesis_call.py, tests)
+__pycache__/

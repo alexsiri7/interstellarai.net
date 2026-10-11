@@ -369,6 +369,7 @@ make_disk_sandbox() {
     autoclean_stale_worktrees() { echo "autoclean_stale_worktrees" >> "$CALLS"; }
     autoclean_worktrees() { echo "autoclean_worktrees" >> "$CALLS"; }
     notify() { echo "notify $1|$2|$3|$4" >> "$CALLS"; }
+    tmp_top_consumers() { [ -n "${TMP_TOP:-}" ] && [ "$1" = "${TMP_TOP_MOUNT:-/}" ] && printf '%s\n' "$TMP_TOP"; return 0; }
     load_fn check_disk
 }
 
@@ -577,6 +578,20 @@ make_build_worktree() {
     [[ "$output" == *"removed $root/ab/0123456789abcd (idle >2d)"* ]]
 }
 
+@test "autoclean_cargo_build_dirs reaps idle /tmp build dirs and keeps cargo-build/tmp" {
+    export BASE_DIR="$STATE_DIR/base"
+    load_fn autoclean_cargo_build_dirs
+    local tmp="$BASE_DIR/.archon/cargo-build/tmp"
+    mkdir -p "$tmp/ab/0123456789abcd/deps"
+    echo x > "$tmp/ab/0123456789abcd/deps/old"; touch -d "3 days ago" "$tmp/ab/0123456789abcd/deps/old"
+
+    run autoclean_cargo_build_dirs
+    [ "$status" -eq 0 ]
+    [ ! -e "$tmp/ab" ]
+    [ -d "$tmp" ]
+    [[ "$output" == *"removed $tmp/ab/0123456789abcd (idle >2d)"* ]]
+}
+
 # ── daily light trim ─────────────────────────────────────────────────────────
 
 make_daily_trim_sandbox() {
@@ -687,4 +702,114 @@ make_cargo_config_sandbox() {
     [[ "${dirs[0]}" == "$BASE_DIR/.archon/cargo-build/musenmingle/"* ]]
     [[ "${dirs[1]}" == "$BASE_DIR/.archon/cargo-build/musenmingle/"* ]]
     [ "${dirs[0]}" != "${dirs[1]}" ]
+}
+
+@test "check_disk names the top /tmp consumers in the ntfy for the mount /tmp lives on" {
+    make_disk_sandbox /=88
+    export TMP_TOP="47G archon /tmp/cargotest-builddir
+3.5G archon /tmp/vam_check"
+    run check_disk
+    [ "$status" -eq 0 ]
+    grep -qF "idle Cargo build dirs and /tmp dirs) but disk still >=85%. See $LOG_DIR/pipeline-health.log for per-step results." "$CALLS"
+    grep -qx "Top /tmp consumers:" "$CALLS"
+    grep -qx "47G archon /tmp/cargotest-builddir" "$CALLS"
+    grep -qx "3.5G archon /tmp/vam_check|high|warning" "$CALLS"
+}
+
+@test "tmp_top_consumers lists the 5 biggest entries with owner, only for the filesystem /tmp is on" {
+    load_fn tmp_top_consumers
+    export PIPELINE_HEALTH_TMP_ROOT="$STATE_DIR/systmp"
+    mkdir -p "$PIPELINE_HEALTH_TMP_ROOT"
+    for i in 1 2 3 4 5 6; do
+        mkdir -p "$PIPELINE_HEALTH_TMP_ROOT/d$i"
+        head -c $((i * 200000)) /dev/zero > "$PIPELINE_HEALTH_TMP_ROOT/d$i/f"
+    done
+    run tmp_top_consumers "$STATE_DIR"
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 5 ]
+    [[ "${lines[0]}" == *" $(id -un) $PIPELINE_HEALTH_TMP_ROOT/d6" ]]
+    [[ "$output" != *"/d1"* ]]
+    run tmp_top_consumers /proc      # another filesystem: nothing
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "check_archon_tmp_trim runs the wrapper's --tmp-only trim as archon, and nothing when not cut over" {
+    load_fn check_archon_tmp_trim
+    runas_wrapper() { echo "wrapper $*"; }
+    runas_archon() { return 0; }
+    run check_archon_tmp_trim
+    [ "$status" -eq 0 ]
+    [[ "$output" == "[archon] wrapper worktree-trim --tmp-only" ]]
+    runas_archon() { return 1; }
+    run check_archon_tmp_trim
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "ensure_cargo_build_dir_config configures a workspace dir shared through a symlink once, for the first project" {
+    make_cargo_config_sandbox
+    mkdir -p "$BASE_DIR/thaleia"
+    echo '[workspace]' > "$BASE_DIR/thaleia/Cargo.toml"
+    ln -s "$HOME/.archon/workspaces/alexsiri7/musenmingle" "$HOME/.archon/workspaces/alexsiri7/thaleia"
+    local cfg="$HOME/.archon/workspaces/alexsiri7/musenmingle/.cargo/config.toml"
+
+    run ensure_cargo_build_dir_config
+    [ "$status" -eq 0 ]
+    grep -qxF "build-dir = \"$BASE_DIR/.archon/cargo-build/musenmingle/{workspace-path-hash}\"" "$cfg"
+    run ensure_cargo_build_dir_config
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    grep -qxF "build-dir = \"$BASE_DIR/.archon/cargo-build/musenmingle/{workspace-path-hash}\"" "$cfg"
+}
+
+make_cargo_tmp_link_sandbox() {
+    export HOME="$STATE_DIR/home" BASE_DIR="$STATE_DIR/base"
+    unset CARGO_HOME
+    mkdir -p "$HOME/.cargo"
+    load_fn ensure_cargo_tmp_build_link
+}
+
+@test "ensure_cargo_tmp_build_link links ~/.cargo/tmp-build to the build-dir root and is idempotent" {
+    make_cargo_tmp_link_sandbox
+    local want="$BASE_DIR/.archon/cargo-build/tmp"
+
+    run ensure_cargo_tmp_build_link
+    [ "$status" -eq 0 ]
+    [ "$(readlink "$HOME/.cargo/tmp-build")" = "$want" ]
+    [ -d "$want" ]
+    [[ "$output" == *"cargo: $HOME/.cargo/tmp-build → $want"* ]]
+
+    run ensure_cargo_tmp_build_link
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "ensure_cargo_tmp_build_link does nothing for a user without a cargo home" {
+    make_cargo_tmp_link_sandbox
+    rmdir "$HOME/.cargo"
+    run ensure_cargo_tmp_build_link
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ ! -e "$HOME/.cargo" ]
+    [ ! -e "$BASE_DIR/.archon/cargo-build/tmp" ]
+}
+
+@test "ensure_cargo_tmp_build_link replaces an idle tmp-build dir and leaves one being written to a later tick" {
+    make_cargo_tmp_link_sandbox
+    local link="$HOME/.cargo/tmp-build" want="$BASE_DIR/.archon/cargo-build/tmp"
+    mkdir -p "$link/ab/0123456789abcd"
+    echo x > "$link/ab/0123456789abcd/f"
+
+    run ensure_cargo_tmp_build_link
+    [ "$status" -eq 0 ]
+    [ ! -L "$link" ]
+    [ -f "$link/ab/0123456789abcd/f" ]
+    [[ "$output" == *"written in the last hour — linking it to $want on a later tick"* ]]
+
+    find "$link" -exec touch -d "2 hours ago" {} +
+    run ensure_cargo_tmp_build_link
+    [ "$status" -eq 0 ]
+    [ "$(readlink "$link")" = "$want" ]
+    [[ "$output" == *"cargo: removed $link built before the link — freed "*"MB"* ]]
 }
