@@ -1685,9 +1685,13 @@ check_progress() {
 
     local logdir="$BASE_DIR/$project/.archon-logs"
     [ -d "$logdir" ] || continue
+    # A finished run: the pino dag_workflow_finished line older archon logged,
+    # or the CLI's own end line. No run log has carried dag_workflow_finished
+    # since 2026-10-05, so counting it alone saw 0 completions every tick.
     local m
     m=$(find "$logdir" -name "*.log" -newermt "@$last_ts" \
-          -exec grep -l 'dag_workflow_finished' {} \; 2>/dev/null | wc -l)
+          -exec grep -lE 'dag_workflow_finished|^Workflow (finished|completed successfully)\.$' {} \; \
+          2>/dev/null | wc -l)
     completions=$((completions + m))
   done
 
