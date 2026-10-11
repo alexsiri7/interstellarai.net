@@ -154,8 +154,9 @@ live_checks() {
     local o sha dirty odd
     o=$(stat -c %U "$LIVE")
     [ "$o" = "$OWNER" ] || { WHY="$LIVE is owned by $o, not $OWNER"; return 1; }
-    sha=$(gitl rev-parse --verify -q 'HEAD^{commit}') && [[ "$sha" =~ ^[0-9a-f]{40}$ ]] \
-        || { WHY="cannot resolve HEAD in $LIVE"; return 1; }
+    if ! { sha=$(gitl rev-parse --verify -q 'HEAD^{commit}') && [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; }; then
+        WHY="cannot resolve HEAD in $LIVE"; return 1
+    fi
     HEAD_SHA=$sha
     dirty=$(gitl status --porcelain=v1 --untracked-files=all --ignore-submodules=none -- ops/) \
         || { WHY="git status failed in $LIVE"; return 1; }
@@ -222,8 +223,9 @@ promote() {
         find "$staging" -type d -exec chmod 0755 {} +
         find "$staging" -type f -perm /u=x -exec chmod 0755 {} +
         find "$staging" -type f ! -perm /u=x -exec chmod 0644 {} +
-        [ -f "$staging/ops/host/archon-user/install.sh" ] && [ -f "$staging/ops/host/install.sh" ] \
-            || die "the archive of $HEAD_SHA has no ops/host installers"
+        if ! { [ -f "$staging/ops/host/archon-user/install.sh" ] && [ -f "$staging/ops/host/install.sh" ]; }; then
+            die "the archive of $HEAD_SHA has no ops/host installers"
+        fi
         mv -T -- "$staging" "$rel"
         trap - EXIT
         why=$(release_ok "$rel") || die "release $HEAD_SHA failed its own check: $why"

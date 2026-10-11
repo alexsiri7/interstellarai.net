@@ -184,6 +184,131 @@ LOG
     [ "$(gh_calls 'api repos/alexsiri7/testproj/issues/60 ')" -eq 0 ]
 }
 
+# ── Archon >= 0.11: the outcome report as one JSON line ──────────────────────
+
+# Since the 0.11.1 sync (2026-10-09) the outcome node prints its report as
+# {"delivered":<bool>,"summary":"<report, \n-escaped>"}; before this, none of
+# these matched and every run looped through unstick_stale (101 by 2026-10-11).
+json_outcome() {  # <delivered> <summary, with literal \n escapes>
+    {
+        echo '[outcome] Started'
+        echo '[outcome] Completed (83ms)'
+        printf '{"delivered":%s,"summary":"%s"}\n' "$1" "$2"
+        printf '\nWorkflow finished.\n  Status: completed\n  Authored outcome: failed\n'
+    } > "$RUN_LOG"
+}
+
+# The shape of interstellarai.net #161's run (2026-10-11), shortened.
+@test "a JSON No delivery needed verdict with no confirmation parks, with the decoded summary as the verdict" {
+    json_outcome false 'No delivery needed: Issue #7 is BLOCKED on alexsiri7/lachesis#301, which is still open. Full evidence in triage.md.\nReport: /home/x/artifacts/runs/6e46/triage.md'
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_parked 7
+    grep -q -- 'archon-ship finished without a PR: No delivery needed: Issue #7 is BLOCKED on alexsiri7/lachesis#301, which is still open. Full evidence in triage.md.$' "$GH_ARGV"
+    [ "$(gh_calls 'Report: ')" -eq 0 ]
+    [ "$(gh_calls '\\n')" -eq 0 ]
+    [ "$(gh_calls 'api repos/alexsiri7/testproj/issues/301 ')" -eq 0 ]
+}
+
+@test "a JSON No delivery needed verdict naming a merged PR closes as completed" {
+    json_outcome false 'No delivery needed: already fixed at HEAD by PR #50.\nReport: /x/triage.md'
+    fixture ref-50 merged-pr
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    grep -q -- "issue close 7 --repo alexsiri7/testproj --reason completed --comment archon-ship finished without a PR: No delivery needed: already fixed at HEAD by PR #50." "$GH_ARGV"
+    grep -q -- "--remove-label archon:in-progress --add-label archon:done" "$GH_ARGV"
+}
+
+@test "a JSON summary is searched past its first line, but not past Report" {
+    json_outcome false 'No delivery needed: nothing left to do here.\n\nThe crash was fixed by PR #50.\nReport: /x\nlater noise #60'
+    fixture ref-50 merged-pr
+    fixture ref-60 completed-issue
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    grep -q -- "issue close 7 --repo alexsiri7/testproj --reason completed" "$GH_ARGV"
+    [ "$(gh_calls 'api repos/alexsiri7/testproj/issues/60 ')" -eq 0 ]
+}
+
+@test "a JSON No delivery started verdict parks and never closes, even naming a merged PR" {
+    json_outcome false 'No delivery started: investigate found no safe fix boundary; see PR #50.\nReport: /x/investigation.md'
+    fixture ref-50 merged-pr
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_parked 7
+    grep -q -- 'archon-ship finished without a PR: No delivery started: investigate found no safe fix boundary; see PR #50.$' "$GH_ARGV"
+    [ "$(gh_calls 'api ')" -eq 0 ]
+}
+
+@test "a JSON delivered:true report settles nothing, even when the log also carries a plain verdict" {
+    {
+        echo 'No delivery needed: an earlier node said so, but the run went on to open a PR (#50).'
+        echo '{"delivered":true,"summary":"https://github.com/alexsiri7/testproj/pull/51\n\nDelivered on red (1)"}'
+    } > "$RUN_LOG"
+    fixture ref-50 merged-pr
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 1 ]
+    [ ! -s "$GH_ARGV" ]
+}
+
+@test "a JSON delivered:false report whose summary is no verdict settles nothing" {
+    json_outcome false 'Run stopped: the plan gate failed.\nNo delivery needed: quoted, not the verdict.'
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 1 ]
+    [ ! -s "$GH_ARGV" ]
+}
+
+@test "other nodes' JSON lines and malformed JSON are not taken for the outcome report" {
+    {
+        echo '{"ready":true,"summary":"No delivery needed: from the plan node"}'
+        echo '{"delivered":false,"summary":"No delivery needed: truncated'
+    } > "$RUN_LOG"
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 1 ]
+    [ ! -s "$GH_ARGV" ]
+}
+
+@test "the parked comment a JSON verdict leaves is one --recheck reads back" {
+    json_outcome false 'No delivery needed: PR #50 is not merged yet.\nReport: /x'
+    fixture ref-50 pr
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 7
+
+    # What settle_parked hands --recheck: the comment body, prefix stripped.
+    body=$(sed -n 's/^issue comment 7 --repo alexsiri7\/testproj --body //p' "$GH_ARGV")
+    [[ "$body" == "archon-ship finished without a PR: No delivery needed: PR #50 is not merged yet." ]]
+    sed -n '/^issue comment 7 /,$p' "$GH_ARGV" | sed '1s/^.*--body archon-ship finished without a PR: //' > "$RUN_LOG"
+    grep -q '^Parked as archon:skipped\.' "$RUN_LOG"
+    fixture ref-50 merged-pr
+    : > "$GH_ARGV"
+
+    run "$SCRIPT" --recheck testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    grep -q -- "issue edit 7 --repo alexsiri7/testproj --remove-label archon:skipped --add-label archon:done" "$GH_ARGV"
+}
+
+@test "settle-ship-outcome passes shellcheck" {
+    command -v shellcheck >/dev/null || skip "shellcheck not installed"
+    cd "$(dirname "$SCRIPT")/.."
+    run shellcheck -x lib/settle-ship-outcome.sh
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
 # ── --recheck ────────────────────────────────────────────────────────────────
 
 # issue-pickup's settle_parked passes the parked comment with its
