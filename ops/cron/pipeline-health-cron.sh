@@ -50,6 +50,8 @@
 #      account + one `human-needed` tracking issue, closed on recovery
 #  9f. Work-loop crons silent: issue-pickup or pr-maintenance missed two
 #      expected ticks → ntfy once per episode (lib/heartbeat.sh)
+#  9g. Doppler token missing or rejected (lib/secrets.sh) → ntfy once per
+#      episode; the scripts fall back to secrets.env meanwhile
 #
 # Crontab (logs live under ~/.local/state/archon-cron/logs, which survives a
 # reboot; /tmp does not):
@@ -116,11 +118,12 @@ STATE_DIR="$HOME/.archon/pipeline-health-state"
 # diagnostic output next to them.
 LOG_DIR="${ARCHON_CRON_LOG_DIR:-$HOME/.local/state/archon-cron/logs}"
 
-# NTFY_TOPIC loaded from secrets.env. Fail loud if unset.
-SECRETS_FILE="${ARCHON_CRON_SECRETS:-$HOME/.config/archon-cron/secrets.env}"
-# shellcheck source=/dev/null
-[ -r "$SECRETS_FILE" ] && . "$SECRETS_FILE"
-: "${NTFY_TOPIC:?NTFY_TOPIC not set — populate $SECRETS_FILE}"
+# NTFY_TOPIC, and CLAUDE_ACCOUNTS over lib/claude-auth.sh's default, come from
+# Doppler (lib/secrets.sh). Fail loud if NTFY_TOPIC is unset.
+# shellcheck source=lib/secrets.sh
+source "$SCRIPT_DIR/lib/secrets.sh"
+secrets_load NTFY_TOPIC CLAUDE_ACCOUNTS
+: "${NTFY_TOPIC:?NTFY_TOPIC not set — set it in Doppler factory/prd (or $SECRETS_FILE)}"
 LOG_PREFIX="[pipeline-health]"
 
 # Public prod-deploy URLs, keyed by project slug. Only projects listed here
@@ -189,7 +192,7 @@ PARKED_WAIT_MAX_SECONDS="${PARKED_WAIT_MAX_SECONDS:-1800}"
 log() { echo "$(date -Is) $LOG_PREFIX $*"; }
 
 # Returns curl's exit status, --fail so an ntfy.sh 5xx counts as undelivered.
-# Only for the two checks whose ntfy is the operator's sole record (no issue, no
+# Only for the checks whose ntfy is the operator's sole record (no issue, no
 # archon run): they must not mark an alert delivered that never went out.
 notify_checked() {
   local title="$1" msg="$2" priority="${3:-default}" tags="${4:-robot}"
@@ -2497,6 +2500,36 @@ check_cron_heartbeats() {
 }
 
 # ----------------------------------------------------------------------------
+# Check 9g: Doppler token. Every script reads its secrets from Doppler through
+#   lib/secrets.sh and falls back to secrets.env when Doppler fails, so a
+#   missing or revoked token would go unnoticed until that file is gone. This
+#   tick's own secrets_load recorded the outcome in SECRETS_DOPPLER_RC; alert
+#   once per episode, on the topic the fallback still provides.
+# ----------------------------------------------------------------------------
+check_doppler_token() {
+  local marker="$STATE_DIR/doppler-alerted"
+  local token_file="${ARCHON_CRON_DOPPLER_TOKEN:-$HOME/.config/archon-cron/doppler.token}"
+  local problem
+  case "$SECRETS_DOPPLER_RC" in
+    0)
+      if [ -f "$marker" ]; then
+        rm -f "$marker"
+        log "doppler: recovered"
+      fi
+      return 0
+      ;;
+    1) problem="Doppler token missing: $token_file" ;;
+    2) problem="Doppler refused the token or is unreachable" ;;
+    *) return 0 ;;
+  esac
+  log "doppler: $problem"
+  [ -f "$marker" ] && return 0   # alert once per episode
+  notify_checked "Doppler token" \
+    "$problem. The cron scripts fall back to secrets.env meanwhile. Test by hand (prints names only): DOPPLER_TOKEN=\$(cat $token_file) doppler secrets --only-names" \
+    high key && touch "$marker"
+}
+
+# ----------------------------------------------------------------------------
 # Check 10: Paused archon runs nothing will resume. reconcile_zombies reaps
 # stale `running` rows and deliberately leaves `paused` ones to the server's
 # continuation scheduler; this is the other half — the runs that scheduler has
@@ -2590,6 +2623,7 @@ check_system_maintenance
 check_archon_update
 check_restore_test
 check_cron_heartbeats
+check_doppler_token
 check_claude_auth
 check_progress
 log "=== done ==="
