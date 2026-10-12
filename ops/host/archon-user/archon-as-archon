@@ -596,6 +596,7 @@ verb_selftest() {
     # named secrets: must be neither readable nor listable
     local owner_home; owner_home=$(getent passwd asiri | cut -d: -f6); owner_home=${owner_home:-/home/asiri}
     for p in "$owner_home" "$owner_home/.config/archon-cron/secrets.env" "$owner_home/.config/archon-cron/consolidated-db.env" \
+             "$owner_home/.config/archon-cron/doppler.token" "$owner_home/.config/archon-cron/doppler-push.token" "$owner_home/.doppler" \
              "$owner_home/.config/personal-ops" "$owner_home/.railway" "$owner_home/.config/gh" "$owner_home/.ssh" \
              "$owner_home/.config/.wrangler" "$owner_home/.wrangler" "$owner_home/.config/opencode" "$owner_home/.claude" \
              "$owner_home/.claude.json" "$owner_home/.archon" "$owner_home/backups" "$owner_home/.config/rclone" \
