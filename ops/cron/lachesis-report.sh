@@ -3,7 +3,7 @@
 # (crontab, */15). Closes the loop of #146 (fuel) and #147 (usage/outcome):
 # see lib/lachesis_report.py for what is read and reported.
 #
-# Secrets (~/.config/archon-cron/secrets.env): LACHESIS_FACTORY_TOKEN, a factory
+# Secrets (Doppler factory/prd, lib/secrets.sh): LACHESIS_FACTORY_TOKEN, a factory
 # token created in Lachesis with create_factory_token. Without it nothing is
 # reported (logged, exit 1). NTFY_TOPIC: where an account with no current fuel
 # reading is escalated, once per stale episode.
@@ -17,13 +17,13 @@
 set -uo pipefail
 export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
 
-SECRETS_FILE="${ARCHON_CRON_SECRETS:-$HOME/.config/archon-cron/secrets.env}"
-# shellcheck source=/dev/null
-[ -r "$SECRETS_FILE" ] && . "$SECRETS_FILE"
+CRON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/secrets.sh
+. "$CRON_DIR/lib/secrets.sh"
+secrets_load LACHESIS_FACTORY_TOKEN NTFY_TOPIC
 export LACHESIS_FACTORY_TOKEN="${LACHESIS_FACTORY_TOKEN:-}"
 export NTFY_TOPIC="${NTFY_TOPIC:-}"
 
-CRON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/main-account.sh
 . "$CRON_DIR/lib/main-account.sh"
 ARCHON_MAIN_ACCOUNT=off

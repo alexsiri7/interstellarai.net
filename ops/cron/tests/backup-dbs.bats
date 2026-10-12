@@ -84,6 +84,19 @@ archives() { find "$T/backups/reli" -name '*.sql.gz' 2>/dev/null; }
     [ ! -f "$T/ntfy-called" ]
 }
 
+@test "the URL variables of PG_BACKUP_PROJECTS come from Doppler, the file only as fallback" {
+    load doppler-stub
+    doppler_stub "$T/bin" '{"RELI_DB_URL":"postgresql://bob:doppler-pw@doppler.example.com:5432/postgres"}'
+    : > "$T/secrets.env"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK: reli backed up"* ]]
+    [[ "$output" == *"SKIP: annie"* ]]
+    grep -q '^PGHOST=doppler.example.com$' "$STUB_ENV"
+    [ "$(cat "$DOPPLER_STUB_LOG" | wc -l)" -eq 1 ]
+    [[ "$output" != *doppler-pw* ]]
+}
+
 @test "credentials reach pg_dump through the environment, not argv, and are decoded" {
     run "$SCRIPT"
     [ "$status" -eq 0 ]

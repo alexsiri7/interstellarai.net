@@ -24,7 +24,7 @@ _ARCHON_CLAUDE_AUTH_SH=1
 # shellcheck source=lib/human-labels.sh
 source "$(dirname "${BASH_SOURCE[0]}")/human-labels.sh"
 
-# Colon-separated config dirs; secrets.env may override (it is sourced later).
+# Colon-separated config dirs; the caller's later secrets_load may override.
 CLAUDE_ACCOUNTS="${CLAUDE_ACCOUNTS:-$HOME/.claude:$HOME/.claude-secondary}"
 CLAUDE_AUTH_STATE_DIR="${CLAUDE_AUTH_STATE_DIR:-$HOME/.archon/pipeline-health-state/claude-auth}"
 CLAUDE_AUTH_ISSUE_REPO="alexsiri7/interstellarai.net"

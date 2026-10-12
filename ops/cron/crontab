@@ -1,6 +1,7 @@
 # Archon pipeline crontab. Install with: crontab ops/cron/crontab
 # Paths below assume this repo is checked out at /mnt/ext-fast/interstellarai.net.
-# Secrets loaded from ~/.config/archon-cron/secrets.env (not in this repo).
+# Secrets come from Doppler factory/prd via lib/secrets.sh; ~/.config/archon-cron/secrets.env
+# (not in this repo) is the fallback.
 #
 # Logs go under ~/.local/state/archon-cron/logs (cron expands no `~`, hence the
 # absolute paths). Not /tmp: Ubuntu's tmpfiles rule (`D /tmp 1777 root root 30d`)

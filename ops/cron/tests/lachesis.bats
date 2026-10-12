@@ -60,6 +60,18 @@ STUB
     [ "$(lachesis_token)" = env-tok ]
 }
 
+@test "lachesis_token reads LACHESIS_FACTORY_TOKEN from Doppler; the environment still wins" {
+    load doppler-stub
+    doppler_stub "$T/bin" '{"LACHESIS_FACTORY_TOKEN":"tok-doppler","RELI_DB_URL":"postgres://secret"}'
+    PATH="$T/bin:$PATH"
+    printf 'LACHESIS_FACTORY_TOKEN=tok-file\n' > "$ARCHON_CRON_SECRETS"
+    [ "$(lachesis_token)" = tok-doppler ]
+    [ -z "${RELI_DB_URL:-}" ]
+    # shellcheck disable=SC2034  # read by lachesis_token
+    LACHESIS_FACTORY_TOKEN=env-tok
+    [ "$(lachesis_token)" = env-tok ]
+}
+
 @test "lachesis_call.py without a token exits 2 and calls nothing" {
     run env -u LACHESIS_FACTORY_TOKEN python3 -B "$LIB/lachesis_call.py" next_issue '{}'
     [ "$status" -eq 2 ]

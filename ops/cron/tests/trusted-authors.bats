@@ -157,6 +157,15 @@ load_trust() {
     [ -z "${PROD_DB_URL:-}" ]
 }
 
+@test "lib: only NTFY_TOPIC is read from Doppler" {
+    load doppler-stub
+    doppler_stub "$T/doppler-bin" '{"NTFY_TOPIC":"doppler-topic","PROD_DB_URL":"postgres://secret"}'
+    PATH="$T/doppler-bin:$PATH"
+    load_trust
+    [ "$NTFY_TOPIC" = doppler-topic ]
+    [ -z "${PROD_DB_URL:-}" ]
+}
+
 @test "lib: one ntfy per untrusted item; a failed push is retried next time" {
     load_trust
     local list='[{"number":5,"author":{"login":"stranger"}}]'
