@@ -1,29 +1,38 @@
 #!/usr/bin/env bats
-# Unit tests for check_doppler_token in ops/cron/pipeline-health-cron.sh:
-# one ntfy per episode when lib/secrets.sh could not read Doppler, recovery
-# logged once it reads again, silence when Doppler was not tried.
+# Tests for check_doppler_token in ops/cron/pipeline-health-cron.sh, run
+# against the real lib/secrets.sh and a stubbed doppler: one ntfy per episode
+# when Doppler cannot be read, recovery logged once it reads again, silence
+# when Doppler was not tried.
 #
 # Run: bunx bats ops/cron/tests/pipeline-health-doppler.bats
 
+load doppler-stub
+
 setup() {
-    export STATE_DIR="$BATS_TEST_TMPDIR/state"
+    export T="$BATS_TEST_TMPDIR"
+    export HOME="$T/home"
+    mkdir -p "$HOME"
+    export STATE_DIR="$T/state"
     mkdir -p "$STATE_DIR"
     export NTFY_SENTINEL="$STATE_DIR/ntfy-called"
-    export ARCHON_CRON_DOPPLER_TOKEN="$BATS_TEST_TMPDIR/doppler.token"
+    export PATH="$T/bin:$PATH"
+    doppler_stub "$T/bin" '{"NTFY_TOPIC":"t-1"}'
     NTFY_RC=0
 
     log() { echo "$*"; }
     notify_checked() { echo "$1 | $2" >> "$NTFY_SENTINEL"; return "$NTFY_RC"; }
 
-    SCRIPT_FILE="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/pipeline-health-cron.sh"
+    CRON_DIR="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
+    # shellcheck source=../lib/secrets.sh
+    source "$CRON_DIR/lib/secrets.sh"
     # shellcheck disable=SC1090
-    source <(awk '/^check_doppler_token\(\)/{p=1} p{print} p && /^}$/{p=0}' "$SCRIPT_FILE")
+    source <(awk '/^check_doppler_token\(\)/{p=1} p{print} p && /^}$/{p=0}' "$CRON_DIR/pipeline-health-cron.sh")
 }
 
 ntfys() { cat "$NTFY_SENTINEL" 2>/dev/null | grep -c . || true; }
 
 @test "token missing: one ntfy naming the file, then quiet while it stays missing" {
-    SECRETS_DOPPLER_RC=1
+    rm -f "$ARCHON_CRON_DOPPLER_TOKEN"
     run check_doppler_token
     [ "$(ntfys)" -eq 1 ]
     grep -q "^Doppler token | Doppler token missing: $ARCHON_CRON_DOPPLER_TOKEN" "$NTFY_SENTINEL"
@@ -35,14 +44,24 @@ ntfys() { cat "$NTFY_SENTINEL" 2>/dev/null | grep -c . || true; }
 }
 
 @test "token rejected or Doppler unreachable alerts" {
-    SECRETS_DOPPLER_RC=2
+    export STUB_DOPPLER_FAIL=1
     run check_doppler_token
     [ "$(ntfys)" -eq 1 ]
     grep -q 'refused the token or is unreachable' "$NTFY_SENTINEL"
 }
 
+@test "probes Doppler itself, not an earlier secrets_load's outcome" {
+    secrets_load NTFY_TOPIC
+    [ "$SECRETS_DOPPLER_RC" -eq 0 ]
+    export STUB_DOPPLER_FAIL=1
+    run check_doppler_token
+    [ "$(ntfys)" -eq 1 ]
+    [ "$(doppler_calls)" -eq 2 ]
+}
+
 @test "an undelivered ntfy leaves no marker, so the next tick retries" {
-    SECRETS_DOPPLER_RC=2 NTFY_RC=22
+    export STUB_DOPPLER_FAIL=1
+    NTFY_RC=22
     run check_doppler_token
     [ ! -f "$STATE_DIR/doppler-alerted" ]
     NTFY_RC=0
@@ -53,7 +72,6 @@ ntfys() { cat "$NTFY_SENTINEL" 2>/dev/null | grep -c . || true; }
 
 @test "Doppler reads again: marker cleared, recovery logged once" {
     touch "$STATE_DIR/doppler-alerted"
-    SECRETS_DOPPLER_RC=0
     run check_doppler_token
     [[ "$output" == *"doppler: recovered"* ]]
     [ ! -f "$STATE_DIR/doppler-alerted" ]
@@ -63,9 +81,10 @@ ntfys() { cat "$NTFY_SENTINEL" 2>/dev/null | grep -c . || true; }
 }
 
 @test "not tried (bats guard): no ntfy, no marker" {
-    SECRETS_DOPPLER_RC=3
+    unset ARCHON_CRON_DOPPLER_TOKEN
     run check_doppler_token
     [ -z "$output" ]
     [ "$(ntfys)" -eq 0 ]
     [ ! -f "$STATE_DIR/doppler-alerted" ]
+    [ "$(doppler_calls)" -eq 0 ]
 }

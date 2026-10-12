@@ -2502,14 +2502,16 @@ check_cron_heartbeats() {
 # ----------------------------------------------------------------------------
 # Check 9g: Doppler token. Every script reads its secrets from Doppler through
 #   lib/secrets.sh and falls back to secrets.env when Doppler fails, so a
-#   missing or revoked token would go unnoticed until that file is gone. This
-#   tick's own secrets_load recorded the outcome in SECRETS_DOPPLER_RC; alert
-#   once per episode, on the topic the fallback still provides.
+#   missing or revoked token would go unnoticed until that file is gone.
+#   Probes Doppler itself (secrets_load with no names reads nothing) rather
+#   than trusting a SECRETS_DOPPLER_RC any later secrets_load could have
+#   overwritten; alert once per episode, on the topic the fallback provides.
 # ----------------------------------------------------------------------------
 check_doppler_token() {
   local marker="$STATE_DIR/doppler-alerted"
-  local token_file="${ARCHON_CRON_DOPPLER_TOKEN:-$HOME/.config/archon-cron/doppler.token}"
-  local problem
+  local token_file problem
+  token_file=$(secrets_doppler_token_file)
+  secrets_load
   case "$SECRETS_DOPPLER_RC" in
     0)
       if [ -f "$marker" ]; then

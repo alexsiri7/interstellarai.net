@@ -24,6 +24,12 @@
 SECRETS_FILE="${ARCHON_CRON_SECRETS:-$HOME/.config/archon-cron/secrets.env}"
 SECRETS_DOPPLER_RC=3
 
+# secrets_doppler_token_file — the token's path, resolved at each call so a
+# caller that changes ARCHON_CRON_DOPPLER_TOKEN or HOME after sourcing sees it.
+secrets_doppler_token_file() {
+  printf '%s' "${ARCHON_CRON_DOPPLER_TOKEN:-$HOME/.config/archon-cron/doppler.token}"
+}
+
 # _secrets_doppler_json NAME... — {NAME: value} for the names Doppler has, as
 # compact JSON on stdout; exit status as SECRETS_DOPPLER_RC. The whole store
 # only ever passes through the pipe into jq.
@@ -31,8 +37,8 @@ _secrets_doppler_json() {
   if [ -n "${BATS_TEST_FILENAME:-}" ] && [ -z "${ARCHON_CRON_DOPPLER_TOKEN:-}" ]; then
     return 3
   fi
-  local token_file="${ARCHON_CRON_DOPPLER_TOKEN:-$HOME/.config/archon-cron/doppler.token}"
-  local token="" bin
+  local token_file token="" bin
+  token_file=$(secrets_doppler_token_file)
   [ -r "$token_file" ] && token=$(tr -d '[:space:]' < "$token_file")
   [ -n "$token" ] || return 1
   # cron's PATH may not include ~/.local/bin, where the CLI is installed.
