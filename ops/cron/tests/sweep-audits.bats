@@ -10,6 +10,8 @@
 
 SCRIPT="$BATS_TEST_DIRNAME/../sweep-audits.sh"
 
+load doppler-stub
+
 setup() {
     TEST_TMP="$(mktemp -d)"
     export HOME="$TEST_TMP/home"
@@ -113,4 +115,24 @@ summary() { grep "^$1=" "$HOME/.archon/sweep-state/last-sweep" | cut -d= -f2-; }
     [ "$(summary outcome)" = failed ]
     [ "$(summary reason)" = workflow ]
     [ -n "$(summary account)" ]
+}
+
+@test "secrets come from Doppler by name: the archon run sees neither the store nor the token" {
+    : > "$ARCHON_CRON_SECRETS"
+    doppler_stub "$TEST_TMP/dbin"
+    export PATH="$TEST_TMP/dbin:$PATH"
+    echo '{"NTFY_TOPIC":"topic-from-doppler","RELI_DB_URL":"postgres://secret@doppler"}' > "$TEST_TMP/doppler.json"
+    export DOPPLER_STUB_JSON="$TEST_TMP/doppler.json" DOPPLER_STUB_ARGV="$TEST_TMP/doppler-argv"
+    echo dp.st.fake > "$TEST_TMP/doppler.token"
+    export ARCHON_CRON_DOPPLER_TOKEN="$TEST_TMP/doppler.token"
+    cat > "$HOME/.local/bin/archon" <<'EOF'
+#!/usr/bin/env bash
+env > "$HOME/archon-env"
+EOF
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ -s "$TEST_TMP/doppler-argv" ]
+    [ -s "$HOME/archon-env" ]
+    run grep -E 'secret@doppler|^DOPPLER_TOKEN=|dp\.st\.fake' "$HOME/archon-env"
+    [ "$status" -eq 1 ]
 }
