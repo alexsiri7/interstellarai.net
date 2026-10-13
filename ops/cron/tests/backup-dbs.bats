@@ -7,6 +7,8 @@
 #
 # Run: bunx bats ops/cron/tests/backup-dbs.bats
 
+load doppler-stub
+
 setup() {
     export T="$BATS_TMPDIR/backup-dbs-$$"
     mkdir -p "$T/bin" "$T/backups" "$T/state"
@@ -68,6 +70,19 @@ teardown() {
 }
 
 archives() { find "$T/backups/reli" -name '*.sql.gz' 2>/dev/null; }
+
+@test "with no secrets.env, Doppler supplies the URL of every PG_BACKUP_PROJECTS entry" {
+    rm "$T/secrets.env"
+    doppler_stub "$T/bin"
+    echo '{"RELI_DB_URL":"postgresql://alice:p%40ss@db.example.com:5432/postgres"}' > "$T/doppler.json"
+    export DOPPLER_STUB_JSON="$T/doppler.json"
+    echo dp.st.fake > "$T/doppler.token"
+    export ARCHON_CRON_DOPPLER_TOKEN="$T/doppler.token"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK: reli backed up"* ]]
+    [[ "$output" == *"SKIP: annie — ANNIE_DB_URL not set (add it to Doppler factory/prd)"* ]]
+}
 
 @test "verified backup: dumps --schema=reli, keeps the archive, exits 0, records last_ok" {
     run "$SCRIPT"
