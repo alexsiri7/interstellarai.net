@@ -2570,9 +2570,9 @@ check_claude_auth() {
 # ----------------------------------------------------------------------------
 # Check 9g: Doppler token. Every script reads its secrets from Doppler through
 #   lib/secrets.sh and quietly falls back to secrets.env when the read-only
-#   service token is missing, readable by others, or refused; this is the one
-#   place that says so. Alerts once per episode with the reason only, never the
-#   token. notify_checked, not notify: the ntfy is the only record, so the
+#   service token is missing or refused; this is the one place that says so,
+#   and that a token others can read is not left that way. Alerts once per
+#   episode with the reason only, never the token. notify_checked, not notify: the ntfy is the only record, so the
 #   marker is written only once it went out. No debounce: an outage that hides
 #   Doppler usually hides ntfy.sh too, and the next tick checks again.
 # ----------------------------------------------------------------------------
