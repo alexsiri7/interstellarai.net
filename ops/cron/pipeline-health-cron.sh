@@ -54,6 +54,8 @@
 #      used up, REST core limit at the unauthenticated 60, public profile 404 =
 #      flagged account; lib/gh-factory.sh, probed as the archon user in archon
 #      mode) → ntfy once per episode; issue-pickup holds launches meanwhile
+#  9h. Doppler token (lib/secrets.sh) missing, loose-moded or rejected → ntfy
+#      once per episode
 #
 # Crontab (logs live under ~/.local/state/archon-cron/logs, which survives a
 # reboot; /tmp does not):
@@ -2566,6 +2568,43 @@ check_claude_auth() {
 }
 
 # ----------------------------------------------------------------------------
+# Check 9g: Doppler token. Every script reads its secrets from Doppler through
+#   lib/secrets.sh and quietly falls back to secrets.env when the read-only
+#   service token is missing, readable by others, or refused; this is the one
+#   place that says so. Alerts once per episode with the reason only, never the
+#   token. notify_checked, not notify: the ntfy is the only record, so the
+#   marker is written only once it went out. No debounce: an outage that hides
+#   Doppler usually hides ntfy.sh too, and the next tick checks again.
+# ----------------------------------------------------------------------------
+check_doppler_token() {
+  local file marker="$STATE_DIR/doppler-alerted" mode problem=""
+  file=$(secrets_doppler_token_file)
+  [ -n "$file" ] || return 0
+
+  if [ -f "$file" ] && mode=$(stat -c %a "$file") && (( 8#$mode & 8#077 )); then
+    problem="token file $file has mode $mode (want 600)"
+  else
+    problem=$(secrets_doppler_json 2>&1 >/dev/null) && problem=""
+  fi
+
+  if [ -z "$problem" ]; then
+    if [ -f "$marker" ]; then
+      rm -f "$marker"
+      log "doppler: recovered"
+    fi
+    return 0
+  fi
+
+  log "doppler: $problem"
+  [ -f "$marker" ] && return 0
+  if notify_checked "Doppler token unusable" \
+    "$problem. ops/cron falls back to secrets.env until it is removed. Fix: a read-only factory/prd service token in $file, chmod 600." \
+    high key; then
+    touch "$marker"
+  fi
+}
+
+# ----------------------------------------------------------------------------
 # Check 9f: work-loop crons silent. A cron that ticks and finds nothing still
 #   rewrites its throttle stamp; one that stops ticking (crontab lost, script
 #   dying before its gate) does not. Alerting and recovery are
@@ -2709,5 +2748,6 @@ check_restore_test
 check_cron_heartbeats
 check_claude_auth
 check_gh_factory
+check_doppler_token
 check_progress
 log "=== done ==="
