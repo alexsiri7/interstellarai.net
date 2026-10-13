@@ -18,7 +18,10 @@ setup() {
     export STUB_ARGV="$T/argv"        # every privileged command, one per line
     export NTFY_LOG="$T/ntfy"         # one line per ntfy: "<title> | <body>"
     export STUB_SMART_FAIL=""         # device names whose smartctl -H is not PASSED
+    export STUB_SMART_BRIDGE=""       # extra disk names lsblk reports, behind a USB bridge plain smartctl -H can't identify
+    export STUB_SMART_BRIDGE_TYPE=""  # the one -d type that answers through that bridge (empty: none does)
     export STUB_SUDO_REFUSE=0         # 1: sudo -n behaves as if no sudoers entry matched
+    export STUB_SUDO_REFUSE_D=0       # 1: only `smartctl -d ...` is refused (sudoers predating the -d grant)
     export STUB_APT_KEPT_BACK=""      # packages still upgradable after full-upgrade, "kept back"
     export STUB_APT_PHASED=""         # packages still upgradable after full-upgrade, deferred by phasing
 
@@ -28,6 +31,7 @@ setup() {
 #!/usr/bin/env bash
 [ "$1" = "-n" ] && shift
 if [ "${STUB_SUDO_REFUSE:-0}" = "1" ]; then echo "sudo: a password is required" >&2; exit 1; fi
+if [ "${STUB_SUDO_REFUSE_D:-0}" = "1" ] && [ "$2" = "-d" ]; then echo "sudo: a password is required" >&2; exit 1; fi
 printf '%s\n' "$*" >> "$STUB_ARGV"
 cmd=$(basename "$1"); shift
 exec "$cmd" "$@"
@@ -79,10 +83,25 @@ STUB
     cat > "$T/bin/lsblk" <<'STUB'
 #!/usr/bin/env bash
 printf 'loop0 loop\nsda disk\nsdb disk\nnvme0n1 disk\n'
+for d in $STUB_SMART_BRIDGE; do printf '%s disk\n' "$d"; done
 STUB
     cat > "$T/bin/smartctl" <<'STUB'
 #!/usr/bin/env bash
+type=""
+[ "$1" = "-d" ] && { type="$2"; shift 2; }
 dev="${2##/dev/}"
+case " $STUB_SMART_BRIDGE " in
+    *" $dev "*)
+        if [ -z "$type" ]; then
+            echo "/dev/$dev: Unknown USB bridge [0x0634:0x5606 (0x5606)]"
+            echo "Please specify device type with the -d option."
+            exit 1
+        elif [ "$type" != "$STUB_SMART_BRIDGE_TYPE" ]; then
+            echo "Read Device Identity failed: scsi error unsupported field in scsi command"
+            echo "A mandatory SMART command failed: exiting."
+            exit 2
+        fi ;;
+esac
 case " $STUB_SMART_FAIL " in
     *" $dev "*) echo "SMART overall-health self-assessment test result: FAILED!"; echo "Drive failure expected in less than 24 hours. SAVE ALL DATA."; exit 8 ;;
 esac
@@ -132,7 +151,8 @@ status_field() { grep "^$1=" "$T/state/system-maintenance-status" | cut -d= -f2-
     grep -qx '/usr/sbin/smartctl -H /dev/sdb' "$STUB_ARGV"
     grep -qx '/usr/sbin/smartctl -H /dev/nvme0n1' "$STUB_ARGV"
     ! grep -q 'loop0' "$STUB_ARGV"
-    [[ "$output" == *"smart: checked 3 disk(s)"* ]]
+    [[ "$output" == *"smart: checked 3 disk(s): 3 PASSED, 0 health unknown"* ]]
+    ! grep -q 'smartctl -d' "$STUB_ARGV"   # no bridge to probe through
     ! grep -qv '^/usr/' "$STUB_ARGV"        # nothing privileged ran without a full path
 }
 
@@ -174,6 +194,75 @@ status_field() { grep "^$1=" "$T/state/system-maintenance-status" | cut -d= -f2-
     [[ "$(status_field last_run_failed)" == *"smart:/dev/sdb"* ]]
     [[ "$output" == *"smart: /dev/sda PASSED"* ]]
     [[ "$output" == *"smart: /dev/nvme0n1 PASSED"* ]]
+}
+
+@test "USB bridge plain smartctl can't identify: probed with -d types until one answers" {
+    export STUB_SMART_BRIDGE="sdd"
+    export STUB_SMART_BRIDGE_TYPE="sntasmedia"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ ! -f "$NTFY_LOG" ]
+    [ "$(status_field last_run_status)" = "ok" ]
+    [ "$(grep '/dev/sdd' "$STUB_ARGV")" = "$(printf '%s\n' \
+        '/usr/sbin/smartctl -H /dev/sdd' \
+        '/usr/sbin/smartctl -d sat -H /dev/sdd' \
+        '/usr/sbin/smartctl -d sntjmicron -H /dev/sdd' \
+        '/usr/sbin/smartctl -d sntasmedia -H /dev/sdd')" ]
+    [[ "$output" == *"smart: /dev/sdd PASSED (-d sntasmedia)"* ]]
+    [[ "$output" == *"smart: checked 4 disk(s): 4 PASSED, 0 health unknown"* ]]
+}
+
+@test "USB bridge no -d type can query: health unknown, not a failure, no ntfy" {
+    export STUB_SMART_BRIDGE="sdd"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ ! -f "$NTFY_LOG" ]
+    [ "$(status_field last_run_status)" = "ok" ]
+    [ "$(status_field last_run_failed)" = "" ]
+    grep -qx '/usr/sbin/smartctl -d sntrealtek -H /dev/sdd' "$STUB_ARGV"
+    [[ "$output" == *"smart: /dev/sdd health unknown (unsupported USB bridge)"* ]]
+    [[ "$output" == *"smart: checked 4 disk(s): 3 PASSED, 1 health unknown"* ]]
+}
+
+@test "USB bridge disk whose -d type reports FAILED: a real failure, urgent ntfy" {
+    export STUB_SMART_BRIDGE="sdd"
+    export STUB_SMART_BRIDGE_TYPE="sat"
+    export STUB_SMART_FAIL="sdd"
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    grep -q '^SMART: /dev/sdd not PASSED.*smartctl -d sat -H /dev/sdd (exit 8).*FAILED' "$NTFY_LOG"
+    [ "$(status_field last_run_failed)" = "smart:/dev/sdd" ]
+    ! grep -q 'sntjmicron' "$STUB_ARGV"     # the first type with a health line decides
+}
+
+@test "SYSTEM_MAINT_SMART_TYPES pins a disk's -d type instead of probing" {
+    export STUB_SMART_BRIDGE="sdd"
+    export STUB_SMART_BRIDGE_TYPE="sntrealtek"
+    export SYSTEM_MAINT_SMART_TYPES="sdx:sat sdd:sntrealtek"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ ! -f "$NTFY_LOG" ]
+    [ "$(grep '/dev/sdd' "$STUB_ARGV")" = '/usr/sbin/smartctl -d sntrealtek -H /dev/sdd' ]
+    [[ "$output" == *"smart: /dev/sdd PASSED (-d sntrealtek)"* ]]
+}
+
+@test "sudoers predating the -d grant: bridge disk fails as a sudo refusal naming the fix, no SMART alarm" {
+    export STUB_SMART_BRIDGE="sdd"
+    export STUB_SMART_BRIDGE_TYPE="sat"
+    export STUB_SUDO_REFUSE_D=1
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "smart:/dev/sdd" ]
+    [[ "$output" == *"sudo -n refused '/usr/sbin/smartctl -d sat -H /dev/sdd'"*"sudo ops/host/install.sh"* ]]
+    ! grep -q 'sntjmicron' "$STUB_ARGV"     # a refusal ends the probe: every other type would be refused too
+    ! grep -q '^SMART: ' "$NTFY_LOG"
+    grep -q '^System maintenance FAILED: smart:/dev/sdd' "$NTFY_LOG"
+}
+
+@test "sudoers grants the smartctl shapes the SMART step runs" {
+    sudoers="$CRON_DIR/../host/sudoers-archon-cron"
+    grep -qF '/usr/sbin/smartctl -H /dev/*, \' "$sudoers"
+    grep -qF '/usr/sbin/smartctl -d * -H /dev/*, \' "$sudoers"
 }
 
 @test "sudo -n refusing (no sudoers entry): fails loud, status failed, ntfy names the fix" {

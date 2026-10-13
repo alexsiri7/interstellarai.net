@@ -80,12 +80,20 @@ logged as failed, the run ntfys and exits 1. The exact grants:
 /usr/bin/snap remove --revision=* *
 /usr/bin/snap set system refresh.retain=2
 /usr/sbin/smartctl -H /dev/*
+/usr/sbin/smartctl -d * -H /dev/*
 /usr/sbin/smartctl -A /dev/*
 ```
 
 (sudoers `*` matches spaces too, so these are the narrowest useful shapes, not
 exact-argument matches. `-A` is granted for by-hand attribute dumps under the
-same rules; the job itself only runs `-H`.)
+same rules; the job itself only runs `-H`, with `-d <type>` for a disk behind a
+USB bridge.)
+
+**The `-d * -H` grant was added 2026-10 (#176):** a host installed before then
+refuses the job's `smartctl -d <type> -H` retries, so a USB disk whose bridge
+plain `smartctl -H` can't identify fails step `smart:/dev/<disk>` with
+`sudo -n refused`. Apply it through the usual path (`sudo ops/host/install.sh`,
+or `archon-ops-promote` for a reviewed change).
 
 **Why `full-upgrade`, not `upgrade`:** `apt-get upgrade` never installs a new
 package or removes an old one, so any update whose dependencies changed is
@@ -121,7 +129,13 @@ lands in the status file as `last_run_kept_back=a,b` (empty when none) — it
 does not fail the run. Every disabled snap revision removed; journal vacuumed
 to 500M; `smartctl -H` on each `disk` from `lsblk` (loop devices excluded;
 `SYSTEM_MAINT_SMART_SKIP="sda ..."` leaves a disk out) with an urgent ntfy for
-anything not `PASSED`; and while `/var/run/reboot-required` exists, one ntfy
+anything not `PASSED`. A disk smartctl answers with `Unknown USB bridge` (the
+external Crucial X9 behind `0x0634:0x5606`) is retried with `-d sat`, then the
+NVMe-over-USB types `sntjmicron`, `sntasmedia`, `sntrealtek`, and the first
+that returns a health line decides; when none does, the disk is logged as
+`health unknown (unsupported USB bridge)` and the run is not failed.
+`SYSTEM_MAINT_SMART_TYPES="sdd:sntrealtek ..."` on the crontab line pins a
+disk's type instead of probing; and while `/var/run/reboot-required` exists, one ntfy
 per running kernel ("reboot pending; safe-reboot reboots in the next idle 02:30-06:30 window"), remembered in
 `~/.archon/pipeline-health-state/system-maintenance-reboot-notified` and
 cleared once the file goes away. The run summary lands in
