@@ -29,7 +29,7 @@
 # Failure (DB unreachable/query error, ntfy undelivered): logged, exit 1, and
 # one "digest failed" ntfy at most once per calendar day.
 #
-# Secrets (~/.config/archon-cron/secrets.env): MUSENMINGLE_DB_URL, else
+# Secrets (Doppler factory/prd, lib/secrets.sh): MUSENMINGLE_DB_URL, else
 # THALEIA_DB_URL (the same role; renamed with the project), and NTFY_TOPIC.
 # The URL is turned into the libpq PG* environment (lib/pg-backup.sh) and is
 # never printed.
@@ -51,11 +51,10 @@ for arg in "$@"; do
     esac
 done
 
-SECRETS_FILE="${ARCHON_CRON_SECRETS:-$HOME/.config/archon-cron/secrets.env}"
-# shellcheck source=/dev/null
-[ -r "$SECRETS_FILE" ] && . "$SECRETS_FILE"
-
 CRON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/secrets.sh
+. "$CRON_DIR/lib/secrets.sh"
+secrets_load NTFY_TOPIC MUSENMINGLE_DB_URL THALEIA_DB_URL
 # shellcheck source=lib/pg-backup.sh
 . "$CRON_DIR/lib/pg-backup.sh"
 
@@ -109,12 +108,12 @@ fail() {
 [ "$DRY_RUN" = 1 ] || mkdir -p "$STATE_DIR"
 
 if [ "$DRY_RUN" = 0 ] && [ -z "${NTFY_TOPIC:-}" ]; then
-    log "ERROR: NTFY_TOPIC not set — populate $SECRETS_FILE"
+    log "ERROR: NTFY_TOPIC not set — add it to Doppler factory/prd"
     exit 1
 fi
 
 DB_URL="${MUSENMINGLE_DB_URL:-${THALEIA_DB_URL:-}}"
-[ -n "$DB_URL" ] || fail "neither MUSENMINGLE_DB_URL nor THALEIA_DB_URL is set in secrets.env"
+[ -n "$DB_URL" ] || fail "neither MUSENMINGLE_DB_URL nor THALEIA_DB_URL is set in Doppler factory/prd (or secrets.env)"
 
 # ---------------------------------------------------------------------------
 # Window

@@ -34,13 +34,15 @@
 #   (it pulls ops/** unreviewed). Promote refuses anything but HEAD on origin/main.
 #
 # Env: OPS_CHECKOUT (default: the repo this script lives in), OPS_APPROVED_FILE,
-# OPS_SELF_UPDATE_STATE (held-notice markers), ARCHON_CRON_SECRETS (NTFY_TOPIC),
+# OPS_SELF_UPDATE_STATE (held-notice markers), NTFY_TOPIC via lib/secrets.sh,
 # OPS_PROMOTE / OPS_USER_INSTALL (the two sudo entrypoints; tests point them elsewhere).
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/run-as.sh
 source "$SCRIPT_DIR/lib/run-as.sh"
+# shellcheck source=lib/secrets.sh
+source "$SCRIPT_DIR/lib/secrets.sh"
 REPO="${OPS_CHECKOUT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 APPROVED_FILE="${OPS_APPROVED_FILE:-$HOME/.config/archon-cron/ops-approved}"
 STATE="${OPS_SELF_UPDATE_STATE:-$HOME/.local/state/archon-cron/ops-self-update}"
@@ -59,9 +61,8 @@ log() { echo "$(date -Is) [ops-self-update] $*"; }
 
 # notify <title> <tags> <message> — one high-priority ntfy to NTFY_TOPIC, if set.
 notify() {
-  local secrets topic
-  secrets="${ARCHON_CRON_SECRETS:-$HOME/.config/archon-cron/secrets.env}"
-  topic=$(sed -nE 's/^[[:space:]]*(export[[:space:]]+)?NTFY_TOPIC=["'\'']?([^"'\''[:space:]#]*).*/\2/p' "$secrets" 2>/dev/null | tail -1)
+  local topic
+  topic=$(secret_get NTFY_TOPIC)
   [ -n "$topic" ] || return 0
   curl -fsS -m 15 -H "Title: $1" -H "Priority: high" -H "Tags: $2" -d "$3" \
     "https://ntfy.sh/$topic" >/dev/null 2>&1 || log "ntfy failed"

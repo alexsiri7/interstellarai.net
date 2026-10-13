@@ -48,15 +48,11 @@ fi
 TRUST_STATE_DIR="${TRUST_STATE_DIR:-$HOME/.archon/state/untrusted}"
 TRUST_OWNER="${TRUST_OWNER:-alexsiri7}"
 
-# NTFY_TOPIC only — never source secrets.env here: its DB URLs would land in
-# the environment of every archon run these scripts start.
-if [ -z "${NTFY_TOPIC:-}" ]; then
-  _trust_secrets="${ARCHON_CRON_SECRETS:-$HOME/.config/archon-cron/secrets.env}"
-  if [ -r "$_trust_secrets" ]; then
-    NTFY_TOPIC=$(sed -nE 's/^[[:space:]]*(export[[:space:]]+)?NTFY_TOPIC=["'\'']?([^"'\''[:space:]#]*).*/\2/p' "$_trust_secrets" | tail -1)
-  fi
-  unset _trust_secrets
-fi
+# NTFY_TOPIC only — never the whole store: its DB URLs would land in the
+# environment of every archon run these scripts start.
+# shellcheck source=secrets.sh
+source "$(dirname "${BASH_SOURCE[0]}")/secrets.sh"
+[ -n "${NTFY_TOPIC:-}" ] || NTFY_TOPIC=$(secret_get NTFY_TOPIC)
 
 _trust_log() { echo "$(date -Is) [trust] $*" >&2; }
 

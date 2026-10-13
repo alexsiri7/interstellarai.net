@@ -9,7 +9,7 @@ be reached or LACHESIS_FACTORY_TOKEN is unset. Stdlib only; the MCP client is
 lachesis_report.py's.
 
 Env: LACHESIS_URL (default https://lachesis.interstellarai.net/mcp),
-     LACHESIS_FACTORY_TOKEN (secrets.env).
+     LACHESIS_FACTORY_TOKEN (Doppler factory/prd, via lib/secrets.sh).
 """
 
 from __future__ import annotations

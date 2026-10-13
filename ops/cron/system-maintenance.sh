@@ -57,10 +57,11 @@ SNAP=/usr/bin/snap
 JOURNALCTL=/usr/bin/journalctl
 SMARTCTL=/usr/sbin/smartctl
 
-SECRETS_FILE="${ARCHON_CRON_SECRETS:-$HOME/.config/archon-cron/secrets.env}"
-# shellcheck source=/dev/null
-[ -r "$SECRETS_FILE" ] && . "$SECRETS_FILE"
-: "${NTFY_TOPIC:?NTFY_TOPIC not set — populate $SECRETS_FILE}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/secrets.sh
+source "$SCRIPT_DIR/lib/secrets.sh"
+secrets_load NTFY_TOPIC
+: "${NTFY_TOPIC:?NTFY_TOPIC not set — add it to Doppler factory/prd}"
 
 # Per-disk SMART settings, keyed by the name lsblk prints; read after
 # secrets.env so they can live there.

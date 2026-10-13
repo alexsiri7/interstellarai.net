@@ -19,12 +19,15 @@
 #   LACHESIS_ROUTE=on
 #
 # lachesis_call runs lib/lachesis_call.py with the factory token
-# (LACHESIS_FACTORY_TOKEN, read from secrets.env on its own: the rest of
-# secrets.env never reaches the environment of the archon runs these scripts
-# start). LACHESIS_CALL_CMD replaces it in tests.
+# (LACHESIS_FACTORY_TOKEN, read from Doppler on its own through lib/secrets.sh:
+# the rest of the store never reaches the environment of the archon runs these
+# scripts start). LACHESIS_CALL_CMD replaces it in tests.
 
 [ -n "${_LACHESIS_SH:-}" ] && return 0
 _LACHESIS_SH=1
+
+# shellcheck source=secrets.sh
+source "$(dirname "${BASH_SOURCE[0]}")/secrets.sh"
 
 LACHESIS_PICKUP_FLAG="${LACHESIS_PICKUP_FLAG:-$HOME/.config/archon-cron/lachesis-pickup}"
 LACHESIS_ROUTE_FLAG="${LACHESIS_ROUTE_FLAG:-$HOME/.config/archon-cron/lachesis-route}"
@@ -52,15 +55,13 @@ lachesis_kind_for() {
   esac
 }
 
-# lachesis_token — LACHESIS_FACTORY_TOKEN from the environment or secrets.env.
+# lachesis_token — LACHESIS_FACTORY_TOKEN from the environment, else the store.
 lachesis_token() {
   if [ -n "${LACHESIS_FACTORY_TOKEN:-}" ]; then
     printf '%s' "$LACHESIS_FACTORY_TOKEN"
     return 0
   fi
-  local secrets="${ARCHON_CRON_SECRETS:-$HOME/.config/archon-cron/secrets.env}"
-  [ -r "$secrets" ] || return 0
-  sed -nE 's/^[[:space:]]*(export[[:space:]]+)?LACHESIS_FACTORY_TOKEN=["'\'']?([^"'\''[:space:]#]*).*/\2/p' "$secrets" | tail -n 1
+  secret_get LACHESIS_FACTORY_TOKEN
 }
 
 # lachesis_call <tool> [json-arguments] — the tool's JSON on stdout. Exit 0 when

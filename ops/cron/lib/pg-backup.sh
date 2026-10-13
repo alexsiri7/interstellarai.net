@@ -19,7 +19,7 @@
 # restore-test.sh (restore the archive somewhere else and re-verify):
 #   project | URL variable | schema | sanity table (quoted as SQL needs it)
 # Each entry dumps exactly one schema (pg_dump --schema=<schema>) through the
-# URL in ~/.config/archon-cron/secrets.env. backup-dbs.sh verifies the schema
+# URL in Doppler factory/prd (lib/secrets.sh). backup-dbs.sh verifies the schema
 # exists on the server at runtime, so a line pointing at the wrong schema
 # fails loudly instead of silently producing an empty dump.
 #
@@ -28,7 +28,7 @@
 # role's URL. Until an app moves, its line keeps pointing at its old project
 # (`public` schema). When an app moves, its line changes to
 #   <app>|<APP>_DB_URL|<app>|<table>
-# and secrets.env's <APP>_DB_URL is switched to the new role's URL, in the
+# and Doppler's <APP>_DB_URL is switched to the new role's URL, in the
 # same step. Lachesis moved (2026-09-26) into schema `lachesis`, reached
 # through role `lachesis`; FilmDuel moved the same day into schema `filmduel`
 # (role `filmduel`), Word Coach Annie into schema `annie` (role `annie`), and
@@ -47,6 +47,11 @@ PG_BACKUP_PROJECTS=(
     'musenmingle|MUSENMINGLE_DB_URL|events|sources'
     'kindred-auth|KINDRED_DB_URL|auth|users'
 )
+
+# pg_backup_url_vars — the URL variable names PG_BACKUP_PROJECTS reads, once each.
+pg_backup_url_vars() {
+    printf '%s\n' "${PG_BACKUP_PROJECTS[@]}" | cut -d'|' -f2 | sort -u
+}
 
 # pg_url_percent_decode STRING → prints STRING with %XX sequences decoded.
 pg_url_percent_decode() {

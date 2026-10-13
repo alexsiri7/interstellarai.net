@@ -105,6 +105,13 @@ source "$SCRIPT_DIR/lib/archon-active-runs.sh"
 source "$SCRIPT_DIR/lib/ci-skip.sh"
 # shellcheck source=lib/claude-auth.sh
 source "$SCRIPT_DIR/lib/claude-auth.sh"
+# NTFY_TOPIC from Doppler (lib/secrets.sh), before lib/trust.sh so it need not
+# ask again. Fail loud if unset. CLAUDE_ACCOUNTS there overrides claude-auth's
+# default.
+# shellcheck source=lib/secrets.sh
+source "$SCRIPT_DIR/lib/secrets.sh"
+secrets_load NTFY_TOPIC CLAUDE_ACCOUNTS
+: "${NTFY_TOPIC:?NTFY_TOPIC not set — add it to Doppler factory/prd}"
 # The PR checks that start archon (check_pr_ci_retry, check_stuck_prs) only see
 # PRs lib/trust.sh rates `full`; a fork can name its branch `archon/…` too.
 # shellcheck source=lib/trust.sh
@@ -124,11 +131,6 @@ STATE_DIR="$HOME/.archon/pipeline-health-state"
 # diagnostic output next to them.
 LOG_DIR="${ARCHON_CRON_LOG_DIR:-$HOME/.local/state/archon-cron/logs}"
 
-# NTFY_TOPIC loaded from secrets.env. Fail loud if unset.
-SECRETS_FILE="${ARCHON_CRON_SECRETS:-$HOME/.config/archon-cron/secrets.env}"
-# shellcheck source=/dev/null
-[ -r "$SECRETS_FILE" ] && . "$SECRETS_FILE"
-: "${NTFY_TOPIC:?NTFY_TOPIC not set — populate $SECRETS_FILE}"
 LOG_PREFIX="[pipeline-health]"
 
 # Public prod-deploy URLs, keyed by project slug. Only projects listed here
