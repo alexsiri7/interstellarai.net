@@ -110,7 +110,7 @@ mode_ok "$HOME" 007 "home not world-accessible:"
 for d in .config/archon-cron .config/personal-ops .config/gh .config/opencode .config/rclone .railway .ssh .claude .archon backups; do
     mode_ok "$HOME/$d" 077 "private dir:"
 done
-for f in .config/archon-cron/secrets.env .config/archon-cron/consolidated-db.env .railway/config.json .claude/.credentials.json .archon/credential-key; do
+for f in .config/archon-cron/secrets.env .config/archon-cron/consolidated-db.env .config/archon-cron/doppler.token .config/archon-cron/doppler-push.token .railway/config.json .claude/.credentials.json .archon/credential-key; do
     mode_ok "$HOME/$f" 077 "private file:"
 done
 if id -nG | tr ' ' '\n' | grep -qx archon; then pass "asiri is in group archon (reads factory logs)"; else warn "asiri not (yet) in group archon — log out and in again (or run: newgrp archon) after install.sh"; fi

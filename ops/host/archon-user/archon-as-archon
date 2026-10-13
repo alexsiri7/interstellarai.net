@@ -596,6 +596,7 @@ verb_selftest() {
     # named secrets: must be neither readable nor listable
     local owner_home; owner_home=$(getent passwd asiri | cut -d: -f6); owner_home=${owner_home:-/home/asiri}
     for p in "$owner_home" "$owner_home/.config/archon-cron/secrets.env" "$owner_home/.config/archon-cron/consolidated-db.env" \
+             "$owner_home/.config/archon-cron/doppler.token" "$owner_home/.config/archon-cron/doppler-push.token" \
              "$owner_home/.config/personal-ops" "$owner_home/.railway" "$owner_home/.config/gh" "$owner_home/.ssh" \
              "$owner_home/.config/.wrangler" "$owner_home/.wrangler" "$owner_home/.config/opencode" "$owner_home/.claude" \
              "$owner_home/.claude.json" "$owner_home/.archon" "$owner_home/backups" "$owner_home/.config/rclone" \
@@ -659,7 +660,7 @@ verb_selftest() {
     for pid in $(pgrep -u "$ARCHON_USER" 2>/dev/null); do
         [ -r "/proc/$pid/environ" ] || continue
         bad=$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | cut -d= -f1 \
-              | grep -E '(_DB_URL|DATABASE_URL|NTFY|RAILWAY|SUPABASE|CLOUDFLARE|CF_API|SENTRY_AUTH|REQUESTY|OPENROUTER|ANTHROPIC_API_KEY|GITHUB_TOKEN|GH_TOKEN|AWS_|RCLONE|PGPASSWORD|SECRET)' | sort -u | tr '\n' ' ') || true
+              | grep -E '(_DB_URL|DATABASE_URL|NTFY|DOPPLER|RAILWAY|SUPABASE|CLOUDFLARE|CF_API|SENTRY_AUTH|REQUESTY|OPENROUTER|ANTHROPIC_API_KEY|GITHUB_TOKEN|GH_TOKEN|AWS_|RCLONE|PGPASSWORD|SECRET)' | sort -u | tr '\n' ' ') || true
         [ -n "$bad" ] && fail "pid $pid ($(tr '\0' ' ' < "/proc/$pid/cmdline" | cut -c1-60)) carries: $bad"
     done
     pass "process environments checked ($(pgrep -u "$ARCHON_USER" 2>/dev/null | wc -l) archon processes)"
