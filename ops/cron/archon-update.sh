@@ -76,7 +76,7 @@
 # ARCHON_UPDATE_VALIDATE_DIRS (space-separated; default: every existing
 # $ARCHON_UPDATE_PROJECT_ROOT/<project> from archon-projects.txt),
 # ARCHON_UPDATE_PROJECT_ROOT (/mnt/ext-fast), ARCHON_CRON_LOG_DIR,
-# ARCHON_CRON_SECRETS.
+# ARCHON_CRON_SECRETS / ARCHON_CRON_DOPPLER_TOKEN (lib/secrets.sh).
 
 set -uo pipefail
 
@@ -108,10 +108,10 @@ HEALTH_TIMEOUT="${ARCHON_UPDATE_HEALTH_TIMEOUT:-60}"
 PROJECT_ROOT="${ARCHON_UPDATE_PROJECT_ROOT:-/mnt/ext-fast}"
 RUNBOOK="ops/cron/ARCHON-0.10-CUTOVER.md and the 'Archon auto-update' section of ops/cron/README.md (interstellarai.net)"
 
-SECRETS_FILE="${ARCHON_CRON_SECRETS:-$HOME/.config/archon-cron/secrets.env}"
-# shellcheck source=/dev/null
-[ -r "$SECRETS_FILE" ] && . "$SECRETS_FILE"
-: "${NTFY_TOPIC:?NTFY_TOPIC not set — populate $SECRETS_FILE}"
+# shellcheck source=lib/secrets.sh
+source "$SCRIPT_DIR/lib/secrets.sh"
+secrets_load NTFY_TOPIC
+: "${NTFY_TOPIC:?NTFY_TOPIC not set — add it to Doppler factory/prd}"
 
 # shellcheck source=lib/archon-projects.sh
 source "$SCRIPT_DIR/lib/archon-projects.sh"

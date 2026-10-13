@@ -29,7 +29,7 @@
 # ops/bin/pipeline-status.
 #
 # Ported from archon/scripts/poll-sweep.sh. Matches the style of the other
-# ops/cron scripts (log/notify helpers, SECRETS_FILE, SCRIPT_DIR, STATE_DIR).
+# ops/cron scripts (log/notify helpers, lib/secrets.sh, SCRIPT_DIR, STATE_DIR).
 #
 # Crontab:
 #   0 2 * * * <repo>/ops/cron/sweep-audits.sh >> ~/.local/state/archon-cron/logs/sweep-audits.log 2>&1
@@ -57,11 +57,12 @@ BASE_DIR="/mnt/ext-fast"
 STATE_DIR="$HOME/.archon/sweep-state"
 LOG_DIR="$HOME/.archon/logs/sweep"
 
-# NTFY_TOPIC loaded from secrets.env. Fail loud if unset.
-SECRETS_FILE="${ARCHON_CRON_SECRETS:-$HOME/.config/archon-cron/secrets.env}"
-# shellcheck source=/dev/null
-[ -r "$SECRETS_FILE" ] && . "$SECRETS_FILE"
-: "${NTFY_TOPIC:?NTFY_TOPIC not set — populate $SECRETS_FILE}"
+# NTFY_TOPIC from Doppler (lib/secrets.sh). Fail loud if unset. CLAUDE_ACCOUNTS
+# there overrides lib/claude-auth.sh's default.
+# shellcheck source=lib/secrets.sh
+source "$SCRIPT_DIR/lib/secrets.sh"
+secrets_load NTFY_TOPIC CLAUDE_ACCOUNTS
+: "${NTFY_TOPIC:?NTFY_TOPIC not set — add it to Doppler factory/prd}"
 LOG_PREFIX="[sweep-audits]"
 
 export ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING=1
