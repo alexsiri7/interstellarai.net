@@ -12,13 +12,20 @@
 # nightly window (SAFE_REBOOT_WINDOW, 02:30-06:30 local). It reboots when
 # nothing is busy:
 #   hard (never overridden)  the hold file; a DB backup / restore test / weekly
-#                            maintenance / archon update script mid-run;
-#                            apt, dpkg or unattended-upgrade running
+#                            maintenance / archon update script mid-run (a
+#                            shell process -- bash/sh/dash, optional path and
+#                            -flags -- whose script argument is the job script;
+#                            a process that merely mentions the path, e.g. an
+#                            editor, `tail`, `grep` or a claude prompt, does
+#                            not count); apt, dpkg or unattended-upgrade running
 #   soft (overridden by the  archon runs running or paused (in the DB of the
 #         deadline)          user the run-as flag names); an `archon workflow
 #                            run` process; a Claude transcript (.jsonl under any
 #                            user's ~/.claude/projects) written in the last
-#                            SAFE_REBOOT_ACTIVE_MIN (30) minutes
+#                            SAFE_REBOOT_ACTIVE_MIN (30) minutes; a maintenance
+#                            job or apt/dpkg process running for longer than
+#                            SAFE_REBOOT_JOB_MAX_H (12) hours (`ps -o etimes=`):
+#                            these take minutes to an hour, so it looks stuck
 # Before rebooting it saves the run-as flag and sets it to drain (never
 # overwriting a drain someone else set), re-checks archon, records the owner's
 # running user services and interactive Claude sessions (cwd, session id, tmux
@@ -71,10 +78,15 @@ WAIT_S="${SAFE_REBOOT_WAIT_S:-120}"
 HOMES="${SAFE_REBOOT_HOMES:-}"
 # Scripts that must not be cut off (ops/cron/crontab): the 3-hourly DB backup,
 # the Sunday restore test, weekly apt maintenance, the weekly archon update and
-# the Sunday cache trim. Plus apt/dpkg themselves.
-JOBS_RE="${SAFE_REBOOT_JOBS_RE:-ops/cron/(backup-dbs|restore-test|system-maintenance|archon-update)\.sh|pipeline-health-cron\.sh --trim}"
+# the Sunday cache trim. Plus apt/dpkg themselves. pgrep -f matches the whole
+# command line, so the pattern is anchored: a shell (optional path, optional
+# -flags, e.g. cron's `/bin/sh -c`) whose first operand is the job script.
+JOB_SH_RE='^(/usr)?(/bin/)?(ba|da)?sh( -[A-Za-z]+)* [^ ]*'
+JOBS_RE="${SAFE_REBOOT_JOBS_RE:-${JOB_SH_RE}ops/cron/(backup-dbs|restore-test|system-maintenance|archon-update)\.sh( |\$)|${JOB_SH_RE}ops/cron/pipeline-health-cron\.sh --trim( |\$)}"
 APT_RE="${SAFE_REBOOT_APT_RE:-^(/usr/bin/)?(dpkg|apt|apt-get|aptitude)( |$)|/usr/bin/unattended-upgrade( |$)|apt\.systemd\.daily}"
 RUNS_PROC_RE='archon workflow run |cli\.ts workflow run '
+# A maintenance job / apt process older than this is stuck: soft, not hard.
+JOB_MAX_H="${SAFE_REBOOT_JOB_MAX_H:-12}"
 
 TOOL="${SAFE_REBOOT_TOOL:-safe-reboot}"
 NOW="${SAFE_REBOOT_NOW:-$(date +%s)}"
@@ -154,12 +166,31 @@ check_hold() {
     add "hard:hold file $HOLD (since $(fmt_ts "$(stat -c %Y "$HOLD")"))${why:+: $why}"
 }
 
+# Splits `pgrep -a` lines into hard (younger than JOB_MAX_H) and soft (older:
+# stuck) reasons. A process whose age cannot be read (gone already) is hard.
+add_procs() {
+    local what=$1 lines=$2 pid age hard="" stuck="" max=$(( JOB_MAX_H * 3600 ))
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        pid=${line%% *}
+        age=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
+        if [[ "$age" =~ ^[0-9]+$ ]] && [ "$age" -gt "$max" ]; then
+            stuck+="$line (running $(( age / 3600 ))h);"
+        else
+            hard+="$line;"
+        fi
+    done < <(head -n 3 <<<"$lines")
+    [ -n "$hard" ] && add "hard:$what running: $(cut -c1-200 <<<"$hard")"
+    [ -n "$stuck" ] && add "soft:$what running for over ${JOB_MAX_H}h, looks stuck: $(cut -c1-200 <<<"$stuck")"
+    return 0
+}
+
 check_jobs() {
     local out
-    out=$(pgrep -af -- "$JOBS_RE" 2>/dev/null | grep -v -- "$TOOL" | head -n 3)
-    [ -n "$out" ] && add "hard:maintenance job running: $(tr '\n' ';' <<<"$out" | cut -c1-200)"
-    out=$(pgrep -af -- "$APT_RE" 2>/dev/null | head -n 3)
-    [ -n "$out" ] && add "hard:apt/dpkg running: $(tr '\n' ';' <<<"$out" | cut -c1-200)"
+    out=$(pgrep -af -- "$JOBS_RE" 2>/dev/null | grep -v -- "$TOOL")
+    add_procs "maintenance job" "$out"
+    out=$(pgrep -af -- "$APT_RE" 2>/dev/null)
+    add_procs "apt/dpkg" "$out"
     return 0
 }
 

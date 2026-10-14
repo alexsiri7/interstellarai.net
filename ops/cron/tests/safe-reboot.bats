@@ -45,14 +45,24 @@ c=\$(cat "$T/runs.\$st")
 if [ -e "$T/bun.busy-after" ] && [ "\$n" -gt "\$(cat "$T/bun.busy-after")" ] && [ "\$st" = running ]; then c=1; fi
 printf '{"runs": ['; for ((i = 0; i < c; i++)); do [ \$i -gt 0 ] && printf ,; printf '{"id":"r%s"}' \$i; done; printf ']}'
 STUB
+    # pgrep -af: the "<pid> <cmdline>" lines of $T/pgrep.jobs / $T/pgrep.apt (a
+    # fake process table) whose cmdline matches the pattern, as pgrep -f does.
     cat > "$T/bin/pgrep" <<STUB
 #!/usr/bin/env bash
+re=\${*: -1}
+filter() { [ -e "\$1" ] || return 0; while IFS= read -r l; do grep -qE -- "\$re" <<<"\${l#* }" && printf '%s\n' "\$l"; done < "\$1"; }
 case "\$*" in
-    *backup-dbs*) cat "$T/pgrep.jobs" 2>/dev/null ;;
-    *dpkg*) cat "$T/pgrep.apt" 2>/dev/null ;;
+    *backup-dbs*) filter "$T/pgrep.jobs" ;;
+    *dpkg*) filter "$T/pgrep.apt" ;;
     *"workflow run"*) cat "$T/pgrep.runs" 2>/dev/null || echo 0 ;;
 esac
 exit 0
+STUB
+    # ps -o etimes= -p <pid>: the age in $T/etimes.<pid>, 60s by default.
+    cat > "$T/bin/ps" <<STUB
+#!/usr/bin/env bash
+if [ "\$1 \$2 \$3" = "-o etimes= -p" ]; then cat "$T/etimes.\$4" 2>/dev/null || echo "     60"; exit 0; fi
+exec /bin/ps "\$@"
 STUB
     # curl: ntfy posts are logged; anything else is archon-serve answering 200.
     cat > "$T/bin/curl" <<STUB
@@ -187,6 +197,70 @@ add_units() {
     run "$SCRIPT" gate
     [[ "$output" == *"apt/dpkg running"* ]]
     [ ! -e "$T/reboot.log" ]
+}
+
+@test "a process that merely mentions a job script does not block" {
+    pending
+    P=/mnt/ext-fast/interstellarai.net/ops/cron
+    cat > "$T/pgrep.jobs" <<PROCS
+2575357 claude --permission-mode auto look at $P/archon-update.sh and fix it
+2001 vim ops/cron/archon-update.sh
+2002 tail -f /home/asiri/.local/state/archon-cron/logs/archon-update.log
+2003 grep archon-update.sh $P/crontab
+2004 bash -c vim $P/backup-dbs.sh
+2005 bash $P/pipeline-health-cron.sh
+2006 bash $P/archon-update.sh.bak
+PROCS
+    run "$SCRIPT" status
+    [[ "$output" != *"maintenance job"* ]]
+    [[ "$output" == *"decision: reboot now"* ]]
+    run "$SCRIPT" gate
+    [ -e "$T/reboot.log" ]
+}
+
+@test "a real job script run blocks hard: bash, /bin/sh -c, shell flags, --trim" {
+    pending
+    printf '%s boot-1\n' "$(( SAFE_REBOOT_NOW - 100 * 3600 ))" > "$T/state/pending-since"
+    P=/mnt/ext-fast/interstellarai.net/ops/cron
+    for cmd in "bash $P/archon-update.sh" "/bin/sh -c $P/restore-test.sh >> /x.log 2>&1" \
+               "/usr/bin/bash -x $P/system-maintenance.sh" "sh $P/backup-dbs.sh" \
+               "bash $P/pipeline-health-cron.sh --trim"; do
+        echo "777 $cmd" > "$T/pgrep.jobs"
+        run "$SCRIPT" status
+        [[ "$output" == *"hard:maintenance job running: 777 $cmd"* ]]
+        run "$SCRIPT" gate
+        [[ "$output" == *"hard blocker"* ]]
+        [ ! -e "$T/reboot.log" ]
+    done
+}
+
+@test "a job running longer than SAFE_REBOOT_JOB_MAX_H is soft (stuck): the deadline overrides it" {
+    pending
+    echo "777 bash /mnt/ext-fast/interstellarai.net/ops/cron/archon-update.sh" > "$T/pgrep.jobs"
+    echo "  $(( 13 * 3600 ))" > "$T/etimes.777"
+    run "$SCRIPT" status
+    [[ "$output" == *"soft:maintenance job running for over 12h, looks stuck: 777 bash"*"archon-update.sh (running 13h)"* ]]
+    [[ "$output" != *"hard:"* ]]
+    run "$SCRIPT" gate
+    [ ! -e "$T/reboot.log" ]
+    # past the deadline: warning tick, then forced through after the grace period
+    printf '%s boot-1\n' "$(( SAFE_REBOOT_NOW - 100 * 3600 ))" > "$T/state/pending-since"
+    run "$SCRIPT" gate
+    [[ "$output" == *"warning now"* ]]
+    [ ! -e "$T/reboot.log" ]
+    export SAFE_REBOOT_NOW=$(( SAFE_REBOOT_NOW + 700 ))
+    run "$SCRIPT" gate
+    [[ "$output" == *"forcing the reboot"* ]]
+    [ -e "$T/reboot.log" ]
+}
+
+@test "SAFE_REBOOT_JOB_MAX_H applies to apt/dpkg too; a younger one stays hard" {
+    pending
+    echo "456 /usr/bin/dpkg --configure -a" > "$T/pgrep.apt"; echo 7300 > "$T/etimes.456"
+    SAFE_REBOOT_JOB_MAX_H=2 run "$SCRIPT" status
+    [[ "$output" == *"soft:apt/dpkg running for over 2h, looks stuck: 456 /usr/bin/dpkg"* ]]
+    run "$SCRIPT" status
+    [[ "$output" == *"hard:apt/dpkg running: 456 /usr/bin/dpkg"* ]]
 }
 
 @test "soft blockers: an active transcript, a paused archon run, an unreadable run list" {
