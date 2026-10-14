@@ -18,6 +18,10 @@ Cmnd_Alias ARCHON_MAINT = \
     /usr/bin/snap remove --revision=* *, \
     /usr/bin/snap set system refresh.retain=2, \
     /usr/sbin/smartctl -H /dev/*, \
+    /usr/sbin/smartctl -d sat -H /dev/*, \
+    /usr/sbin/smartctl -d sntasmedia -H /dev/*, \
+    /usr/sbin/smartctl -d sntjmicron -H /dev/*, \
+    /usr/sbin/smartctl -d sntrealtek -H /dev/*, \
     /usr/sbin/smartctl -A /dev/*
 
 # apt-get runs unattended: keep debconf from ever trying to ask.

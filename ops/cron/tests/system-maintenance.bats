@@ -18,7 +18,11 @@ setup() {
     export STUB_ARGV="$T/argv"        # every privileged command, one per line
     export NTFY_LOG="$T/ntfy"         # one line per ntfy: "<title> | <body>"
     export STUB_SMART_FAIL=""         # device names whose smartctl -H is not PASSED
+    export STUB_SMART_USB=""          # device names behind a USB bridge smartctl does not recognise
+    export STUB_SMART_USB_OK=""       # <dev>=<type> pairs: the -d type that bridge does answer to
+    export STUB_SMART_NOOPEN=""       # device names smartctl cannot open at all
     export STUB_SUDO_REFUSE=0         # 1: sudo -n behaves as if no sudoers entry matched
+    export STUB_SUDO_REFUSE_DTYPE=0   # 1: same, for `smartctl -d <type>` only (sudoers not yet widened)
     export STUB_APT_KEPT_BACK=""      # packages still upgradable after full-upgrade, "kept back"
     export STUB_APT_PHASED=""         # packages still upgradable after full-upgrade, deferred by phasing
 
@@ -28,6 +32,7 @@ setup() {
 #!/usr/bin/env bash
 [ "$1" = "-n" ] && shift
 if [ "${STUB_SUDO_REFUSE:-0}" = "1" ]; then echo "sudo: a password is required" >&2; exit 1; fi
+case "$*" in */smartctl\ -d\ *) if [ "${STUB_SUDO_REFUSE_DTYPE:-0}" = "1" ]; then echo "sudo: a password is required" >&2; exit 1; fi ;; esac
 printf '%s\n' "$*" >> "$STUB_ARGV"
 cmd=$(basename "$1"); shift
 exec "$cmd" "$@"
@@ -82,7 +87,24 @@ printf 'loop0 loop\nsda disk\nsdb disk\nnvme0n1 disk\n'
 STUB
     cat > "$T/bin/smartctl" <<'STUB'
 #!/usr/bin/env bash
+type=""
+[ "$1" = "-d" ] && { type="$2"; shift 2; }
 dev="${2##/dev/}"
+case " $STUB_SMART_NOOPEN " in
+    *" $dev "*) echo "Smartctl open device: /dev/$dev failed: No such device"; exit 2 ;;
+esac
+case " $STUB_SMART_USB " in
+    *" $dev "*)
+        if [ -z "$type" ]; then
+            echo "/dev/$dev: Unknown USB bridge [0x0634:0x5606 (0x5606)]"
+            echo "Please specify device type with the -d option."
+            exit 1
+        fi
+        case " $STUB_SMART_USB_OK " in
+            *" $dev=$type "*) ;;
+            *) echo "Read Device Identity failed: scsi error unsupported field in scsi command"; exit 2 ;;
+        esac ;;
+esac
 case " $STUB_SMART_FAIL " in
     *" $dev "*) echo "SMART overall-health self-assessment test result: FAILED!"; echo "Drive failure expected in less than 24 hours. SAVE ALL DATA."; exit 8 ;;
 esac
@@ -240,6 +262,89 @@ status_field() { grep "^$1=" "$T/state/system-maintenance-status" | cut -d= -f2-
     [ ! -f "$NTFY_LOG" ]
     ! grep -q '/dev/sda' "$STUB_ARGV"
     [[ "$output" == *"smart: /dev/sda skipped"* ]]
+}
+
+@test "USB bridge no -d type answers: health unknown, not a failure, no ntfy" {
+    export STUB_SMART_USB="sdb"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ ! -f "$NTFY_LOG" ]
+    [ "$(status_field last_run_status)" = "ok" ]
+    [ "$(status_field last_run_failed)" = "" ]
+    [ "$(grep '/dev/sdb' "$STUB_ARGV")" = "$(printf '%s\n' \
+        '/usr/sbin/smartctl -H /dev/sdb' \
+        '/usr/sbin/smartctl -d sat -H /dev/sdb' \
+        '/usr/sbin/smartctl -d sntasmedia -H /dev/sdb' \
+        '/usr/sbin/smartctl -d sntjmicron -H /dev/sdb' \
+        '/usr/sbin/smartctl -d sntrealtek -H /dev/sdb')" ]
+    [[ "$output" == *"smart: /dev/sdb health unknown (unsupported USB bridge;"* ]]
+    [[ "$output" == *"smart: checked 3 disk(s), health unknown: /dev/sdb"* ]]
+    [[ "$output" == *"2 disk(s) PASSED, health unknown: /dev/sdb) ==="* ]]
+}
+
+@test "USB bridge: the first -d type that answers is used and named in the log" {
+    export STUB_SMART_USB="sdb"
+    export STUB_SMART_USB_OK="sdb=sntjmicron"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ ! -f "$NTFY_LOG" ]
+    grep -qx '/usr/sbin/smartctl -d sntjmicron -H /dev/sdb' "$STUB_ARGV"
+    ! grep -q 'sntrealtek' "$STUB_ARGV"
+    [[ "$output" == *"smart: /dev/sdb PASSED (-d sntjmicron)"* ]]
+    [[ "$output" == *'SYSTEM_MAINT_SMART_DEVTYPE="sdb=sntjmicron"'* ]]
+    [[ "$output" != *"health unknown"* ]]
+}
+
+@test "USB bridge: a real FAILED verdict through -d still fails and ntfys" {
+    export STUB_SMART_USB="sdb"
+    export STUB_SMART_USB_OK="sdb=sat"
+    export STUB_SMART_FAIL="sdb"
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    grep -q '^SMART: /dev/sdb not PASSED' "$NTFY_LOG"
+    grep -q 'smartctl -d sat -H /dev/sdb (exit 8)' "$NTFY_LOG"
+    ! grep -q 'sntasmedia' "$STUB_ARGV"
+    [ "$(status_field last_run_status)" = "failed" ]
+    [ "$(status_field last_run_failed)" = "smart:/dev/sdb" ]
+}
+
+@test "USB bridge with sudoers not yet widened: fails naming the install step" {
+    export STUB_SMART_USB="sdb"
+    export STUB_SUDO_REFUSE_DTYPE=1
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "smart:/dev/sdb" ]
+    grep -q '^SMART: /dev/sdb not PASSED.*sudo ops/host/install.sh' "$NTFY_LOG"
+    [[ "$output" != *"health unknown"* ]]
+}
+
+@test "SYSTEM_MAINT_SMART_DEVTYPE pins a disk's -d type: no plain query, no probing" {
+    export STUB_SMART_USB="sdb"
+    export STUB_SMART_USB_OK="sdb=sntrealtek"
+    export SYSTEM_MAINT_SMART_DEVTYPE="sdb=sntrealtek"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ "$(grep '/dev/sdb' "$STUB_ARGV")" = '/usr/sbin/smartctl -d sntrealtek -H /dev/sdb' ]
+    [[ "$output" == *"smart: /dev/sdb PASSED (-d sntrealtek)"* ]]
+    grep -qx '/usr/sbin/smartctl -H /dev/sda' "$STUB_ARGV"
+}
+
+@test "SYSTEM_MAINT_SMART_DEVTYPE type that gives no verdict fails rather than reading as unknown" {
+    export STUB_SMART_USB="sdb"
+    export SYSTEM_MAINT_SMART_DEVTYPE="sdb=sat"
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "smart:/dev/sdb" ]
+    grep -q 'smartctl -d sat -H /dev/sdb (exit 2)' "$NTFY_LOG"
+}
+
+@test "a disk smartctl cannot open (no USB bridge message) still fails, without probing" {
+    export STUB_SMART_NOOPEN="sda"
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "smart:/dev/sda" ]
+    ! grep -q -- '-d ' "$STUB_ARGV"
+    grep -q '^SMART: /dev/sda not PASSED' "$NTFY_LOG"
 }
 
 @test "missing NTFY_TOPIC fails before doing anything" {
