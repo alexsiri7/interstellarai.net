@@ -17,7 +17,9 @@
 #      (APT::Get::Always-Include-Phased-Updates is unset), as they should be.
 #   2. remove every disabled snap revision
 #   3. journalctl --vacuum-size=500M
-#   4. smartctl -H on every disk lsblk reports; ntfy anything not PASSED
+#   4. smartctl -H on every disk lsblk reports; ntfy anything not PASSED. A USB
+#      disk plain smartctl cannot reach through its bridge is retried with the
+#      -d types below; if none answers it is logged "health unknown", not failed.
 #   5. /var/run/reboot-required → one ntfy per running kernel (marker in STATE_DIR)
 #
 # Writes $STATE_DIR/system-maintenance-status (same shape as db-backup-status);
@@ -42,6 +44,13 @@ REBOOT_REQUIRED="${SYSTEM_MAINT_REBOOT_REQUIRED:-/var/run/reboot-required}"
 JOURNAL_MAX="${SYSTEM_MAINT_JOURNAL_MAX:-500M}"
 # Space-separated disk names (as lsblk prints them) to leave out of the SMART check.
 SMART_SKIP="${SYSTEM_MAINT_SMART_SKIP:-}"
+# Space-separated <disk>:<type> pairs (e.g. "sdd:sntasmedia"): query that disk
+# with `smartctl -d <type>` only, and fail the run when it does not answer.
+SMART_TYPE="${SYSTEM_MAINT_SMART_TYPE:-}"
+# Tried in order on a USB disk without a SYSTEM_MAINT_SMART_TYPE entry whose
+# bridge plain `smartctl -H` cannot talk through: SAT, then the NVMe-over-USB
+# bridges. Every type here (and any override) needs its own sudoers shape.
+SMART_USB_TYPES=(sat sntasmedia sntjmicron sntrealtek)
 
 # Full paths for every `sudo -n` call: they are what the sudoers entries match,
 # independent of cron's PATH. Read-only calls (snap list, apt list, lsblk,
@@ -145,25 +154,74 @@ log "journal: $(journalctl --disk-usage 2>/dev/null || echo 'usage unknown')"
 root journal "$JOURNALCTL" --vacuum-size="$JOURNAL_MAX"
 
 # --- 4. SMART -----------------------------------------------------------------
-checked=0
-for dev in $(lsblk -dno NAME,TYPE 2>/dev/null | awk '$2 == "disk" {print $1}'); do
+smart_type_for() {  # <dev>: its SYSTEM_MAINT_SMART_TYPE entry, or nothing
+    local pair
+    for pair in $SMART_TYPE; do
+        [ "${pair%%:*}" = "$1" ] && { printf '%s\n' "${pair#*:}"; return; }
+    done
+}
+
+# smart_query <dev> [type]: one `smartctl [-d type] -H` through sudo -n. Sets
+# SMART_OUT, SMART_RC and SMART_HEALTH: passed; failed (the disk gave a health
+# verdict other than PASSED); refused (by sudo); none (no verdict at all — the
+# device could not be queried this way).
+smart_query() {
+    local args=(-H "/dev/$1")
+    [ -n "${2:-}" ] && args=(-d "$2" "${args[@]}")
+    log "+ sudo -n $SMARTCTL ${args[*]}"
+    SMART_OUT=$(sudo -n "$SMARTCTL" "${args[@]}" 2>&1); SMART_RC=$?
+    if [ "$SMART_RC" -eq 0 ] && grep -q 'PASSED' <<<"$SMART_OUT"; then
+        SMART_HEALTH=passed; return
+    fi
+    printf '%s\n' "$SMART_OUT" | sed 's/^/    /'
+    if grep -q '^sudo: ' <<<"$SMART_OUT"; then
+        SMART_HEALTH=refused
+    elif [ $((SMART_RC & 8)) -ne 0 ] || grep -qE 'self-assessment test result:|SMART Health Status:' <<<"$SMART_OUT"; then
+        SMART_HEALTH=failed   # smartctl exit bit 3: "SMART status check returned DISK FAILING"
+    else
+        SMART_HEALTH=none
+    fi
+}
+
+checked=0; unknown=()
+while read -r dev tran; do
     case " $SMART_SKIP " in *" $dev "*) log "smart: /dev/$dev skipped (SYSTEM_MAINT_SMART_SKIP)"; continue ;; esac
     checked=$((checked + 1))
-    log "+ sudo -n $SMARTCTL -H /dev/$dev"
-    out=$(sudo -n "$SMARTCTL" -H "/dev/$dev" 2>&1); rc=$?
-    if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q 'PASSED'; then
-        log "smart: /dev/$dev PASSED"
-        continue
+    pinned=$(smart_type_for "$dev")
+    if [ -n "$pinned" ]; then
+        types=("$pinned")
+    elif [ "$tran" = usb ]; then
+        types=("" "${SMART_USB_TYPES[@]}")
+    else
+        types=("")
     fi
-    verdict=$(printf '%s\n' "$out" | grep -iE 'overall-health|result:|^sudo: |unable|failed' | head -n3 | tr '\n' ' ')
-    [ -n "$verdict" ] || verdict="(no health line in output; exit $rc)"
-    printf '%s\n' "$out" | sed 's/^/    /'
+    for type in "${types[@]}"; do
+        smart_query "$dev" "$type"
+        [ "$SMART_HEALTH" = none ] || break
+    done
+    query="smartctl${type:+ -d $type} -H /dev/$dev"
+    case "$SMART_HEALTH" in
+        passed)
+            log "smart: /dev/$dev PASSED${type:+ (-d $type)}"
+            continue ;;
+        refused)
+            fail "smart:/dev/$dev" "sudo -n refused '$query' — sudoers entry missing? re-run: sudo ops/host/install.sh"
+            continue ;;
+        none)
+            if [ "$tran" = usb ] && [ -z "$pinned" ]; then
+                log "smart: /dev/$dev health unknown (unsupported USB bridge: tried plain and -d ${SMART_USB_TYPES[*]}; pin a type with SYSTEM_MAINT_SMART_TYPE=$dev:<type>) — not a failure"
+                unknown+=("/dev/$dev")
+                continue
+            fi ;;
+    esac
+    verdict=$(printf '%s\n' "$SMART_OUT" | grep -iE 'overall-health|result:|unable|failed' | head -n3 | tr '\n' ' ')
+    [ -n "$verdict" ] || verdict="(no health line in output; exit $SMART_RC)"
     fail "smart:/dev/$dev" "not PASSED — $verdict"
     notify "SMART: /dev/$dev not PASSED on $(hostname)" \
-        "smartctl -H /dev/$dev (exit $rc): $verdict — see $LOG_DIR/system-maintenance.log" \
+        "$query (exit $SMART_RC): $verdict — see $LOG_DIR/system-maintenance.log" \
         urgent rotating_light,floppy_disk
-done
-log "smart: checked $checked disk(s)"
+done < <(lsblk -dno NAME,TYPE,TRAN 2>/dev/null | awk '$2 == "disk" {print $1, $3}')
+log "smart: checked $checked disk(s)${unknown[*]:+, health unknown: ${unknown[*]}}"
 
 # --- 5. reboot pending ----------------------------------------------------
 if [ -f "$REBOOT_REQUIRED" ]; then
@@ -206,4 +264,4 @@ if [ ${#FAILED[@]} -gt 0 ]; then
         high warning
     exit 1
 fi
-log "=== system maintenance done (apt $before -> $after upgradable${kept_back:+, KEPT BACK: $kept_back}, $removed snap rev(s) removed, $checked disk(s) PASSED) ==="
+log "=== system maintenance done (apt $before -> $after upgradable${kept_back:+, KEPT BACK: $kept_back}, $removed snap rev(s) removed, $((checked - ${#unknown[@]})) disk(s) PASSED${unknown[*]:+, health unknown: ${unknown[*]}}) ==="
