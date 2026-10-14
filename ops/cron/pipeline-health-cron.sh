@@ -109,6 +109,8 @@ source "$SCRIPT_DIR/lib/trust.sh"
 source "$SCRIPT_DIR/lib/heartbeat.sh"
 # shellcheck source=lib/build-drift.sh
 source "$SCRIPT_DIR/lib/build-drift.sh"
+# shellcheck source=lib/lachesis.sh
+source "$SCRIPT_DIR/lib/lachesis.sh"
 BASE_DIR="${BASE_DIR:-/mnt/ext-fast}"
 STATE_DIR="$HOME/.archon/pipeline-health-state"
 # Where the crontab sends every script's stdout/stderr (see ops/cron/crontab).
@@ -402,6 +404,7 @@ close_escalation() {
     log "$repo: closed escalation #$issue_num — $reason"
   else
     log "$repo: could not close escalation #$issue_num — retrying next tick"
+    return 1
   fi
 }
 
@@ -2316,16 +2319,25 @@ check_db_backup() {
 #   04:00) writes $STATE_DIR/system-maintenance-status in the db-backup-status
 #   shape. It ntfys its own failures; this catches the run that never happened
 #   (crontab not installed, script crashing before it logs) and the failure
-#   whose ntfy did not get through: alert once when the last run reports
-#   `failed`, or when no successful run landed within
-#   SYSTEM_MAINTENANCE_MAX_AGE_D days (default 8: one missed weekly run).
+#   whose ntfy did not get through, when the last run reports `failed` or no
+#   successful run landed within SYSTEM_MAINTENANCE_MAX_AGE_D days (default 8:
+#   one missed weekly run).
+#
+#   The marker holds the problem's tokens, one per line: each failed step, or
+#   never-ok, or stale. A token not in it ntfys, so a new failure alerts even
+#   while an older one persists, and an unchanged set stays quiet. Every tick
+#   with a problem, escalate_system_maintenance makes sure the episode has its
+#   manual-review issue and a Lachesis question for the current token set,
+#   which is what reaches the owner's morning briefing. A successful run
+#   removes the marker and closes the issue.
 # ----------------------------------------------------------------------------
 check_system_maintenance() {
   local status_file="$STATE_DIR/system-maintenance-status"
   local marker="$STATE_DIR/system-maintenance-alerted"
+  local issue_file="$STATE_DIR/system-maintenance-issue"
   local max_age_d="${SYSTEM_MAINTENANCE_MAX_AGE_D:-8}"
   local max_age=$(( max_age_d * 86400 ))
-  local now last_ok=0 last_run=0 last_status="" last_failed="" problem=""
+  local now last_ok=0 last_run=0 last_status="" last_failed="" problem="" tokens="" key
   now=$(date +%s)
 
   if [ -f "$status_file" ]; then
@@ -2339,10 +2351,13 @@ check_system_maintenance() {
 
   if [ "$last_status" = "failed" ]; then
     problem="last system-maintenance run failed${last_failed:+ ($last_failed)}, $(( (now - last_run) / 3600 ))h ago"
+    tokens=$(printf '%s\n' "${last_failed:-failed}" | tr ',' '\n' | sed '/^$/d' | sort -u)
   elif [ "$last_ok" -eq 0 ]; then
     problem="no successful system-maintenance run recorded ($status_file missing or never ok)"
+    tokens=never-ok
   elif [ $(( now - last_ok )) -gt "$max_age" ]; then
     problem="last successful system-maintenance run $(( (now - last_ok) / 86400 ))d ago (limit ${max_age_d}d)"
+    tokens=stale
   fi
 
   if [ -z "$problem" ]; then
@@ -2350,15 +2365,74 @@ check_system_maintenance() {
       rm -f "$marker"
       log "system-maintenance: recovered — successful run landed"
     fi
+    if [ -s "$issue_file" ] && close_escalation "$SYSTEM_MAINT_REPO" "$(cat "$issue_file")" \
+        "a successful system-maintenance run landed."; then
+      rm -f "$issue_file"
+    fi
     return 0
   fi
 
   log "system-maintenance: $problem"
-  [ -f "$marker" ] && return 0   # alert once per episode
-  notify "System maintenance stale" \
-    "$problem. Check $LOG_DIR/system-maintenance.log; run ops/cron/system-maintenance.sh by hand, or sudo ops/host/install.sh if sudo -n is refused." \
-    high wrench
-  touch "$marker"
+  if [ -n "$(comm -23 <(printf '%s\n' "$tokens") <(sort -u "$marker" 2>/dev/null))" ]; then
+    notify "System maintenance stale" \
+      "$problem. Check $LOG_DIR/system-maintenance.log; run ops/cron/system-maintenance.sh by hand, or sudo ops/host/install.sh if sudo -n is refused." \
+      high wrench
+  fi
+  printf '%s\n' "$tokens" > "$marker"
+
+  key="sysmaint-$(printf '%s\n' "$tokens" | paste -sd+ -)"
+  escalate_system_maintenance "$problem" "${key//[^A-Za-z0-9.+_-]/_}"
+}
+
+SYSTEM_MAINT_REPO="alexsiri7/interstellarai.net"
+
+# escalate_system_maintenance <problem> <key>: file the episode's manual-review
+# issue (its number kept in $STATE_DIR/system-maintenance-issue, so a steady
+# problem costs no gh call) and ask the owner about it through Lachesis, once
+# per key. Whatever fails is retried on the next tick.
+escalate_system_maintenance() {
+  local problem="$1" key="$2" issue_file="$STATE_DIR/system-maintenance-issue"
+  local issue_num body host
+  host=$(hostname)
+  issue_num=$(cat "$issue_file" 2>/dev/null)
+  if [ -z "$issue_num" ]; then
+    gh label create --repo "$SYSTEM_MAINT_REPO" manual-review \
+      --color B60205 \
+      --description "Factory escalation — needs human attention" \
+      --force >/dev/null 2>&1 || true
+    body=$(cat <<EOF
+## Factory escalation — manual review required
+
+**Kind**: system-maintenance
+**Host**: $host
+**Problem**: $problem
+**Log**: \`$LOG_DIR/system-maintenance.log\`
+
+Run \`ops/cron/system-maintenance.sh\` by hand once the cause is fixed, or \`sudo ops/host/install.sh\` if the log shows \`sudo -n refused\`.
+
+Auto-filed by \`pipeline-health-cron.sh\` (\`check_system_maintenance\`). The ntfy alert has also been sent. This issue is closed automatically when a successful run lands.
+EOF
+)
+    issue_num=$(gh issue create --repo "$SYSTEM_MAINT_REPO" \
+      --title "host maintenance failing on $host" \
+      --label manual-review \
+      --body "$body" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')
+    if [ -z "$issue_num" ]; then
+      log "system-maintenance: could not file the manual-review issue — retrying next tick"
+      return 0
+    fi
+    printf '%s\n' "$issue_num" > "$issue_file"
+    log "system-maintenance: filed manual-review issue $SYSTEM_MAINT_REPO#$issue_num"
+  fi
+
+  if [ -z "$(lachesis_token)" ]; then
+    log "system-maintenance: no LACHESIS_FACTORY_TOKEN — morning-briefing question not recorded"
+    return 0
+  fi
+  lachesis_ask_once "${SYSTEM_MAINT_REPO#*/}" "$issue_num" "$key" \
+    "Weekly host maintenance on $host is failing: $problem. Look at $LOG_DIR/system-maintenance.log, fix it, then answer this question; the escalation closes itself once a run succeeds." \
+    "Escalated by pipeline-health check_system_maintenance (#176)." ||
+    log "system-maintenance: could not record the question in Lachesis — retrying next tick"
 }
 
 # ----------------------------------------------------------------------------

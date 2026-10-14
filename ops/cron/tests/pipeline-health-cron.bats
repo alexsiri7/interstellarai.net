@@ -529,6 +529,16 @@ ESCALATIONS_FIXTURE='[
     [ "$output" = "$(printf '20\tmain-ci\t\n21\tmain-ci\t\n22\tpr-ci\t7\n23\tstuck-pr\t8\n24\tpr-ci\t9')" ]
 }
 
+@test "open_escalations reads kind system-maintenance, which no PR or main-CI close loop acts on" {
+    load_fn open_escalations
+    ISSUE_LIST_FIXTURE='[{"number":30,"title":"host maintenance failing on box","body":"**Kind**: system-maintenance\n**Problem**: apt failed\n\nAuto-filed by `pipeline-health-cron.sh` (`check_system_maintenance`).","labels":[{"name":"manual-review"}]}]'
+    stub_gh_issues
+
+    run open_escalations "alexsiri7/interstellarai.net"
+
+    [ "$output" = "$(printf '30\tsystem-maintenance\t')" ]
+}
+
 @test "close_resolved_pr_escalations closes escalations whose PR merged or closed, and no others" {
     load_fn open_escalations
     load_fn close_escalation
