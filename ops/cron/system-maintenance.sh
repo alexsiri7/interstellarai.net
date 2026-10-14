@@ -17,7 +17,9 @@
 #      (APT::Get::Always-Include-Phased-Updates is unset), as they should be.
 #   2. remove every disabled snap revision
 #   3. journalctl --vacuum-size=500M
-#   4. smartctl -H on every disk lsblk reports; ntfy anything not PASSED
+#   4. smartctl -H on every disk lsblk reports; ntfy anything not PASSED. A disk
+#      plain -H cannot query is retried with the USB -d types and, if none
+#      works, logged as "health unknown" without failing the run
 #   5. /var/run/reboot-required → one ntfy per running kernel (marker in STATE_DIR)
 #
 # Writes $STATE_DIR/system-maintenance-status (same shape as db-backup-status);
@@ -42,6 +44,13 @@ REBOOT_REQUIRED="${SYSTEM_MAINT_REBOOT_REQUIRED:-/var/run/reboot-required}"
 JOURNAL_MAX="${SYSTEM_MAINT_JOURNAL_MAX:-500M}"
 # Space-separated disk names (as lsblk prints them) to leave out of the SMART check.
 SMART_SKIP="${SYSTEM_MAINT_SMART_SKIP:-}"
+# The -d types tried, in order, on a disk plain `smartctl -H` cannot query: SAT
+# (most USB-SATA bridges), then the NVMe-over-USB bridges. Each one is a shape
+# in ops/host/sudoers-archon-cron; keep the two lists equal.
+SMART_USB_TYPES="sat sntasmedia sntjmicron sntrealtek"
+# Space-separated <disk>=<type> pins (e.g. "sdd=sntrealtek"): that disk is
+# queried only with that type (one of SMART_USB_TYPES), skipping the plain probe.
+SMART_DEVTYPE="${SYSTEM_MAINT_SMART_DEVTYPE:-}"
 
 # Full paths for every `sudo -n` call: they are what the sudoers entries match,
 # independent of cron's PATH. Read-only calls (snap list, apt list, lsblk,
@@ -103,6 +112,72 @@ apt_sim_section() {
     printf '%s\n' "$APT_SIM" | awk -v h="$1" '$0 ~ h {on=1; next} on && !/^ / {exit} on {print}' | xargs
 }
 
+# smart_query <dev> [type]: one `smartctl [-d type] -H /dev/<dev>` through
+# sudo -n, output in $smart_out, exit status in $smart_rc. Returns 0 when
+# smartctl reached a health verdict (good or bad), 1 when it could not query
+# the disk at all (an unknown USB bridge, the wrong -d type, a refused sudo).
+# Exit bit 3 is smartctl's "DISK FAILING".
+smart_out=""; smart_rc=0; smart_cmd=""; smart_type=""
+smart_query() {
+    local args=(-H "/dev/$1")
+    [ -n "${2:-}" ] && args=(-d "$2" "${args[@]}")
+    smart_type="${2:-}"
+    smart_cmd="smartctl ${args[*]}"
+    log "+ sudo -n $SMARTCTL ${args[*]}"
+    smart_out=$(sudo -n "$SMARTCTL" "${args[@]}" 2>&1); smart_rc=$?
+    printf '%s\n' "$smart_out" | grep -qiE 'overall-health|SMART Health Status' || [ $((smart_rc & 8)) -ne 0 ]
+}
+
+# smart_judge <dev>: act on the verdict smart_query just reached.
+smart_judge() {
+    if [ "$smart_rc" -eq 0 ] && printf '%s\n' "$smart_out" | grep -q 'PASSED'; then
+        log "smart: /dev/$1 PASSED${smart_type:+ (-d $smart_type)}"
+        passed=$((passed + 1))
+        return
+    fi
+    local verdict
+    verdict=$(printf '%s\n' "$smart_out" | grep -iE 'overall-health|result:|unable|failed' | head -n3 | tr '\n' ' ')
+    [ -n "$verdict" ] || verdict="(no health line in output; exit $smart_rc)"
+    printf '%s\n' "$smart_out" | sed 's/^/    /'
+    fail "smart:/dev/$1" "not PASSED — $verdict"
+    notify "SMART: /dev/$1 not PASSED on $(hostname)" \
+        "$smart_cmd (exit $smart_rc): $verdict — see $LOG_DIR/system-maintenance.log" \
+        urgent rotating_light,floppy_disk
+}
+
+# smart_check <dev>: plain -H first; a disk it cannot query (typically behind a
+# USB bridge smartctl does not recognise) is retried with each USB -d type, or
+# only with its SYSTEM_MAINT_SMART_DEVTYPE type. A disk no type can query is
+# "health unknown" — logged, not a failure: the probe failed, not the disk.
+smart_check() {
+    local dev="$1" types="" t pin
+    for pin in $SMART_DEVTYPE; do
+        [ "${pin%%=*}" = "$dev" ] && types="${pin#*=}"
+    done
+    if [ -z "$types" ]; then
+        smart_query "$dev" && { smart_judge "$dev"; return; }
+        smart_refused "$dev" && return
+        types="$SMART_USB_TYPES"
+    elif [[ " $SMART_USB_TYPES " != *" $types "* ]]; then
+        fail "smart:/dev/$dev" "SYSTEM_MAINT_SMART_DEVTYPE type '$types' is not one of the sudoers shapes ($SMART_USB_TYPES)"
+        return
+    fi
+    for t in $types; do
+        smart_query "$dev" "$t" && { smart_judge "$dev"; return; }
+        smart_refused "$dev" && return
+    done
+    printf '%s\n' "$smart_out" | sed 's/^/    /'
+    log "smart: /dev/$dev health unknown (unsupported USB bridge: no -d type in '$types' could query it)"
+    unknown+=("$dev")
+}
+
+# smart_refused <dev>: a sudo refusal is a sudoers problem, never "unknown".
+smart_refused() {
+    printf '%s\n' "$smart_out" | grep -q '^sudo: ' || return 1
+    printf '%s\n' "$smart_out" | sed 's/^/    /'
+    fail "smart:/dev/$1" "sudo -n refused '$smart_cmd' (exit $smart_rc) — sudoers entry missing? re-run: sudo ops/host/install.sh"
+}
+
 mkdir -p "$STATE_DIR"
 log "=== system maintenance start ==="
 
@@ -145,25 +220,13 @@ log "journal: $(journalctl --disk-usage 2>/dev/null || echo 'usage unknown')"
 root journal "$JOURNALCTL" --vacuum-size="$JOURNAL_MAX"
 
 # --- 4. SMART -----------------------------------------------------------------
-checked=0
+checked=0; passed=0; unknown=()
 for dev in $(lsblk -dno NAME,TYPE 2>/dev/null | awk '$2 == "disk" {print $1}'); do
     case " $SMART_SKIP " in *" $dev "*) log "smart: /dev/$dev skipped (SYSTEM_MAINT_SMART_SKIP)"; continue ;; esac
     checked=$((checked + 1))
-    log "+ sudo -n $SMARTCTL -H /dev/$dev"
-    out=$(sudo -n "$SMARTCTL" -H "/dev/$dev" 2>&1); rc=$?
-    if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q 'PASSED'; then
-        log "smart: /dev/$dev PASSED"
-        continue
-    fi
-    verdict=$(printf '%s\n' "$out" | grep -iE 'overall-health|result:|^sudo: |unable|failed' | head -n3 | tr '\n' ' ')
-    [ -n "$verdict" ] || verdict="(no health line in output; exit $rc)"
-    printf '%s\n' "$out" | sed 's/^/    /'
-    fail "smart:/dev/$dev" "not PASSED — $verdict"
-    notify "SMART: /dev/$dev not PASSED on $(hostname)" \
-        "smartctl -H /dev/$dev (exit $rc): $verdict — see $LOG_DIR/system-maintenance.log" \
-        urgent rotating_light,floppy_disk
+    smart_check "$dev"
 done
-log "smart: checked $checked disk(s)"
+log "smart: checked $checked disk(s), $passed PASSED${unknown[*]:+, health unknown: ${unknown[*]}}"
 
 # --- 5. reboot pending ----------------------------------------------------
 if [ -f "$REBOOT_REQUIRED" ]; then
@@ -206,4 +269,4 @@ if [ ${#FAILED[@]} -gt 0 ]; then
         high warning
     exit 1
 fi
-log "=== system maintenance done (apt $before -> $after upgradable${kept_back:+, KEPT BACK: $kept_back}, $removed snap rev(s) removed, $checked disk(s) PASSED) ==="
+log "=== system maintenance done (apt $before -> $after upgradable${kept_back:+, KEPT BACK: $kept_back}, $removed snap rev(s) removed, $passed of $checked disk(s) PASSED${unknown[*]:+, health unknown: ${unknown[*]}}) ==="
