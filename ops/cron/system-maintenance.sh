@@ -17,7 +17,10 @@
 #      (APT::Get::Always-Include-Phased-Updates is unset), as they should be.
 #   2. remove every disabled snap revision
 #   3. journalctl --vacuum-size=500M
-#   4. smartctl -H on every disk lsblk reports; ntfy anything not PASSED
+#   4. smartctl -H on every disk lsblk reports; ntfy anything not PASSED. A disk
+#      behind a USB bridge smartctl does not recognise is retried with -d sat and
+#      the snt* NVMe-over-USB types; when none answers, its health is logged as
+#      unknown, not as a failure.
 #   5. /var/run/reboot-required → one ntfy per running kernel (marker in STATE_DIR)
 #
 # Writes $STATE_DIR/system-maintenance-status (same shape as db-backup-status);
@@ -42,6 +45,13 @@ REBOOT_REQUIRED="${SYSTEM_MAINT_REBOOT_REQUIRED:-/var/run/reboot-required}"
 JOURNAL_MAX="${SYSTEM_MAINT_JOURNAL_MAX:-500M}"
 # Space-separated disk names (as lsblk prints them) to leave out of the SMART check.
 SMART_SKIP="${SYSTEM_MAINT_SMART_SKIP:-}"
+# Space-separated <disk>=<type> pairs: query that disk only as `smartctl -d <type> -H`.
+SMART_TYPE="${SYSTEM_MAINT_SMART_TYPE:-}"
+# Tried in order on a disk whose USB bridge smartctl does not recognise: SAT
+# (most USB-SATA bridges), then the NVMe-over-USB bridges. Each one is a
+# separate shape in ops/host/sudoers-archon-cron; a type not listed there is
+# refused by sudo -n.
+SMART_USB_TYPES="sat sntjmicron sntasmedia sntrealtek"
 
 # Full paths for every `sudo -n` call: they are what the sudoers entries match,
 # independent of cron's PATH. Read-only calls (snap list, apt list, lsblk,
@@ -145,25 +155,65 @@ log "journal: $(journalctl --disk-usage 2>/dev/null || echo 'usage unknown')"
 root journal "$JOURNALCTL" --vacuum-size="$JOURNAL_MAX"
 
 # --- 4. SMART -----------------------------------------------------------------
-checked=0
-for dev in $(lsblk -dno NAME,TYPE 2>/dev/null | awk '$2 == "disk" {print $1}'); do
-    case " $SMART_SKIP " in *" $dev "*) log "smart: /dev/$dev skipped (SYSTEM_MAINT_SMART_SKIP)"; continue ;; esac
-    checked=$((checked + 1))
-    log "+ sudo -n $SMARTCTL -H /dev/$dev"
-    out=$(sudo -n "$SMARTCTL" -H "/dev/$dev" 2>&1); rc=$?
-    if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q 'PASSED'; then
-        log "smart: /dev/$dev PASSED"
-        continue
-    fi
+# smart_probe <dev> [-d <type>]: one `smartctl [-d <type>] -H` through sudo -n,
+# output streamed into the log; sets $out and $rc.
+smart_probe() {
+    local dev="$1"; shift
+    log "+ sudo -n $SMARTCTL $* -H /dev/$dev"
+    out=$(sudo -n "$SMARTCTL" "$@" -H "/dev/$dev" 2>&1); rc=$?
+}
+smart_passed() { [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q 'PASSED'; }
+smart_not_passed() {  # <dev> <cmd shown in the ntfy>
+    local verdict
     verdict=$(printf '%s\n' "$out" | grep -iE 'overall-health|result:|^sudo: |unable|failed' | head -n3 | tr '\n' ' ')
     [ -n "$verdict" ] || verdict="(no health line in output; exit $rc)"
     printf '%s\n' "$out" | sed 's/^/    /'
-    fail "smart:/dev/$dev" "not PASSED — $verdict"
-    notify "SMART: /dev/$dev not PASSED on $(hostname)" \
-        "smartctl -H /dev/$dev (exit $rc): $verdict — see $LOG_DIR/system-maintenance.log" \
+    fail "smart:/dev/$1" "not PASSED — $verdict"
+    notify "SMART: /dev/$1 not PASSED on $(hostname)" \
+        "$2 (exit $rc): $verdict — see $LOG_DIR/system-maintenance.log" \
         urgent rotating_light,floppy_disk
+}
+
+passed=0; unknown=""
+for dev in $(lsblk -dno NAME,TYPE 2>/dev/null | awk '$2 == "disk" {print $1}'); do
+    case " $SMART_SKIP " in *" $dev "*) log "smart: /dev/$dev skipped (SYSTEM_MAINT_SMART_SKIP)"; continue ;; esac
+    types=$(tr ' ' '\n' <<< "$SMART_TYPE" | sed -n "s/^$dev=//p" | head -n1)
+    if [ -z "$types" ]; then
+        smart_probe "$dev"
+        if smart_passed; then
+            log "smart: /dev/$dev PASSED"; passed=$((passed + 1)); continue
+        fi
+        # smartctl cannot tell how to talk through this USB bridge: retry with
+        # the device types it can be told, instead of calling the disk failed.
+        if ! printf '%s\n' "$out" | grep -qiE 'Unknown USB bridge|specify device type'; then
+            smart_not_passed "$dev" "smartctl -H /dev/$dev"; continue
+        fi
+        printf '%s\n' "$out" | sed 's/^/    /'
+        types="$SMART_USB_TYPES"
+    fi
+    answered=0
+    for type in $types; do
+        smart_probe "$dev" -d "$type"
+        if smart_passed; then
+            log "smart: /dev/$dev PASSED (-d $type)"; passed=$((passed + 1)); answered=1; break
+        fi
+        if printf '%s\n' "$out" | grep -q '^sudo: '; then
+            printf '%s\n' "$out" | sed 's/^/    /'
+            fail "smart:/dev/$dev" "sudo -n refused 'smartctl -d $type -H /dev/$dev' — sudoers entry missing? re-run: sudo ops/host/install.sh"
+            answered=1; break
+        fi
+        # No health line means this type does not fit the bridge: try the next one.
+        if printf '%s\n' "$out" | grep -qiE 'overall-health|SMART Health Status'; then
+            smart_not_passed "$dev" "smartctl -d $type -H /dev/$dev"; answered=1; break
+        fi
+        printf '%s\n' "$out" | sed 's/^/    /'
+    done
+    if [ "$answered" -eq 0 ]; then
+        log "smart: /dev/$dev health unknown (unsupported USB bridge; tried: $types) — pin a type with SYSTEM_MAINT_SMART_TYPE=\"$dev=<type>\" or skip it with SYSTEM_MAINT_SMART_SKIP"
+        unknown="${unknown:+$unknown }$dev"
+    fi
 done
-log "smart: checked $checked disk(s)"
+log "smart: $passed disk(s) PASSED${unknown:+, health unknown: $unknown}"
 
 # --- 5. reboot pending ----------------------------------------------------
 if [ -f "$REBOOT_REQUIRED" ]; then
@@ -206,4 +256,4 @@ if [ ${#FAILED[@]} -gt 0 ]; then
         high warning
     exit 1
 fi
-log "=== system maintenance done (apt $before -> $after upgradable${kept_back:+, KEPT BACK: $kept_back}, $removed snap rev(s) removed, $checked disk(s) PASSED) ==="
+log "=== system maintenance done (apt $before -> $after upgradable${kept_back:+, KEPT BACK: $kept_back}, $removed snap rev(s) removed, $passed disk(s) PASSED${unknown:+, SMART health unknown: $unknown}) ==="

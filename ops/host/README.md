@@ -80,12 +80,25 @@ logged as failed, the run ntfys and exits 1. The exact grants:
 /usr/bin/snap remove --revision=* *
 /usr/bin/snap set system refresh.retain=2
 /usr/sbin/smartctl -H /dev/*
+/usr/sbin/smartctl -d sat -H /dev/*
+/usr/sbin/smartctl -d sntjmicron -H /dev/*
+/usr/sbin/smartctl -d sntasmedia -H /dev/*
+/usr/sbin/smartctl -d sntrealtek -H /dev/*
 /usr/sbin/smartctl -A /dev/*
 ```
 
 (sudoers `*` matches spaces too, so these are the narrowest useful shapes, not
 exact-argument matches. `-A` is granted for by-hand attribute dumps under the
-same rules; the job itself only runs `-H`.)
+same rules; the job itself only runs `-H`. The `-d <type>` shapes are the
+device types it retries on a disk behind a USB bridge smartctl does not
+recognise; see below.)
+
+**The `-d <type>` grants were added 2026-10-14** (#176): the external Crucial
+X9 behind a `0x0634:0x5606` USB bridge answers a bare `smartctl -H` with
+`Unknown USB bridge`, which every Sunday run since 2026-10-04 reported as a
+SMART failure. A host whose `/etc/sudoers.d/archon-cron` predates them has
+those retries refused (`sudo -n refused 'smartctl -d sat ...'`, step
+`smart:/dev/sdd` failed, ntfy) until `sudo ops/host/install.sh` is re-run.
 
 **Why `full-upgrade`, not `upgrade`:** `apt-get upgrade` never installs a new
 package or removes an old one, so any update whose dependencies changed is
@@ -121,7 +134,13 @@ lands in the status file as `last_run_kept_back=a,b` (empty when none) — it
 does not fail the run. Every disabled snap revision removed; journal vacuumed
 to 500M; `smartctl -H` on each `disk` from `lsblk` (loop devices excluded;
 `SYSTEM_MAINT_SMART_SKIP="sda ..."` leaves a disk out) with an urgent ntfy for
-anything not `PASSED`; and while `/var/run/reboot-required` exists, one ntfy
+anything not `PASSED`. A disk smartctl answers with `Unknown USB bridge` /
+`specify device type` is retried as `-d sat`, then `-d sntjmicron`,
+`sntasmedia`, `sntrealtek` (NVMe-over-USB); the first answer with a health line
+decides, and when none has one the disk is logged as `health unknown
+(unsupported USB bridge)`, which is neither a failure nor an ntfy.
+`SYSTEM_MAINT_SMART_TYPE="sdd=sntjmicron ..."` pins a disk to one of those
+types (any other is refused by sudo); and while `/var/run/reboot-required` exists, one ntfy
 per running kernel ("reboot pending; safe-reboot reboots in the next idle 02:30-06:30 window"), remembered in
 `~/.archon/pipeline-health-state/system-maintenance-reboot-notified` and
 cleared once the file goes away. The run summary lands in
