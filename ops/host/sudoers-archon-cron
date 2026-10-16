@@ -9,6 +9,8 @@
 # below are the narrowest shapes the job needs, not exact-argument matches.
 # `:` is a sudoers separator, so the Dpkg option is written with `\:` escapes;
 # it still matches the literal `Dpkg::Options::=--force-confold` argument.
+# The `smartctl -d <type>` shapes are system-maintenance.sh's SMART_USB_TYPES,
+# for disks behind a USB bridge smartctl can't identify; keep the two in step.
 
 Cmnd_Alias ARCHON_MAINT = \
     /usr/bin/apt-get update, \
@@ -18,6 +20,10 @@ Cmnd_Alias ARCHON_MAINT = \
     /usr/bin/snap remove --revision=* *, \
     /usr/bin/snap set system refresh.retain=2, \
     /usr/sbin/smartctl -H /dev/*, \
+    /usr/sbin/smartctl -d sat -H /dev/*, \
+    /usr/sbin/smartctl -d sntasmedia -H /dev/*, \
+    /usr/sbin/smartctl -d sntjmicron -H /dev/*, \
+    /usr/sbin/smartctl -d sntrealtek -H /dev/*, \
     /usr/sbin/smartctl -A /dev/*
 
 # apt-get runs unattended: keep debconf from ever trying to ask.
