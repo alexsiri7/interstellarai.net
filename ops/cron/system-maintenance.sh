@@ -17,7 +17,9 @@
 #      (APT::Get::Always-Include-Phased-Updates is unset), as they should be.
 #   2. remove every disabled snap revision
 #   3. journalctl --vacuum-size=500M
-#   4. smartctl -H on every disk lsblk reports; ntfy anything not PASSED
+#   4. smartctl -H on every disk lsblk reports; ntfy anything not PASSED. A disk
+#      behind a USB bridge smartctl can't identify is probed with -d sat / snt*;
+#      if none answers it is logged as health unknown, not failed.
 #   5. /var/run/reboot-required → one ntfy per running kernel (marker in STATE_DIR)
 #
 # Writes $STATE_DIR/system-maintenance-status (same shape as db-backup-status);
@@ -42,6 +44,13 @@ REBOOT_REQUIRED="${SYSTEM_MAINT_REBOOT_REQUIRED:-/var/run/reboot-required}"
 JOURNAL_MAX="${SYSTEM_MAINT_JOURNAL_MAX:-500M}"
 # Space-separated disk names (as lsblk prints them) to leave out of the SMART check.
 SMART_SKIP="${SYSTEM_MAINT_SMART_SKIP:-}"
+# Space-separated dev=type pairs (e.g. "sdd=sat"): query that disk with
+# `smartctl -d <type>` instead of letting smartctl pick a type.
+SMART_TYPE="${SYSTEM_MAINT_SMART_TYPE:-}"
+# Tried in order on a disk smartctl reports as "Unknown USB bridge" (and that
+# has no SYSTEM_MAINT_SMART_TYPE entry): SATA behind a SAT bridge, then the
+# NVMe-over-USB bridges smartctl knows. None answering → health unknown, not failed.
+SMART_PROBE_TYPES="sat sntasmedia sntjmicron sntrealtek"
 
 # Full paths for every `sudo -n` call: they are what the sudoers entries match,
 # independent of cron's PATH. Read-only calls (snap list, apt list, lsblk,
@@ -145,12 +154,38 @@ log "journal: $(journalctl --disk-usage 2>/dev/null || echo 'usage unknown')"
 root journal "$JOURNALCTL" --vacuum-size="$JOURNAL_MAX"
 
 # --- 4. SMART -----------------------------------------------------------------
+# smart_health <dev> [type]: `smartctl [-d type] -H /dev/<dev>` through sudo -n;
+# sets $out (stdout+stderr) and $rc.
+smart_health() {
+    local dev="$1" type="${2:-}"
+    local args=(-H "/dev/$dev")
+    [ -n "$type" ] && args=(-d "$type" "${args[@]}")
+    log "+ sudo -n $SMARTCTL ${args[*]}"
+    out=$(sudo -n "$SMARTCTL" "${args[@]}" 2>&1); rc=$?
+}
+has_verdict() { printf '%s\n' "$out" | grep -q 'self-assessment test result:'; }
+sudo_refused() { printf '%s\n' "$out" | grep -q '^sudo: '; }
+
 checked=0
 for dev in $(lsblk -dno NAME,TYPE 2>/dev/null | awk '$2 == "disk" {print $1}'); do
     case " $SMART_SKIP " in *" $dev "*) log "smart: /dev/$dev skipped (SYSTEM_MAINT_SMART_SKIP)"; continue ;; esac
     checked=$((checked + 1))
-    log "+ sudo -n $SMARTCTL -H /dev/$dev"
-    out=$(sudo -n "$SMARTCTL" -H "/dev/$dev" 2>&1); rc=$?
+    dtype=""
+    for pair in $SMART_TYPE; do case "$pair" in "$dev="*) dtype="${pair#*=}" ;; esac; done
+    smart_health "$dev" "$dtype"
+    if [ -z "$dtype" ] && printf '%s\n' "$out" | grep -qi 'unknown usb bridge'; then
+        bridge_out="$out"
+        for t in $SMART_PROBE_TYPES; do
+            smart_health "$dev" "$t"
+            if has_verdict || sudo_refused; then dtype="$t"; break; fi
+        done
+        if [ -z "$dtype" ]; then
+            printf '%s\n' "$bridge_out" | sed 's/^/    /'
+            log "smart: /dev/$dev health unknown (unsupported USB bridge; no answer to -d ${SMART_PROBE_TYPES// /, -d })"
+            continue
+        fi
+        has_verdict && log "smart: /dev/$dev answers to -d $dtype (SYSTEM_MAINT_SMART_TYPE=\"$dev=$dtype\" skips the probe)"
+    fi
     if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q 'PASSED'; then
         log "smart: /dev/$dev PASSED"
         continue
@@ -158,9 +193,10 @@ for dev in $(lsblk -dno NAME,TYPE 2>/dev/null | awk '$2 == "disk" {print $1}'); 
     verdict=$(printf '%s\n' "$out" | grep -iE 'overall-health|result:|^sudo: |unable|failed' | head -n3 | tr '\n' ' ')
     [ -n "$verdict" ] || verdict="(no health line in output; exit $rc)"
     printf '%s\n' "$out" | sed 's/^/    /'
+    sudo_refused && verdict="$verdict— sudoers entry missing? re-run: sudo ops/host/install.sh"
     fail "smart:/dev/$dev" "not PASSED — $verdict"
     notify "SMART: /dev/$dev not PASSED on $(hostname)" \
-        "smartctl -H /dev/$dev (exit $rc): $verdict — see $LOG_DIR/system-maintenance.log" \
+        "smartctl ${dtype:+-d $dtype }-H /dev/$dev (exit $rc): $verdict — see $LOG_DIR/system-maintenance.log" \
         urgent rotating_light,floppy_disk
 done
 log "smart: checked $checked disk(s)"

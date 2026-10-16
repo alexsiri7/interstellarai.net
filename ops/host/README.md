@@ -39,7 +39,7 @@ later step with its own script and cutover: [`archon-user/README.md`](archon-use
 
 | Step | Files | Effect |
 |---|---|---|
-| 1. sudoers | `/etc/sudoers.d/archon-cron` (0440) from [`sudoers-archon-cron`](sudoers-archon-cron) | `asiri` may run, NOPASSWD, exactly the eight command shapes the weekly job uses (below). Validated with `visudo -c -f` before it is copied, with `visudo -c` on the whole existing sudoers set before it is installed (a pre-existing problem fails the step without installing, see Troubleshooting), and with `visudo -c` again after; rolled back if that last one fails. No `ALL`. |
+| 1. sudoers | `/etc/sudoers.d/archon-cron` (0440) from [`sudoers-archon-cron`](sudoers-archon-cron) | `asiri` may run, NOPASSWD, exactly the nine command shapes the weekly job uses (below). Validated with `visudo -c -f` before it is copied, with `visudo -c` on the whole existing sudoers set before it is installed (a pre-existing problem fails the step without installing, see Troubleshooting), and with `visudo -c` again after; rolled back if that last one fails. No `ALL`. |
 | 2. journald | `/etc/systemd/journald.conf.d/50-cap.conf` | `SystemMaxUse=500M` (was uncapped, 2.5G), then `systemctl restart systemd-journald`. |
 | 3. unattended-upgrades | `/etc/apt/apt.conf.d/52-archon-updates` | Adds `${distro_id}:${distro_codename}-updates` to `Allowed-Origins` (the stock `50unattended-upgrades` only takes `-security`, which is why 95 packages were sitting upgradable), `Remove-Unused-Dependencies "true"`, and `Automatic-Reboot "false"`: until 2026-09-27 this was `"true"` at 05:45, which rebooted on whatever day a reboot became pending, through live Claude sessions and jobs (2026-09-26). The safe-reboot gate (step 8) reboots instead. apt.conf lists merge across files, so `50unattended-upgrades` is left alone. Asserts with `apt-config dump` that `-updates` is allowed and `Automatic-Reboot` is off, and that `APT::Periodic::Unattended-Upgrade` is `1`. |
 | 4. snap | — | `snap set system refresh.retain=2` and `snap remove --revision=N name` for every revision `snap list --all` marks `disabled` (20 on 2026-09-19). |
@@ -80,12 +80,14 @@ logged as failed, the run ntfys and exits 1. The exact grants:
 /usr/bin/snap remove --revision=* *
 /usr/bin/snap set system refresh.retain=2
 /usr/sbin/smartctl -H /dev/*
+/usr/sbin/smartctl -d * -H /dev/*
 /usr/sbin/smartctl -A /dev/*
 ```
 
 (sudoers `*` matches spaces too, so these are the narrowest useful shapes, not
 exact-argument matches. `-A` is granted for by-hand attribute dumps under the
-same rules; the job itself only runs `-H`.)
+same rules; the job itself only runs `-H`, with `-d <type>` for a disk behind a
+USB bridge smartctl can't identify.)
 
 **Why `full-upgrade`, not `upgrade`:** `apt-get upgrade` never installs a new
 package or removes an old one, so any update whose dependencies changed is
@@ -121,7 +123,15 @@ lands in the status file as `last_run_kept_back=a,b` (empty when none) — it
 does not fail the run. Every disabled snap revision removed; journal vacuumed
 to 500M; `smartctl -H` on each `disk` from `lsblk` (loop devices excluded;
 `SYSTEM_MAINT_SMART_SKIP="sda ..."` leaves a disk out) with an urgent ntfy for
-anything not `PASSED`; and while `/var/run/reboot-required` exists, one ntfy
+anything not `PASSED`. A disk smartctl reports as `Unknown USB bridge` (the
+Crucial X9 on `/mnt/nas`, bridge `0634:5606`) is retried with `-d sat`, then
+`-d sntasmedia`, `-d sntjmicron`, `-d sntrealtek`; the first that returns a
+health verdict is used (and logged), and if none does the disk is logged as
+`health unknown (unsupported USB bridge)` and does not fail the run.
+`SYSTEM_MAINT_SMART_TYPE="sdd=sat ..."` pins a disk's type and skips the probe.
+A host whose sudoers predates the `-d * -H` shape is refused by `sudo -n` on the
+probe (step `smart:/dev/sdd` failed, ntfy) until `sudo ops/host/install.sh` is
+re-run. And while `/var/run/reboot-required` exists, one ntfy
 per running kernel ("reboot pending; safe-reboot reboots in the next idle 02:30-06:30 window"), remembered in
 `~/.archon/pipeline-health-state/system-maintenance-reboot-notified` and
 cleared once the file goes away. The run summary lands in
