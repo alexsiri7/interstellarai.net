@@ -50,6 +50,10 @@
 #      account + one `human-needed` tracking issue, closed on recovery
 #  9f. Work-loop crons silent: issue-pickup or pr-maintenance missed two
 #      expected ticks → ntfy once per episode (lib/heartbeat.sh)
+#  9g. Factory GitHub identity cannot open PRs (graphql.limit 0 or nearly
+#      used up, REST core limit at the unauthenticated 60, public profile 404 =
+#      flagged account; lib/gh-factory.sh, probed as the archon user in archon
+#      mode) → ntfy once per episode; issue-pickup holds launches meanwhile
 #
 # Crontab (logs live under ~/.local/state/archon-cron/logs, which survives a
 # reboot; /tmp does not):
@@ -109,6 +113,8 @@ source "$SCRIPT_DIR/lib/trust.sh"
 source "$SCRIPT_DIR/lib/heartbeat.sh"
 # shellcheck source=lib/build-drift.sh
 source "$SCRIPT_DIR/lib/build-drift.sh"
+# shellcheck source=lib/gh-factory.sh
+source "$SCRIPT_DIR/lib/gh-factory.sh"
 BASE_DIR="${BASE_DIR:-/mnt/ext-fast}"
 STATE_DIR="$HOME/.archon/pipeline-health-state"
 # Where the crontab sends every script's stdout/stderr (see ops/cron/crontab).
@@ -2497,6 +2503,41 @@ check_cron_heartbeats() {
 }
 
 # ----------------------------------------------------------------------------
+# Check 9g: the factory's GitHub identity. From 2026-10-13 to 10-16 GitHub had
+#   flagged alexsiri7-factory (graphql.limit 0, profile 404): ~90% of runs
+#   failed with "GraphQL: API rate limit already exceeded" while this script
+#   and pipeline-status stayed green. Probe it every tick (lib/gh-factory.sh:
+#   `gh api rate_limit` and the public profile, as the archon user in archon
+#   mode); ntfy once per episode when it is blocked, log when it recovers. A
+#   probe that fails (sudo, network) is logged, not alerted: it proves nothing.
+#   The alert is marked sent only once ntfy took it.
+# ----------------------------------------------------------------------------
+check_gh_factory() {
+  local marker="$STATE_DIR/gh-factory-alerted" rc
+  gh_factory_probe; rc=$?
+  if [ "$rc" -eq 2 ]; then
+    log "gh-factory: probe failed — $GH_FACTORY_DETAIL"
+    return 0
+  fi
+  if [ "$rc" -eq 0 ]; then
+    if [ -f "$marker" ]; then
+      rm -f "$marker"
+      log "gh-factory: recovered — $(gh_factory_who): $GH_FACTORY_DETAIL"
+    fi
+    return 0
+  fi
+  log "gh-factory: BLOCKED $(gh_factory_who): $GH_FACTORY_DETAIL"
+  [ -f "$marker" ] && return 0   # alert once per episode
+  if notify_checked "Factory GitHub identity blocked" \
+    "$(gh_factory_who): $GH_FACTORY_DETAIL. Factory runs cannot open PRs; issue-pickup holds launches until this clears. Check: sudo -n -u archon env HOME=$GH_FACTORY_HOME gh api rate_limit; https://github.com/${GH_FACTORY_LOGIN:-} (404 = flagged: contact GitHub support). To stop the other crons too: ARCHON_RUN_AS=drain in ~/.config/archon-cron/run-as." \
+    urgent rotating_light; then
+    touch "$marker"
+  else
+    log "gh-factory: ntfy not delivered — retrying next tick"
+  fi
+}
+
+# ----------------------------------------------------------------------------
 # Check 10: Paused archon runs nothing will resume. reconcile_zombies reaps
 # stale `running` rows and deliberately leaves `paused` ones to the server's
 # continuation scheduler; this is the other half — the runs that scheduler has
@@ -2591,5 +2632,6 @@ check_archon_update
 check_restore_test
 check_cron_heartbeats
 check_claude_auth
+check_gh_factory
 check_progress
 log "=== done ==="

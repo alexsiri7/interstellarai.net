@@ -9,6 +9,12 @@ export PATH="$HOME/.bun/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 PROJECTS_FILE="$SCRIPT_DIR/../cron/archon-projects.txt"
 SWEEP_STATUS_FILE="$HOME/.archon/sweep-state/last-sweep"   # written by ops/cron/sweep-audits.sh
+# The factory's GitHub identity, probed the way pipeline-health does
+# (as the archon user when ARCHON_RUN_AS is archon or drain).
+# shellcheck source=../cron/lib/run-as.sh
+source "$SCRIPT_DIR/../cron/lib/run-as.sh"
+# shellcheck source=../cron/lib/gh-factory.sh
+source "$SCRIPT_DIR/../cron/lib/gh-factory.sh"
 OWNER="alexsiri7"
 
 # Colours
@@ -66,6 +72,15 @@ sweep_status() {
     printf "  %s on %s, %s%s" "$sweep" "$repo" "$when" "${account:+, account ${account##*/}}"
 }
 
+gh_factory_status() {
+    gh_factory_probe
+    case "$GH_FACTORY_STATE" in
+        ok)      printf "${GREEN}OK${RESET}  %s (%s)" "$GH_FACTORY_DETAIL" "$(gh_factory_who)" ;;
+        blocked) printf "${RED}BLOCKED${RESET}  %s (%s) — factory runs cannot open PRs" "$GH_FACTORY_DETAIL" "$(gh_factory_who)" ;;
+        *)       printf "${YELLOW}unknown${RESET}  %s" "$GH_FACTORY_DETAIL" ;;
+    esac
+}
+
 # --- Header ---
 echo ""
 printf "${BOLD}%-22s  %4s  %6s  %5s  %s${RESET}\n" "REPO" "PRs" "ISSUES" "CI" "NOTES"
@@ -109,7 +124,8 @@ for REPO in "${PROJECTS[@]}"; do
 done
 
 echo ""
-printf "last sweep: %s\n\n" "$(sweep_status)"
+printf "last sweep: %s\n" "$(sweep_status)"
+printf "factory GitHub: %s\n\n" "$(gh_factory_status)"
 if [ "$any_stuck" -eq 1 ]; then
     printf "${RED}CI red on main in at least one project — check above.${RESET}\n\n"
 fi

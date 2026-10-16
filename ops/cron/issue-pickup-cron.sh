@@ -34,6 +34,13 @@ source "$SCRIPT_DIR/lib/quota-pause.sh"
 # below launches archon (label hygiene still runs). See lib/quota-pause.sh.
 QUOTA_HELD=0
 quota_may_launch "issue-pickup" || QUOTA_HELD=1
+# Likewise while the factory's GitHub identity cannot open PRs (flagged
+# account, GraphQL limit exhausted): a run would spend Claude tokens on work
+# that can never ship. See lib/gh-factory.sh.
+# shellcheck source=lib/gh-factory.sh
+source "$SCRIPT_DIR/lib/gh-factory.sh"
+GH_FACTORY_HELD=0
+gh_factory_may_launch "issue-pickup" || GH_FACTORY_HELD=1
 
 # Age (seconds) after which an issue labeled archon:in-progress with no
 # corresponding live archon process and no open PR is considered stuck and
@@ -167,6 +174,7 @@ auto_triage() {
     return
   fi
   [ "$QUOTA_HELD" = 1 ] && return
+  [ "${GH_FACTORY_HELD:-0}" = 1 ] && return
 
   # Don't stack — skip if any archon workflow is already running for this repo.
   if pgrep -fa "archon workflow run.*--cwd.*$repo_dir" >/dev/null 2>&1; then
@@ -659,6 +667,12 @@ ship_slot_busy() {
   if [ "$QUOTA_HELD" = 1 ]; then
     SUMMARY_ACTION="skip-quota"
     SUMMARY_NOTE="Claude rate limit in effect"
+    return 0
+  fi
+
+  if [ "${GH_FACTORY_HELD:-0}" = 1 ]; then
+    SUMMARY_ACTION="skip-gh-identity"
+    SUMMARY_NOTE="factory GitHub identity cannot open PRs: ${GH_FACTORY_DETAIL:-see log}"
     return 0
   fi
 
