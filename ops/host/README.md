@@ -52,7 +52,7 @@ later step with its own script and cutover: [`archon-user/README.md`](archon-use
 | 11. /tmp on the NVMe | `/mnt/ext-fast/.tmp-root` (root:root 1777, no ACL); `/etc/systemd/system/tmp.mount` from [`tmp-on-nvme/tmp.mount`](tmp-on-nvme/tmp.mount); `/run/tmp-on-nvme.defer`; `/var/run/reboot-required{,.pkgs}` | `/tmp` becomes a bind mount of the NVMe dir **from the next boot** (no live remount), and a reboot is marked pending (`tmp-on-nvme` in `.pkgs`) so the safe-reboot gate takes it in its next idle window. Once the bind is active (a re-run after that boot), empties the old `/tmp` on `/` that the bind hides. See [/tmp on the NVMe](#tmp-on-the-nvme) below. |
 | 12. tmpfiles | `/etc/tmpfiles.d/tmp.conf` from [`tmp-on-nvme/tmpfiles-tmp.conf`](tmp-on-nvme/tmpfiles-tmp.conf) | `D /tmp 1777 root root 2d` (Ubuntu ships 30d; same file name, so it replaces `/usr/lib/tmpfiles.d/tmp.conf`), with `x` exclusions for `/tmp/tmux-*`, `/tmp/ssh-*`, `/tmp/claude-*`. Applied by the daily `systemd-tmpfiles-clean.timer`; nothing is cleaned at install. |
 | 13. cargo /tmp build-dir | `/etc/tmpfiles.d/cargo-tmp-build-dir.conf` from [`cargo-tmp-build-dir.conf`](cargo-tmp-build-dir.conf) | A root-owned `/tmp/.cargo/config.toml`, recreated at every boot and kept out of `/tmp`'s 30-day aging, that sets `build.build-dir = "{cargo-cache-home}/tmp-build/{workspace-path-hash}"` for every Cargo build under `/tmp` (#133: review checkouts there wrote 9–16 GB each to `/`). `{cargo-cache-home}` is each user's `$CARGO_HOME`: archon's is already on `/mnt/ext-fast`, and the pipeline-health tick keeps asiri's `~/.cargo/tmp-build` a symlink to `/mnt/ext-fast/.archon/cargo-build/tmp`. archon's dirs are reaped by `archon-as-archon worktree-trim`, asiri's by the 2-day Cargo build-dir reaping. A `/tmp/.cargo` not owned by root is removed first; then `systemd-tmpfiles --create` and an assert. |
-| 14. hardware watchdog | `/etc/systemd/system/itco-wdt.service` from [`watchdog/itco-wdt.service`](watchdog/itco-wdt.service); `/etc/systemd/system.conf.d/60-watchdog.conf` from [`watchdog/60-watchdog.conf`](watchdog/60-watchdog.conf) | Loads `iTCO_wdt` every boot (before `sysinit.target`) and has PID 1 arm it: `RuntimeWatchdogSec=30s`, `RebootWatchdogSec=3min`. Unit first, then `enable` + `start` (loads the module now), then the drop-in and `daemon-reload` (`daemon-reexec` if the reload did not take). Asserts `RuntimeWatchdogUSec=30s`, `RebootWatchdogUSec=3min` and `/sys/class/watchdog/watchdog0/state` `active`. See [Hardware watchdog](#hardware-watchdog). |
+| 14. hardware watchdog | `/etc/systemd/system/itco-wdt.service` from [`watchdog/itco-wdt.service`](watchdog/itco-wdt.service); `/etc/systemd/system.conf.d/60-watchdog.conf` from [`watchdog/60-watchdog.conf`](watchdog/60-watchdog.conf) | Loads `iTCO_wdt` every boot (before `sysinit.target`) and has PID 1 arm it: `RuntimeWatchdogSec=2min`, `RebootWatchdogSec=3min`. Unit first, then `enable` + `start` (loads the module now), then the drop-in and `daemon-reload` (`daemon-reexec` if the reload did not take). Asserts `RuntimeWatchdogUSec=2min`, `RebootWatchdogUSec=3min` and `/sys/class/watchdog/watchdog0/state` `active`. See [Hardware watchdog](#hardware-watchdog). |
 | 15. kernel cmdline | `/etc/default/grub.d/90-interstellar.cfg` from [`watchdog/90-interstellar.cfg`](watchdog/90-interstellar.cfg) | `GRUB_CMDLINE_LINUX_DEFAULT="quiet reboot=efi"` (no `splash`, `reboot=efi` instead of `reboot=pci`). `update-grub` when the file changed **or** the default entry in `/boot/grub/grub.cfg` does not carry it yet (so a failed `update-grub` is retried), then asserts that it does. Not live: it applies from the next boot, and no reboot is marked pending for it. |
 
 ### smartd-ntfy
@@ -256,8 +256,9 @@ blacklisted by Ubuntu's `/lib/modprobe.d/blacklist_linux-hwe-<ver>.conf`.
   `modprobe@iTCO_wdt.service` would not work either: it runs `modprobe -abq`,
   and `-b` applies the blacklist. Shadowing the blacklist file in
   `/etc/modprobe.d` would have to follow its per-kernel name.
-- `60-watchdog.conf`: `RuntimeWatchdogSec=30s`: PID 1 pings the device every
-  15 s, so a kernel or PID 1 hang of more than 30 s resets the board. PID 1
+- `60-watchdog.conf`: `RuntimeWatchdogSec=2min`: PID 1 pings the device every
+  60 s, so a kernel or PID 1 hang of more than 2 min resets the board (30 s
+  was judged too tight given past writeback stalls on the slow root SSD). PID 1
   retries opening `/dev/watchdog0` on every ping while it is missing, so the
   module loading after PID 1 started is fine. `RebootWatchdogSec=3min`:
   `systemd-shutdown` re-arms the watchdog for 3 minutes at the start of the
@@ -291,7 +292,7 @@ blacklisted by Ubuntu's `/lib/modprobe.d/blacklist_linux-hwe-<ver>.conf`.
 
 ```
 cat /sys/class/watchdog/watchdog0/{identity,state,timeout}   # iTCO_wdt, active, 30
-systemctl show -p RuntimeWatchdogUSec -p RebootWatchdogUSec   # 30s, 3min
+systemctl show -p RuntimeWatchdogUSec -p RebootWatchdogUSec   # 2min, 3min
 systemctl status itco-wdt.service
 cat /proc/cmdline                                             # after the next boot: quiet reboot=efi, no splash
 ```

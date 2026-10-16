@@ -47,7 +47,7 @@ healthy() {
     touch "$VH_WDT_DROPIN" "$VH_GRUB_DROPIN"
     touch -d "@$(( VH_BOOT_EPOCH - 60 ))" "$VH_GRUB_DROPIN"
     echo active > "$T/sys/watchdog0/state"
-    export STUB_RUNTIME_WDT=30s
+    export STUB_RUNTIME_WDT=2min
     echo "BOOT_IMAGE=/boot/vmlinuz root=UUID=x ro quiet reboot=efi" > "$VH_PROC_CMDLINE"
 }
 
@@ -55,7 +55,7 @@ healthy() {
     healthy
     verify_watchdog_and_cmdline > "$T/out"
     [ "$FAILS" -eq 0 ] && [ "$WARNS" -eq 0 ] && [ "$PASSES" -eq 4 ]
-    grep -q 'PASS watchdog: PID 1 RuntimeWatchdogUSec=30s' "$T/out"
+    grep -q 'PASS watchdog: PID 1 RuntimeWatchdogUSec=2min' "$T/out"
     grep -q 'PASS kernel cmdline has no splash' "$T/out"
 }
 
@@ -152,7 +152,7 @@ grub_cfg() {  # grub_cfg <default entry args>
 }
 
 @test "the system.conf drop-in sets the runtime and reboot watchdog" {
-    grep -qx 'RuntimeWatchdogSec=30s' "$HOST_DIR/watchdog/60-watchdog.conf"
+    grep -qx 'RuntimeWatchdogSec=2min' "$HOST_DIR/watchdog/60-watchdog.conf"
     grep -qx 'RebootWatchdogSec=3min' "$HOST_DIR/watchdog/60-watchdog.conf"
     grep -qx '\[Manager\]' "$HOST_DIR/watchdog/60-watchdog.conf"
 }

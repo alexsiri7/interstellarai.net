@@ -22,7 +22,7 @@
 #                                          empties the old /tmp left hidden on / underneath it
 #  12. tmpfiles                            /tmp entries idle 2 days are removed (Ubuntu: 30 days)
 #  13. cargo /tmp build-dir                /etc/tmpfiles.d/cargo-tmp-build-dir.conf → /tmp/.cargo/config.toml (root-owned)
-#  14. hardware watchdog                   itco-wdt.service loads iTCO_wdt at boot; system.conf.d: RuntimeWatchdogSec=30s,
+#  14. hardware watchdog                   itco-wdt.service loads iTCO_wdt at boot; system.conf.d: RuntimeWatchdogSec=2min,
 #                                          RebootWatchdogSec=3min (a hung reboot gets a hardware reset)
 #  15. kernel cmdline                      /etc/default/grub.d/90-interstellar.cfg: "quiet reboot=efi" (no splash);
 #                                          update-grub when it changed or grub.cfg does not match it; next boot
@@ -528,7 +528,7 @@ if [ "$DRY" -eq 0 ]; then
 fi
 
 # ------------------------------------------------------- 14. watchdog -------
-say "14. hardware watchdog: iTCO_wdt at boot, PID 1 arms it (RuntimeWatchdogSec=30s, RebootWatchdogSec=3min)"
+say "14. hardware watchdog: iTCO_wdt at boot, PID 1 arms it (RuntimeWatchdogSec=2min, RebootWatchdogSec=3min)"
 # Module unit first: once the drop-in is live, PID 1 opens /dev/watchdog0 as
 # soon as it exists (it retries on every ping while the device is missing).
 install_file "$REPO_WDT_UNIT" "$UNIT_DIR/$WDT_UNIT" 0644 && { run systemctl daemon-reload && did "daemon-reload"; }
@@ -555,8 +555,8 @@ else
             systemctl daemon-reexec && did "daemon-reexec (daemon-reload did not apply RuntimeWatchdogSec)"
         fi
         rt=$(systemctl show -p RuntimeWatchdogUSec --value); rb=$(systemctl show -p RebootWatchdogUSec --value)
-        if [ "$rt" = 30s ] && [ "$rb" = 3min ]; then done_ "PID 1: RuntimeWatchdogUSec=$rt RebootWatchdogUSec=$rb"
-        else fail watchdog "PID 1 has RuntimeWatchdogUSec=$rt RebootWatchdogUSec=$rb after installing $WDT_DROPIN (want 30s / 3min) — systemd-analyze cat-config systemd/system.conf"; fi
+        if [ "$rt" = 2min ] && [ "$rb" = 3min ]; then done_ "PID 1: RuntimeWatchdogUSec=$rt RebootWatchdogUSec=$rb"
+        else fail watchdog "PID 1 has RuntimeWatchdogUSec=$rt RebootWatchdogUSec=$rb after installing $WDT_DROPIN (want 2min / 3min) — systemd-analyze cat-config systemd/system.conf"; fi
         state=""
         for _ in 1 2 3 4 5; do
             state=$(cat "$WDT_SYSFS/state" 2>/dev/null)
