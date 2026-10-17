@@ -22,6 +22,10 @@
 #                                          empties the old /tmp left hidden on / underneath it
 #  12. tmpfiles                            /tmp entries idle 2 days are removed (Ubuntu: 30 days)
 #  13. cargo /tmp build-dir                /etc/tmpfiles.d/cargo-tmp-build-dir.conf → /tmp/.cargo/config.toml (root-owned)
+#  14. hardware watchdog                   itco-wdt.service loads iTCO_wdt at boot; system.conf.d: RuntimeWatchdogSec=2min,
+#                                          RebootWatchdogSec=3min (a hung reboot gets a hardware reset)
+#  15. kernel cmdline                      /etc/default/grub.d/90-interstellar.cfg: "quiet reboot=efi" (no splash);
+#                                          update-grub when it changed or grub.cfg does not match it; next boot
 #
 # Every step is guarded so it can be run again after a partial failure.
 #
@@ -36,7 +40,7 @@ DRY=0
 case "${1:-}" in
     --dry-run|-n) DRY=1 ;;
     "") ;;
-    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1 (only --dry-run)" >&2; exit 2 ;;
 esac
 
@@ -54,6 +58,9 @@ REPO_SYSCTL_DIRTY="$SCRIPT_DIR/60-dirty-bytes.conf"
 REPO_TMP_MOUNT="$SCRIPT_DIR/tmp-on-nvme/tmp.mount"
 REPO_TMPFILES_TMP="$SCRIPT_DIR/tmp-on-nvme/tmpfiles-tmp.conf"
 REPO_TMPFILES_CARGO="$SCRIPT_DIR/cargo-tmp-build-dir.conf"
+REPO_WDT_UNIT="$SCRIPT_DIR/watchdog/itco-wdt.service"
+REPO_WDT_DROPIN="$SCRIPT_DIR/watchdog/60-watchdog.conf"
+REPO_GRUB_DROPIN="$SCRIPT_DIR/watchdog/90-interstellar.cfg"
 
 SUDOERS_D="${HOST_INSTALL_SUDOERS_D:-/etc/sudoers.d}"
 SUDOERS_DST="$SUDOERS_D/archon-cron"
@@ -77,6 +84,11 @@ TMP_DEFER=/run/tmp-on-nvme.defer     # also in tmp-on-nvme/tmp.mount
 TMPFILES_TMP=/etc/tmpfiles.d/tmp.conf
 REBOOT_REQUIRED=/var/run/reboot-required
 TMPFILES_CARGO=/etc/tmpfiles.d/cargo-tmp-build-dir.conf
+WDT_UNIT=itco-wdt.service
+WDT_DROPIN=/etc/systemd/system.conf.d/60-watchdog.conf      # also in archon-user/verify.sh (watchdog/verify-host.sh)
+WDT_SYSFS=/sys/class/watchdog/watchdog0
+GRUB_DROPIN=/etc/default/grub.d/90-interstellar.cfg          # also in watchdog/verify-host.sh
+GRUB_CFG=/boot/grub/grub.cfg
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -512,6 +524,83 @@ if [ "$DRY" -eq 0 ]; then
         done_ "/tmp/.cargo/config.toml (root-owned) → $cargo_tmp_build_dir"
     else
         fail cargo-tmp "/tmp/.cargo/config.toml missing, not root-owned or without the build-dir line after systemd-tmpfiles --create $TMPFILES_CARGO"
+    fi
+fi
+
+# ------------------------------------------------------- 14. watchdog -------
+say "14. hardware watchdog: iTCO_wdt at boot, PID 1 arms it (RuntimeWatchdogSec=2min, RebootWatchdogSec=3min)"
+# Module unit first: once the drop-in is live, PID 1 opens /dev/watchdog0 as
+# soon as it exists (it retries on every ping while the device is missing).
+install_file "$REPO_WDT_UNIT" "$UNIT_DIR/$WDT_UNIT" 0644 && { run systemctl daemon-reload && did "daemon-reload"; }
+if [ "$DRY" -eq 0 ] && systemctl is-enabled -q "$WDT_UNIT" 2>/dev/null; then
+    done_ "$WDT_UNIT already enabled"
+else
+    run systemctl enable "$WDT_UNIT" && did "enabled $WDT_UNIT (runs every boot, before sysinit.target)"
+fi
+if [ "$DRY" -eq 0 ] && systemctl is-active -q "$WDT_UNIT" 2>/dev/null; then
+    done_ "$WDT_UNIT already active"
+else
+    run systemctl start "$WDT_UNIT" && did "started $WDT_UNIT (modprobe iTCO_wdt)"
+fi
+if [ "$DRY" -eq 0 ] && [ ! -e "$WDT_SYSFS" ]; then
+    fail watchdog "$WDT_SYSFS missing after starting $WDT_UNIT — journalctl -u $WDT_UNIT; not arming PID 1's watchdog"
+else
+    # daemon-reload re-reads system.conf(.d); daemon-reexec is the fallback if
+    # it did not pick the values up.
+    if install_file "$REPO_WDT_DROPIN" "$WDT_DROPIN" 0644; then
+        run systemctl daemon-reload && did "daemon-reload"
+    fi
+    if [ "$DRY" -eq 0 ]; then
+        if [ "$(systemctl show -p RuntimeWatchdogUSec --value)" = 0 ]; then
+            systemctl daemon-reexec && did "daemon-reexec (daemon-reload did not apply RuntimeWatchdogSec)"
+        fi
+        rt=$(systemctl show -p RuntimeWatchdogUSec --value); rb=$(systemctl show -p RebootWatchdogUSec --value)
+        if [ "$rt" = 2min ] && [ "$rb" = 3min ]; then done_ "PID 1: RuntimeWatchdogUSec=$rt RebootWatchdogUSec=$rb"
+        else fail watchdog "PID 1 has RuntimeWatchdogUSec=$rt RebootWatchdogUSec=$rb after installing $WDT_DROPIN (want 2min / 3min) — systemd-analyze cat-config systemd/system.conf"; fi
+        state=""
+        for _ in 1 2 3 4 5; do
+            state=$(cat "$WDT_SYSFS/state" 2>/dev/null)
+            [ "$state" = active ] && break
+            sleep 1
+        done
+        if [ "$state" = active ]; then done_ "$WDT_SYSFS ($(cat "$WDT_SYSFS/identity" 2>/dev/null)) active, timeout $(cat "$WDT_SYSFS/timeout" 2>/dev/null)s: PID 1 is pinging it"
+        else fail watchdog "$WDT_SYSFS/state is '${state:-?}' (want active: PID 1 has not opened the watchdog)"; fi
+    fi
+fi
+
+# ------------------------------------------------------- 15. cmdline --------
+say "15. kernel cmdline via $GRUB_DROPIN (no splash, reboot=efi)"
+want_cmdline=$(sed -n 's/^GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"$/\1/p' "$REPO_GRUB_DROPIN" 2>/dev/null)
+# grub_cfg_current: the default entry's linux line (the first one) carries
+# every word of $want_cmdline and no `splash`. False when unreadable.
+grub_cfg_current() {
+    local line w
+    [ -r "$GRUB_CFG" ] || return 1
+    line=$(grep -m1 -E '^[[:space:]]*linux[[:space:]]' "$GRUB_CFG") || return 1
+    [[ " $line " == *" splash "* ]] && return 1
+    for w in $want_cmdline; do [[ " $line " == *" $w "* ]] || return 1; done
+}
+if [ -z "$want_cmdline" ]; then
+    fail grub "$REPO_GRUB_DROPIN has no GRUB_CMDLINE_LINUX_DEFAULT line"
+else
+    grub_changed=0
+    install_file "$REPO_GRUB_DROPIN" "$GRUB_DROPIN" 0644 && grub_changed=1
+    # Also when only the update-grub of an earlier run failed: the drop-in is
+    # then "already done" but grub.cfg still has the old line.
+    if [ "$grub_changed" -eq 1 ] || ! grub_cfg_current; then
+        [ "$grub_changed" -eq 1 ] || done_ "$GRUB_CFG does not match \"$want_cmdline\" yet$( [ -r "$GRUB_CFG" ] || printf ' (cannot read it without root — assuming it differs)')"
+        if run update-grub; then did "update-grub"; else fail grub "update-grub failed"; fi
+    else
+        done_ "$GRUB_CFG already boots with \"$want_cmdline\""
+    fi
+    if [ "$DRY" -eq 0 ] && ! grub_cfg_current; then
+        fail grub "$GRUB_CFG still does not carry \"$want_cmdline\" (or still has splash) after update-grub — another /etc/default/grub.d/*.cfg sorting after ${GRUB_DROPIN##*/}?"
+    fi
+    if grep -qw splash /proc/cmdline 2>/dev/null || ! grep -qw reboot=efi /proc/cmdline 2>/dev/null; then
+        # No reboot marker: this waits for the next boot, whenever that is.
+        done_ "running kernel still has: $(tr -d '\n' < /proc/cmdline | sed 's/^BOOT_IMAGE=[^ ]* //') — the new cmdline applies from the next boot"
+    else
+        done_ "running kernel already booted without splash, with reboot=efi"
     fi
 fi
 

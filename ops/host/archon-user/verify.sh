@@ -12,7 +12,8 @@
 #
 #   1. host: flag, server unit + its user, owner unit stopped, health, links, crontab,
 #      sudoers (asiri -> archon anything but no -E; asiri -> root only the
-#      ops snapshot's entrypoints), the snapshot root-owned and current
+#      ops snapshot's entrypoints), the snapshot root-owned and current,
+#      hardware watchdog armed by PID 1, no `splash` on the kernel cmdline
 #   2. owner side: home and secret-file modes as asiri sees them
 #   3. archon side (archon-as-archon selftest, as archon): identity, no sudo,
 #      named secrets unreachable, sweep of /home /mnt /media /srv /var/backups
@@ -99,6 +100,10 @@ if [ -L "$OPS_SNAP/current" ]; then
 else
     warn "no ops snapshot at $OPS_SNAP/current — sudo ops/host/archon-user/install.sh --install-sudo-ops"
 fi
+# Hardware watchdog and kernel cmdline (ops/host/install.sh steps 14-15).
+# shellcheck source=../watchdog/verify-host.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../watchdog/verify-host.sh"
+verify_watchdog_and_cmdline
 
 echo "== 2. owner side"
 mode_ok() {  # mode_ok <path> <max-octal-mask-of-forbidden-bits> <label>

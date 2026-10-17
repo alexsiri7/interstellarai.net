@@ -71,6 +71,7 @@ STUB
     ship_breaker_check() { return 0; }
     ship_breaker_db() { echo "$T/archon.db"; }
     QUOTA_HELD=0
+    GH_FACTORY_HELD=0
 
     LOGGED="$T/logged"
     log() { echo "$*" >> "$LOGGED"; }
@@ -484,6 +485,20 @@ JSON
     grep -q "#50 — triage-in-progress for" "$LOGGED"
 }
 
+@test "auto_triage launches nothing while the factory GitHub identity is blocked" {
+    cat > "$T/fixtures/open.json" <<'JSON'
+[{"number":50,"labels":[{"name":"archon:triage-in-progress"}],"createdAt":"2026-01-01T00:00:00Z"}]
+JSON
+    echo '2026-01-01T01:00:00Z' > "$T/fixtures/events-50"
+    GH_FACTORY_HELD=1
+    load_fn auto_triage
+
+    auto_triage testproj
+
+    [ "$(gh_calls 'issue edit')" -eq 0 ]
+    [ "$SUMMARY_ACTION" = "none" ]
+}
+
 @test "auto_triage leaves a triage-in-progress issue alone while its label is young" {
     cat > "$T/fixtures/open.json" <<'JSON'
 [{"number":51,"labels":[{"name":"archon:triage-in-progress"}],"createdAt":"2026-01-01T00:00:00Z"}]
@@ -624,6 +639,19 @@ JSON
     pick_and_fire testproj
 
     [ "$SUMMARY_ACTION" = "skip-quota" ]
+    [ "$(gh_calls 'issue edit 20 ')" -eq 0 ]
+}
+
+@test "pick_and_fire launches nothing while the factory GitHub identity is blocked" {
+    echo '[{"number":20}]' > "$T/fixtures/queued.json"
+    GH_FACTORY_HELD=1
+    GH_FACTORY_DETAIL="GraphQL limit 0 (GitHub has cut the account off)"
+    load_fn pick_and_fire
+
+    pick_and_fire testproj
+
+    [ "$SUMMARY_ACTION" = "skip-gh-identity" ]
+    [[ "$SUMMARY_NOTE" == *"GraphQL limit 0"* ]]
     [ "$(gh_calls 'issue edit 20 ')" -eq 0 ]
 }
 

@@ -52,6 +52,8 @@ later step with its own script and cutover: [`archon-user/README.md`](archon-use
 | 11. /tmp on the NVMe | `/mnt/ext-fast/.tmp-root` (root:root 1777, no ACL); `/etc/systemd/system/tmp.mount` from [`tmp-on-nvme/tmp.mount`](tmp-on-nvme/tmp.mount); `/run/tmp-on-nvme.defer`; `/var/run/reboot-required{,.pkgs}` | `/tmp` becomes a bind mount of the NVMe dir **from the next boot** (no live remount), and a reboot is marked pending (`tmp-on-nvme` in `.pkgs`) so the safe-reboot gate takes it in its next idle window. Once the bind is active (a re-run after that boot), empties the old `/tmp` on `/` that the bind hides. See [/tmp on the NVMe](#tmp-on-the-nvme) below. |
 | 12. tmpfiles | `/etc/tmpfiles.d/tmp.conf` from [`tmp-on-nvme/tmpfiles-tmp.conf`](tmp-on-nvme/tmpfiles-tmp.conf) | `D /tmp 1777 root root 2d` (Ubuntu ships 30d; same file name, so it replaces `/usr/lib/tmpfiles.d/tmp.conf`), with `x` exclusions for `/tmp/tmux-*`, `/tmp/ssh-*`, `/tmp/claude-*`. Applied by the daily `systemd-tmpfiles-clean.timer`; nothing is cleaned at install. |
 | 13. cargo /tmp build-dir | `/etc/tmpfiles.d/cargo-tmp-build-dir.conf` from [`cargo-tmp-build-dir.conf`](cargo-tmp-build-dir.conf) | A root-owned `/tmp/.cargo/config.toml`, recreated at every boot and kept out of `/tmp`'s 30-day aging, that sets `build.build-dir = "{cargo-cache-home}/tmp-build/{workspace-path-hash}"` for every Cargo build under `/tmp` (#133: review checkouts there wrote 9–16 GB each to `/`). `{cargo-cache-home}` is each user's `$CARGO_HOME`: archon's is already on `/mnt/ext-fast`, and the pipeline-health tick keeps asiri's `~/.cargo/tmp-build` a symlink to `/mnt/ext-fast/.archon/cargo-build/tmp`. archon's dirs are reaped by `archon-as-archon worktree-trim`, asiri's by the 2-day Cargo build-dir reaping. A `/tmp/.cargo` not owned by root is removed first; then `systemd-tmpfiles --create` and an assert. |
+| 14. hardware watchdog | `/etc/systemd/system/itco-wdt.service` from [`watchdog/itco-wdt.service`](watchdog/itco-wdt.service); `/etc/systemd/system.conf.d/60-watchdog.conf` from [`watchdog/60-watchdog.conf`](watchdog/60-watchdog.conf) | Loads `iTCO_wdt` every boot (before `sysinit.target`) and has PID 1 arm it: `RuntimeWatchdogSec=2min`, `RebootWatchdogSec=3min`. Unit first, then `enable` + `start` (loads the module now), then the drop-in and `daemon-reload` (`daemon-reexec` if the reload did not take). Asserts `RuntimeWatchdogUSec=2min`, `RebootWatchdogUSec=3min` and `/sys/class/watchdog/watchdog0/state` `active`. See [Hardware watchdog](#hardware-watchdog). |
+| 15. kernel cmdline | `/etc/default/grub.d/90-interstellar.cfg` from [`watchdog/90-interstellar.cfg`](watchdog/90-interstellar.cfg) | `GRUB_CMDLINE_LINUX_DEFAULT="quiet reboot=efi"` (no `splash`, `reboot=efi` instead of `reboot=pci`). `update-grub` when the file changed **or** the default entry in `/boot/grub/grub.cfg` does not carry it yet (so a failed `update-grub` is retried), then asserts that it does. Not live: it applies from the next boot, and no reboot is marked pending for it. |
 
 ### smartd-ntfy
 
@@ -222,6 +224,84 @@ and ntfys. Window, deadline and paths are
 `SAFE_REBOOT_*` variables at the top of the script (e.g. a
 `systemctl edit safe-reboot.service` drop-in with `Environment=SAFE_REBOOT_WINDOW=01:00-05:00`).
 
+## Hardware watchdog
+
+**Why.** Two unattended night reboots by the [safe-reboot gate](#safe-reboot)
+never came back, on an MSI Z370-A PRO (BIOS 2.D0, RTX 2070, Ubuntu 24.04,
+kernel 7.0.0-38):
+
+| Reboot | Found | Notes |
+|---|---|---|
+| 2026-10-05 03:00 | power-cycled 2026-10-06 08:34 | shutdown journal ends cleanly (`Shutting down`); monitor black, no POST |
+| — | 2026-10-06 | `reboot=pci` added by hand to `/etc/default/grub` |
+| 2026-10-15 02:45 | power-cycled 2026-10-16 08:15 | same: clean journal, black screen, no POST. `reboot=pci` did not help |
+| — | 2026-10-16 | the boot after it sat in `starting` all day: `plymouth-quit-wait` hung (`splash`) |
+
+So the hang is after the last journal line: in `systemd-shutdown`, the
+kernel's reset path or the firmware. Systemd's `RebootWatchdogSec` (10 min by
+default) is exactly the net for that, but it needs a hardware watchdog device,
+and there was none: the board's Intel PCH TCO watchdog (`iTCO_wdt`, "Found a
+Intel PCH TCO device (Version=4)… heartbeat=30 sec" when loaded by hand) is
+blacklisted by Ubuntu's `/lib/modprobe.d/blacklist_linux-hwe-<ver>.conf`.
+
+**What steps 14–15 change.**
+- `itco-wdt.service` runs `modprobe iTCO_wdt` early in every boot.
+  `/etc/modules-load.d/` does **not** work here (checked 2026-10-16):
+  systemd 255's `systemd-modules-load` probes with `KMOD_PROBE_APPLY_BLACKLIST`
+  (`src/shared/module-util.c`), which refuses a module blacklisted by its own
+  name, not only by an alias. It would just log `Module 'iTCO_wdt' is
+  deny-listed (by kmod)`. The `modprobe` tool applies a blacklist to alias
+  lookups only, so `modprobe iTCO_wdt` loads it. A libkmod dry run on this host
+  confirms both: `APPLY_BLACKLIST` → refused, `APPLY_BLACKLIST_ALIAS_ONLY` → 0.
+  `modprobe@iTCO_wdt.service` would not work either: it runs `modprobe -abq`,
+  and `-b` applies the blacklist. Shadowing the blacklist file in
+  `/etc/modprobe.d` would have to follow its per-kernel name.
+- `60-watchdog.conf`: `RuntimeWatchdogSec=2min`: PID 1 pings the device every
+  60 s, so a kernel or PID 1 hang of more than 2 min resets the board (30 s
+  was judged too tight given past writeback stalls on the slow root SSD). PID 1
+  retries opening `/dev/watchdog0` on every ping while it is missing, so the
+  module loading after PID 1 started is fine. `RebootWatchdogSec=3min`:
+  `systemd-shutdown` re-arms the watchdog for 3 minutes at the start of the
+  final shutdown phase and deliberately leaves it running into the `reboot()`
+  call, so a reboot that hangs there gets a hardware reset. `KExecWatchdogSec` is left off:
+  `kexec-tools` is not installed, nothing kexecs.
+- `90-interstellar.cfg`: drops `splash` (the `plymouth-quit-wait` hang; Ubuntu's
+  `10_linux` adds `vt.handoff=7` only with `splash`, so that goes too) and tries
+  `reboot=efi` (the EFI `ResetSystem` runtime service) instead of `reboot=pci`.
+  `/etc/default/grub` still says `quiet splash reboot=pci`; leave it.
+  `grub-mkconfig` sources `/etc/default/grub` first and then every
+  `/etc/default/grub.d/*.cfg` (`/usr/sbin/grub-mkconfig`, lines 160–166 in
+  grub 2.12 on this host), so the drop-in's value wins. `host-watchdog.bats`
+  asserts that order against the installed `grub-mkconfig`.
+
+**Limits.**
+- The TCO watchdog is reset with the platform. If the board did reset and the
+  hang is in POST (the black screen is also consistent with that, e.g. the GPU
+  option ROM), no OS-armed watchdog can help; that would be a BIOS update or
+  setting matter (fast boot, CSM).
+- `systemd-shutdown` does not ping the watchdog while it runs its final `sync`.
+  With more than 3 minutes of writeback still pending at that point, the
+  hardware reset would cut it off. The gate's own `sync` (up to 15 minutes, step
+  5 of [Safe reboot](#safe-reboot)) runs first, so little should be left.
+- A 30-second runtime timeout means PID 1 itself must not stall for 30 s. The
+  writeback stalls seen on this host (2026-09-26/27, step 9) blocked user processes, not PID 1.
+  If a watchdog reset ever shows up (`journalctl --list-boots` with a boot
+  ending mid-stream, `bootstatus` in `/sys/class/watchdog/watchdog0`), raise it.
+
+**Check.**
+
+```
+cat /sys/class/watchdog/watchdog0/{identity,state,timeout}   # iTCO_wdt, active, 30
+systemctl show -p RuntimeWatchdogUSec -p RebootWatchdogUSec   # 2min, 3min
+systemctl status itco-wdt.service
+cat /proc/cmdline                                             # after the next boot: quiet reboot=efi, no splash
+```
+
+`archon-user/verify.sh` (section 1, from [`watchdog/verify-host.sh`](watchdog/verify-host.sh))
+checks `/dev/watchdog0`, a non-zero `RuntimeWatchdogUSec`, the `active` state and
+no `splash` on `/proc/cmdline`. Each is a WARN until the drop-ins are installed, a FAIL after.
+`splash` stays a WARN while the grub drop-in is newer than the current boot.
+
 ## /tmp on the NVMe
 
 Why (#133): `/` is `sdb2`, a 218 GB SATA SSD, and `/tmp` lived on it. Agent
@@ -333,15 +413,19 @@ vm.dirty_background_ratio=10`).
 /tmp on the NVMe: `systemctl disable tmp.mount && rm /etc/systemd/system/tmp.mount && systemctl daemon-reload`,
 then reboot (`/tmp` is back on `/`; `/mnt/ext-fast/.tmp-root` can go afterwards); the
 age rule: `rm /etc/tmpfiles.d/tmp.conf` (Ubuntu's 30 days is back). The /tmp Cargo config: `rm /etc/tmpfiles.d/cargo-tmp-build-dir.conf && rm -rf /tmp/.cargo`.
+Watchdog: `rm /etc/systemd/system.conf.d/60-watchdog.conf && systemctl daemon-reload` (PID 1 stops pinging and
+disarms it), then `systemctl disable itco-wdt.service && rm /etc/systemd/system/itco-wdt.service` (the module
+stays loaded until the next boot). Cmdline: `rm /etc/default/grub.d/90-interstellar.cfg && update-grub`
+(`/etc/default/grub`'s value is back from the next boot).
 The NodeSource change is a one-way version bump; the pre-change file is kept as
 `nodesource.sources.bak-<date>`.
 
 ## Tests
 
 ```
-bunx bats ops/cron/tests/host-install.bats ops/cron/tests/system-maintenance.bats ops/cron/tests/pipeline-health-system-maintenance.bats ops/cron/tests/safe-reboot.bats
-systemd-analyze verify ops/host/tmp-on-nvme/tmp.mount
-shellcheck ops/host/install.sh ops/host/smartd-ntfy ops/host/safe-reboot/safe-reboot ops/cron/system-maintenance.sh
+bunx bats ops/cron/tests/host-install.bats ops/cron/tests/system-maintenance.bats ops/cron/tests/pipeline-health-system-maintenance.bats ops/cron/tests/safe-reboot.bats ops/cron/tests/host-watchdog.bats
+systemd-analyze verify ops/host/tmp-on-nvme/tmp.mount ops/host/watchdog/itco-wdt.service
+shellcheck ops/host/install.sh ops/host/smartd-ntfy ops/host/safe-reboot/safe-reboot ops/host/watchdog/verify-host.sh ops/cron/system-maintenance.sh
 visudo -c -f ops/host/sudoers-archon-cron
 ```
 
@@ -349,6 +433,9 @@ visudo -c -f ops/host/sudoers-archon-cron
 `HOST_INSTALL_SUDOERS_D=<dir>` test hook (sandboxed `sudoers.d`, root check
 skipped, stops after step 1) with `visudo` and `install` stubbed on `PATH`.
 The other steps can only be exercised with `--dry-run` without root.
+`host-watchdog.bats` runs `watchdog/verify-host.sh` against a sandbox (stubbed
+`systemctl`, fake sysfs and `/proc/cmdline`), install.sh's `grub_cfg_current`
+against fake `grub.cfg` files, and checks the grub.d sourcing order.
 `safe-reboot.bats` runs the gate and the restore as a normal user
 (`SAFE_REBOOT_TEST=1`, every path a `SAFE_REBOOT_*` override) against stubbed
 `bun`, `pgrep`, `systemctl`, `systemd-run`, `tmux`, `curl` and reboot command.

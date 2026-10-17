@@ -1,0 +1,28 @@
+# Managed by interstellarai.net ops/host/install.sh (ops/host/watchdog/itco-wdt.service).
+#
+# Loads the chipset's hardware watchdog (Intel PCH TCO, iTCO_wdt) early in
+# boot, so PID 1 can arm it (RuntimeWatchdogSec / RebootWatchdogSec in
+# /etc/systemd/system.conf.d/60-watchdog.conf).
+#
+# Not /etc/modules-load.d: Ubuntu's linux-hwe packages ship
+# /lib/modprobe.d/blacklist_linux-hwe-<ver>.conf with `blacklist iTCO_wdt`,
+# and systemd-modules-load probes with KMOD_PROBE_APPLY_BLACKLIST, which
+# refuses a blacklisted module even by its own name ("deny-listed (by kmod)").
+# The modprobe tool applies a blacklist to alias lookups only, so a plain
+# `modprobe iTCO_wdt` loads it (no -b, which is why this is not modprobe@.service:
+# that runs `modprobe -abq`).
+[Unit]
+Description=Load the iTCO hardware watchdog (blacklisted by Ubuntu, loaded by name)
+Documentation=https://github.com/alexsiri7/interstellarai.net/blob/main/ops/host/README.md#hardware-watchdog
+DefaultDependencies=no
+After=systemd-modules-load.service
+Before=sysinit.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/sbin/modprobe iTCO_wdt
+
+[Install]
+WantedBy=sysinit.target
