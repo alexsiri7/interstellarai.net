@@ -2568,7 +2568,7 @@ check_claude_auth() {
 }
 
 # ----------------------------------------------------------------------------
-# Check 9g: Doppler token. Every script reads its secrets from Doppler through
+# Check 9h: Doppler token. Every script reads its secrets from Doppler through
 #   lib/secrets.sh and quietly falls back to secrets.env when the read-only
 #   service token is missing or refused; this is the one place that says so,
 #   and that a token others can read is not left that way. Alerts once per
