@@ -60,7 +60,7 @@ SMARTCTL=/usr/sbin/smartctl
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/secrets.sh
 source "$SCRIPT_DIR/lib/secrets.sh"
-secrets_load NTFY_TOPIC
+secrets_load NTFY_TOPIC SYSTEM_MAINT_SMART_SKIP SYSTEM_MAINT_SMART_DEVTYPE
 : "${NTFY_TOPIC:?NTFY_TOPIC not set — add it to Doppler factory/prd}"
 
 # Per-disk SMART settings, keyed by the name lsblk prints; read after
