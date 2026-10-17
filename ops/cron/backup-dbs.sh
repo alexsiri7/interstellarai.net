@@ -29,16 +29,15 @@ set -euo pipefail
 # cron's PATH is /usr/bin:/bin — ~/.local/bin (pg_dump 17) must come first.
 export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
 
-# Secrets: ANNIE_DB_URL, RELI_DB_URL, FILMDUEL_DB_URL, KINDRED_DB_URL, LACHESIS_DB_URL,
-# MUSENMINGLE_DB_URL (+ optional NTFY_TOPIC) loaded from an env file outside the repo. chmod 600.
-# Override with $ARCHON_CRON_SECRETS.
-SECRETS_FILE="${ARCHON_CRON_SECRETS:-$HOME/.config/archon-cron/secrets.env}"
-# shellcheck source=/dev/null
-[ -r "$SECRETS_FILE" ] && . "$SECRETS_FILE"
-
 CRON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/pg-backup.sh
 . "$CRON_DIR/lib/pg-backup.sh"
+# Secrets: every URL variable of PG_BACKUP_PROJECTS (+ optional NTFY_TOPIC),
+# from Doppler factory/prd.
+# shellcheck source=lib/secrets.sh
+. "$CRON_DIR/lib/secrets.sh"
+mapfile -t url_vars < <(pg_backup_url_vars)
+secrets_load NTFY_TOPIC "${url_vars[@]}"
 
 BACKUP_ROOT="${BACKUP_ROOT:-/mnt/steam-slow/backups}"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
@@ -90,7 +89,7 @@ backup_project() {
     local server_major client_major found rows
 
     if [ -z "$url" ]; then
-        log "SKIP: $name — $url_var not set (populate $SECRETS_FILE)"
+        log "SKIP: $name — $url_var not set (add it to Doppler factory/prd)"
         return 2
     fi
 

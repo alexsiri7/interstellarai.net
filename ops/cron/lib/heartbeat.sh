@@ -17,7 +17,7 @@
 # marker in $HEARTBEAT_STATE_DIR (default
 # ~/.archon/pipeline-health-state/heartbeat), written only once the ntfy went
 # out; removed, with a `recovered` log line, when the cron ticks again.
-# NTFY_TOPIC comes from the caller (lib/trust.sh or secrets.env).
+# NTFY_TOPIC comes from the caller (lib/trust.sh or secrets_load).
 
 [ -n "${_ARCHON_HEARTBEAT_SH:-}" ] && return 0
 _ARCHON_HEARTBEAT_SH=1

@@ -14,7 +14,7 @@
 # that archive (the `<archive>.meta` sidecar, or the OK: line in the
 # db-backup log for archives made before the sidecar existed).
 #
-# Nothing here connects to the real databases: secrets.env is read only for
+# Nothing here connects to the real databases: the secrets are read only for
 # NTFY_TOPIC and to know which projects are configured (unset URL → skipped,
 # exactly as backup-dbs.sh skips them).
 #
@@ -46,14 +46,15 @@ set -euo pipefail
 PG_BIN="${PG_BIN:-$HOME/.local/opt/postgresql-17/bin}"
 export PATH="$PG_BIN:$HOME/.local/bin:/usr/local/bin:$PATH"
 
-# Secrets: only NTFY_TOPIC and the presence of <PROJECT>_DB_URL are used.
-SECRETS_FILE="${ARCHON_CRON_SECRETS:-$HOME/.config/archon-cron/secrets.env}"
-# shellcheck source=/dev/null
-[ -r "$SECRETS_FILE" ] && . "$SECRETS_FILE"
-
 CRON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/pg-backup.sh
 . "$CRON_DIR/lib/pg-backup.sh"
+# Secrets (Doppler factory/prd): only NTFY_TOPIC and the presence of each
+# <PROJECT>_DB_URL are used.
+# shellcheck source=lib/secrets.sh
+. "$CRON_DIR/lib/secrets.sh"
+mapfile -t url_vars < <(pg_backup_url_vars)
+secrets_load NTFY_TOPIC "${url_vars[@]}"
 # Never let a stray libpq variable point the throwaway psql anywhere else.
 pg_clear_env
 
@@ -235,7 +236,7 @@ restore_project() {
     local t0 ms found ntables fks got fk_re
 
     if [ -z "${!url_var:-}" ]; then
-        log "SKIP: $name — $url_var not set (populate $SECRETS_FILE)"
+        log "SKIP: $name — $url_var not set (add it to Doppler factory/prd)"
         STATUS_LINES+=("$name=skipped")
         return 2
     fi

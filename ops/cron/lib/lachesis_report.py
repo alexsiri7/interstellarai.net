@@ -35,14 +35,14 @@ one 1-token haiku request.
 
 Env:
   LACHESIS_URL            default https://lachesis.interstellarai.net/mcp
-  LACHESIS_FACTORY_TOKEN  required (secrets.env)
+  LACHESIS_FACTORY_TOKEN  required (Doppler factory/prd)
   LACHESIS_FUEL_SOURCES   account=path[:path...][;account=...]
   LACHESIS_RUN_ACCOUNT    default factory: the account of a run the ledger does not name
   LACHESIS_RUN_LEDGER     default ~/.local/state/archon-cron/run-accounts.tsv
   LACHESIS_FUEL_MAX_AGE_HOURS  default 2: older plan-usage.json records are not reported
   LACHESIS_FUEL_REFRESH_MINUTES  default 25: older readings are refreshed by a fuel probe
   ARCHON_MAIN_ACCOUNT     on: main may be probed (lachesis-report.sh sets it from the owner's flag)
-  NTFY_TOPIC              ntfy.sh topic for the stale-fuel escalation (secrets.env)
+  NTFY_TOPIC              ntfy.sh topic for the stale-fuel escalation (Doppler factory/prd)
   ARCHON_AS_WRAPPER       default /usr/local/bin/archon-as-archon
   ARCHON_DB               default /mnt/ext-fast/archon-home/.archon/archon.db
   LACHESIS_REPORT_STATE   default ~/.local/state/archon-cron/lachesis-report.json
