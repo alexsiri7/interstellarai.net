@@ -29,6 +29,7 @@ setup() {
     export ARCHON_UPDATE_HEALTH_TIMEOUT=4
     export ARCHON_RUNS_SNAPSHOT="$T/runs-snapshot"
     export ARCHON_UPDATE_ISSUE_REPO="alexsiri7/Archon"
+    export ARCHON_UPDATE_REQUIRED_WORKFLOWS="archon-architect archon-ship"   # what validate-report lists
 
     export NTFY_LOG="$T/ntfy"            # "<title> | <body>" per ntfy
     export BUN_ARGV="$T/bun-argv"        # every bun invocation: "<cwd> :: <args>"
@@ -37,6 +38,7 @@ setup() {
     export STUB_TYPECHECK_RC=0
     export STUB_TEST_FAIL=""             # name of a test that fails under the new tree
     export STUB_VALIDATE_NEW_ERROR=""    # workflow that errors only under the new CLI
+    export STUB_VALIDATE_NEW_DROP=""     # workflow the new CLI no longer lists
     export STUB_GENERATE_CHANGE=0        # 1: generate:bundled rewrites the generated file
     export STUB_BUN_LOCK_CHANGE=0        # 1: bun install (unfrozen) rewrites bun.lock
     export STUB_HEALTH_FAIL_VERSION=""   # live VERSION for which the health URL answers 500
@@ -56,11 +58,11 @@ write_stubs() {
     # A validate report in the CLI's shape: one pre-existing error, always.
     cat > "$T/bin/validate-report" <<'STUB'
 #!/usr/bin/env bash
-# $1 = dir, $2 = extra erroring workflow (optional)
+# $1 = dir, $2 = extra erroring workflow (optional), $3 = workflow not listed (optional)
 echo
 echo "Validating workflows in $1"
 echo
-echo "  archon-architect                         ok"
+[ "${3:-}" = archon-architect ] || echo "  archon-architect                         ok"
 echo "  archon-smart-pr-review                   ERRORS"
 echo "    ERROR [mcp] Node 'notify': MCP config file not found: '.archon/mcp/ntfy.json'"
 [ -n "${2:-}" ] && printf '  %-40s ERRORS\n    ERROR [schema] stub\n' "$2"
@@ -93,7 +95,7 @@ case "$*" in
     */packages/cli/src/cli.ts" validate workflows --cwd "*)
         cli="$1"; wt="${cli%/packages/cli/src/cli.ts}"
         [ -f "$wt/VERSION" ] || { echo "stub: no VERSION in $wt" >&2; exit 2; }
-        validate-report "${*##* --cwd }" "$STUB_VALIDATE_NEW_ERROR"; exit 1 ;;
+        validate-report "${*##* --cwd }" "$STUB_VALIDATE_NEW_ERROR" "$STUB_VALIDATE_NEW_DROP"; exit 1 ;;
 esac
 echo "bun stub: unexpected $*" >&2; exit 2
 STUB
@@ -296,6 +298,7 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
 }
 
 @test "merge conflict: aborted, worktree removed, ntfy with the files, one issue per tag" {
+    unset ARCHON_UPDATE_ISSUE_REPO      # the default: the ops repo (issues are off on the fork)
     publish_release 0.11.0 conflict
     before=$(live_sha)
     run "$SCRIPT"
@@ -306,8 +309,11 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
     [ "$(status_field last_ok)" = "0" ]
     grep -q '^Archon update FAILED: merge | merge conflicts' "$NTFY_LOG"
     [ "$(issues_filed)" -eq 1 ]
-    grep -q '^issue create --repo alexsiri7/Archon --title Upstream v0.11.0 merge conflicts --body ' "$GH_ARGV"
+    grep -q '^issue create --repo alexsiri7/interstellarai.net --title Upstream v0.11.0 merge conflicts --body ' "$GH_ARGV"
+    grep -q -- '--label manual-review$' "$GH_ARGV"
+    grep -q '^label create manual-review --repo alexsiri7/interstellarai.net' "$GH_ARGV"
     grep -q 'README.md' "$GH_ARGV"
+    grep -q 'it adopts origin/upstream-sync-0.11.0 instead of merging again' "$GH_ARGV"
     grep -q 'ARCHON-0.10-CUTOVER.md' "$GH_ARGV"
     [ "$(cat "$T/state/archon-update-issue-v0.11.0")" = "https://github.com/alexsiri7/Archon/issues/101" ]
     # nothing left behind, live untouched, nothing ran in the worktree
@@ -405,16 +411,102 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
     git -C "$T/live" show-ref --verify --quiet refs/heads/upstream-sync-0.11.0
     [ ! -d "$T/wt/archon-update-v0.11.0" ]
 
-    # the next attempt rebuilds the branch and refuses to push over the diverged one
+    rolled=$(git -C "$T/origin.git" rev-parse refs/heads/upstream-sync-0.11.0)
+    [ "$(cat "$T/state/archon-update-rolled-back-v0.11.0")" = "$rolled" ]
+
+    # the next attempt does not adopt the branch it rolled back
     export STUB_HEALTH_FAIL_VERSION=""
-    rm -f "$NTFY_LOG" "$SYSTEMCTL_ARGV"
+    rm -f "$NTFY_LOG" "$SYSTEMCTL_ARGV" "$BUN_ARGV"
     run "$SCRIPT"
     [ "$status" -eq 1 ]
-    [ "$(status_field last_run_failed)" = "push" ]
+    [ "$(status_field last_run_failed)" = "adopt" ]
     [ "$(live_sha)" = "$old_sha" ]
     [ ! -f "$SYSTEMCTL_ARGV" ]
-    grep -q '^Archon update FAILED: push |' "$NTFY_LOG"
-    [ -d "$T/wt/archon-update-v0.11.0" ]
+    [ ! -f "$BUN_ARGV" ]
+    grep -q '^Archon update FAILED: adopt | origin/upstream-sync-0.11.0 is the build that was rolled back' "$NTFY_LOG"
+
+    # a fixed commit pushed on top is adopted
+    rm -rf "$T/fix" && git clone -q -b upstream-sync-0.11.0 "$T/origin.git" "$T/fix" 2>/dev/null
+    (cd "$T/fix" && echo fixed > FIX.md && git add FIX.md && git commit -q -m "fix the swap" && git push -q origin upstream-sync-0.11.0)
+    rm -f "$NTFY_LOG"
+    run "$SCRIPT"
+    echo "$output"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"adopting the hand-resolved origin/upstream-sync-0.11.0"* ]]
+    [ "$(live_branch)" = "upstream-sync-0.11.0" ]
+    [ -f "$T/live/FIX.md" ]
+    [ "$(status_field outcome)" = "updated" ]
+}
+
+@test "conflict resolved by hand and pushed to the fork: adopted, merge skipped, proven, swapped" {
+    publish_release 0.11.0 conflict
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "merge" ]
+    old_sha=$(live_sha)
+
+    # the resolution, made where the issue says: a worktree of the live repo
+    git -C "$T/live" worktree add -q -b upstream-sync-0.11.0 "$T/hand" upstream-sync-0.10
+    (
+        cd "$T/hand"
+        git merge -q v0.11.0 >/dev/null 2>&1 || true
+        printf 'readme v2 (0.11.0)\nfactory line\n' > README.md
+        git add -A && git commit -q --no-edit
+        git push -q -u origin upstream-sync-0.11.0 2>/dev/null
+    )
+    resolved=$(git -C "$T/hand" rev-parse HEAD)
+    # leftovers of the hand resolution in the same names are fine: the branch is on the fork
+    git -C "$T/live" worktree remove "$T/hand"
+
+    rm -f "$NTFY_LOG" "$BUN_ARGV"
+    run "$SCRIPT"
+    echo "$output"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"deleting leftover local branch upstream-sync-0.11.0"* ]]
+    [[ "$output" == *"adopting the hand-resolved origin/upstream-sync-0.11.0 at $resolved (contains v0.11.0 and $old_sha) — merge skipped"* ]]
+    [[ "$output" != *"+ git merge --no-edit"* ]]
+    wt="$T/wt/archon-update-v0.11.0"
+    grep -q "^$wt :: run type-check\$" "$BUN_ARGV"
+    grep -q "^$wt :: --filter \* test\$" "$BUN_ARGV"
+    [ "$(live_branch)" = "upstream-sync-0.11.0" ]
+    [ "$(live_sha)" = "$resolved" ]
+    [ "$(git -C "$T/origin.git" rev-parse refs/heads/upstream-sync-0.11.0)" = "$resolved" ]
+    [ "$(cat "$T/live/VERSION")" = "0.11.0" ]
+    [ -f "$T/live/FACTORY.md" ]
+    [ "$(status_field outcome)" = "updated" ]
+    grep -q '^Archon updated v0.10.1 → v0.11.0 |' "$NTFY_LOG"
+}
+
+@test "a fork branch that lacks the live HEAD or the tag is not adopted" {
+    publish_release 0.11.0
+    # a branch on the fork made from the tag alone: the factory commit is missing
+    rm -rf "$T/bad" && git clone -q "$T/upstream.git" "$T/bad" 2>/dev/null
+    (cd "$T/bad" && git checkout -q -b upstream-sync-0.11.0 v0.11.0 && git push -q "$T/origin.git" upstream-sync-0.11.0)
+    before=$(live_sha)
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "adopt" ]
+    grep -q '^Archon update FAILED: adopt | origin/upstream-sync-0.11.0 exists but does not contain both v0.11.0 and the live HEAD' "$NTFY_LOG"
+    [ "$(live_sha)" = "$before" ]
+    [ ! -f "$BUN_ARGV" ]
+    [ ! -f "$SYSTEMCTL_ARGV" ]
+}
+
+@test "a cron-launched workflow the new engine stops listing fails validation" {
+    publish_release 0.11.0
+    export STUB_VALIDATE_NEW_DROP=archon-architect
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "validate" ]
+    [[ "$output" == *"$T/projects/reli: !missing:archon-architect"* ]]
+    [ "$(live_branch)" = "upstream-sync-0.10" ]
+
+    # a required workflow missing under both engines is not a regression
+    export STUB_VALIDATE_NEW_DROP="" ARCHON_UPDATE_REQUIRED_WORKFLOWS="archon-ship archon-not-installed"
+    rm -f "$T/state/archon-update-issue-v0.11.0"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"errors before [!missing:archon-not-installed archon-smart-pr-review] after [!missing:archon-not-installed archon-smart-pr-review]"* ]]
 }
 
 @test "an active archon run defers the update: nothing fetched, status deferred, last_ok untouched" {

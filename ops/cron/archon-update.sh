@@ -27,7 +27,20 @@
 #      `git worktree add -b upstream-sync-<version> $ARCHON_WORKTREE_BASE/archon-update-<tag> <live branch>`
 #      and `git merge --no-edit <tag>`. Conflicts → merge aborted, worktree and
 #      branch removed, ntfy with the file list, one GitHub issue per tag on
-#      $ARCHON_UPDATE_ISSUE_REPO (marker archon-update-issue-<tag>), status failed.
+#      $ARCHON_UPDATE_ISSUE_REPO (alexsiri7/interstellarai.net, labelled
+#      manual-review so the factory leaves it alone; marker
+#      archon-update-issue-<tag>), status failed.
+#      Adopting a hand-resolved merge: when $ARCHON_UPDATE_ORIGIN_REMOTE already
+#      has upstream-sync-<version> and that branch contains both the tag and the
+#      live HEAD, the worktree is made from it and the merge is skipped (log
+#      "adopting ..."); steps 4-5 then run unchanged, and the push is a no-op
+#      unless step 4 adds a bun.lock commit. So a conflicting week is finished by
+#      resolving the merge anywhere, pushing it to the fork under that name, and
+#      running this script (or waiting for Sunday). A fork branch that does not
+#      contain both fails the run (step `adopt`) rather than being merged over,
+#      and so does one this script already rolled back (marker
+#      archon-update-rolled-back-<tag> holds its sha): push a fixed commit, or
+#      delete the branch on the fork to go back to merging.
 #   4. prove it, in the worktree: `bun install` (bun.lock committed if the
 #      merge left it stale), `bun run type-check`, the test suite, bundled
 #      defaults regenerated and committed (`bun run generate:bundled`, the
@@ -40,6 +53,11 @@
 #      workflow that errors under the new engine and not under the old one
 #      fails the run. Any failure → ntfy + issue as in 3, the worktree is KEPT
 #      for inspection (the message says where), status failed.
+#      Validation also checks presence: every workflow in
+#      $ARCHON_UPDATE_REQUIRED_WORKFLOWS (the ones the ops crons launch) that the
+#      live CLI lists in a directory must still be listed by the new one. A
+#      release that stops shipping a workflow (v0.12.0 dropped the legacy
+#      defaults) otherwise passes, because a missing workflow has no errors.
 #      The test suite is `bun --filter '*' test && bun test ./scripts/`, the
 #      serial form of package.json's `test` script: `bun run test` adds
 #      --parallel, which on this box turns 5 s per-test timeouts into red
@@ -75,7 +93,8 @@
 # ARCHON_UPDATE_SERVICE, ARCHON_UPDATE_HEALTH_URL, ARCHON_UPDATE_HEALTH_TIMEOUT,
 # ARCHON_UPDATE_VALIDATE_DIRS (space-separated; default: every existing
 # $ARCHON_UPDATE_PROJECT_ROOT/<project> from archon-projects.txt),
-# ARCHON_UPDATE_PROJECT_ROOT (/mnt/ext-fast), ARCHON_CRON_LOG_DIR,
+# ARCHON_UPDATE_PROJECT_ROOT (/mnt/ext-fast), ARCHON_UPDATE_REQUIRED_WORKFLOWS
+# (space-separated), ARCHON_UPDATE_ISSUE_LABEL, ARCHON_CRON_LOG_DIR,
 # ARCHON_CRON_SECRETS / ARCHON_CRON_DOPPLER_TOKEN (lib/secrets.sh).
 
 set -uo pipefail
@@ -101,11 +120,17 @@ LIVE_DIR="${ARCHON_LIVE_DIR:-/mnt/ext-fast/archon}"
 WORKTREE_BASE="${ARCHON_WORKTREE_BASE:-/mnt/ext-fast/archon-playground}"
 UPSTREAM="${ARCHON_UPDATE_UPSTREAM_REMOTE:-upstream}"
 ORIGIN="${ARCHON_UPDATE_ORIGIN_REMOTE:-origin}"
-ISSUE_REPO="${ARCHON_UPDATE_ISSUE_REPO:-alexsiri7/Archon}"
+# Issues are disabled on the fork (alexsiri7/Archon); file on the ops repo,
+# under a human-intent label (lib/human-labels.sh) so triage never takes it.
+ISSUE_REPO="${ARCHON_UPDATE_ISSUE_REPO:-alexsiri7/interstellarai.net}"
+ISSUE_LABEL="${ARCHON_UPDATE_ISSUE_LABEL-manual-review}"
 SERVICE="${ARCHON_UPDATE_SERVICE:-archon-serve.service}"
 HEALTH_URL="${ARCHON_UPDATE_HEALTH_URL:-http://127.0.0.1:3090/}"
 HEALTH_TIMEOUT="${ARCHON_UPDATE_HEALTH_TIMEOUT:-60}"
 PROJECT_ROOT="${ARCHON_UPDATE_PROJECT_ROOT:-/mnt/ext-fast}"
+# What the ops crons launch (issue-pickup, pr-review, pr-maintenance,
+# pipeline-health, sweep-audits) and archon-user/install.sh + verify.sh run.
+REQUIRED_WORKFLOWS="${ARCHON_UPDATE_REQUIRED_WORKFLOWS-archon-ship archon-review archon-triage-issue archon-pr-maintenance archon-assist archon-architect archon-security-audit archon-test-audit archon-requirements-audit}"
 RUNBOOK="ops/cron/ARCHON-0.10-CUTOVER.md and the 'Archon auto-update' section of ops/cron/README.md (interstellarai.net)"
 
 # shellcheck source=lib/secrets.sh
@@ -161,7 +186,13 @@ file_issue() {
         log "issue for $TAG already filed: $(cat "$marker")"
         return 0
     fi
-    if url=$(gh issue create --repo "$ISSUE_REPO" --title "$title" --body "$body" 2>&1); then
+    local -a label=()
+    if [ -n "$ISSUE_LABEL" ]; then
+        gh label create "$ISSUE_LABEL" --repo "$ISSUE_REPO" --color B60205 \
+            --description "Factory escalation — needs human attention" --force >/dev/null 2>&1 || true
+        label=(--label "$ISSUE_LABEL")
+    fi
+    if url=$(gh issue create --repo "$ISSUE_REPO" --title "$title" --body "$body" "${label[@]}" 2>&1); then
         printf '%s\n' "$url" > "$marker"
         log "filed $url"
     else
@@ -223,7 +254,17 @@ validate_errors() {
     local dir="$1" out
     out=$(cd "$dir" && LOG_LEVEL=silent "${cli[@]}" validate workflows --cwd "$dir" 2>&1)
     printf '%s\n' "$out" | grep -q '^Results: ' || { echo '!no-results'; printf '%s\n' "$out" | tail -n 5 | sed 's/^/    /' >&2; }
-    printf '%s\n' "$out" | sed -nE 's/^  ([^ ]+) +ERRORS$/\1/p' | sort -u
+    # Presence: a required workflow this CLI does not list at all, as
+    # "!missing:<name>". Compared before/after like the errors, so one missing
+    # under both engines is not new.
+    local listed w
+    listed=$(printf '%s\n' "$out" | sed -nE 's/^  ([^ ]+) +(ok|WARNINGS|ERRORS)$/\1/p')
+    {
+        printf '%s\n' "$out" | sed -nE 's/^  ([^ ]+) +ERRORS$/\1/p'
+        for w in $REQUIRED_WORKFLOWS; do
+            printf '%s\n' "$listed" | grep -qxF -- "$w" || echo "!missing:$w"
+        done
+    } | LC_ALL=C sort -u
 }
 
 validate_dirs() {
@@ -367,6 +408,36 @@ if git -C "$LIVE_DIR" show-ref --verify --quiet "refs/heads/$BRANCH"; then
     git -C "$LIVE_DIR" branch -q -D "$BRANCH" 2>&1 | sed 's/^/    /'
 fi
 mkdir -p "$WORKTREE_BASE"
+
+# A hand-resolved merge pushed to the fork as $BRANCH is adopted instead of
+# re-merged (header, step 3). The fetch writes one remote-tracking ref.
+ROLLED_BACK_FILE="$STATE_DIR/archon-update-rolled-back-$TAG"
+ADOPT_SHA=""
+remote_sha=$(git -C "$LIVE_DIR" ls-remote --heads "$ORIGIN" "refs/heads/$BRANCH" 2>/dev/null | awk 'NR == 1 { print $1 }')
+if [ -n "$remote_sha" ]; then
+    if [ "$(cat "$ROLLED_BACK_FILE" 2>/dev/null)" = "$remote_sha" ]; then
+        fail_run adopt "$ORIGIN/$BRANCH is the build that was rolled back" \
+            "$ORIGIN/$BRANCH is still at $remote_sha, which failed the health check after the swap and was rolled back. Push a fixed commit to $BRANCH on $ORIGIN, or delete that branch there to go back to merging $TAG."
+    fi
+    log "+ git fetch --no-tags $ORIGIN refs/heads/$BRANCH:refs/remotes/$ORIGIN/$BRANCH"
+    if ! git -C "$LIVE_DIR" fetch -q --no-tags "$ORIGIN" "+refs/heads/$BRANCH:refs/remotes/$ORIGIN/$BRANCH" 2>&1 | sed 's/^/    /'; then
+        fail_run adopt "could not fetch $BRANCH from $ORIGIN" "git fetch $ORIGIN refs/heads/$BRANCH failed in $LIVE_DIR."
+    fi
+    if ! git -C "$LIVE_DIR" merge-base --is-ancestor "$TAG" "$remote_sha" 2>/dev/null \
+        || ! git -C "$LIVE_DIR" merge-base --is-ancestor "$LIVE_SHA" "$remote_sha" 2>/dev/null; then
+        fail_run adopt "$ORIGIN/$BRANCH exists but does not contain both $TAG and the live HEAD" \
+            "$ORIGIN/$BRANCH ($remote_sha) must descend from $TAG and from $LIVE_BRANCH ($LIVE_SHA) to be adopted. Merge $LIVE_BRANCH into it, or delete it on $ORIGIN to go back to merging $TAG."
+    fi
+    ADOPT_SHA="$remote_sha"
+fi
+
+if [ -n "$ADOPT_SHA" ]; then
+    log "adopting the hand-resolved $ORIGIN/$BRANCH at $ADOPT_SHA (contains $TAG and $LIVE_SHA) — merge skipped"
+    log "+ git worktree add -b $BRANCH $WORKTREE $ADOPT_SHA"
+    if ! git -C "$LIVE_DIR" worktree add -q -b "$BRANCH" "$WORKTREE" "$ADOPT_SHA" 2>&1 | sed 's/^/    /'; then
+        fail_run worktree "could not create worktree $WORKTREE" "git worktree add -b $BRANCH $WORKTREE $ADOPT_SHA failed."
+    fi
+else
 log "+ git worktree add -b $BRANCH $WORKTREE $LIVE_BRANCH"
 if ! git -C "$LIVE_DIR" worktree add -q -b "$BRANCH" "$WORKTREE" "$LIVE_BRANCH" 2>&1 | sed 's/^/    /'; then
     fail_run worktree "could not create worktree $WORKTREE" "git worktree add -b $BRANCH $WORKTREE $LIVE_BRANCH failed."
@@ -382,10 +453,11 @@ if ! git -C "$WORKTREE" merge --no-edit "$TAG" > "$LOG_DIR/archon-update-$TAG-me
     log "conflicting files: $(printf '%s' "$conflicts" | tr '\n' ' ')"
     # shellcheck disable=SC2016  # the ``` fences are issue markdown, not shell
     fail_run merge "merge conflicts" \
-        "$(printf 'Conflicting files:\n\n```\n%s\n```\n\nResolve by hand as the 0.10.1 merge was done:\n\n```\ncd %s && git worktree add -b %s %s %s\ncd %s && git merge %s   # resolve, then bun install && bun run generate:bundled && commit\n```' \
-            "${conflicts:-(none listed — see the merge log)}" "$LIVE_DIR" "$BRANCH" "$WORKTREE" "$LIVE_BRANCH" "$WORKTREE" "$TAG")"
+        "$(printf 'Conflicting files:\n\n```\n%s\n```\n\nResolve by hand, push the result to the fork under the same branch name, then run ops/cron/archon-update.sh (or wait for Sunday): it adopts %s/%s instead of merging again and does the rest (prove, push, swap, health, rollback).\n\n```\ncd %s && git worktree add -b %s <dir> %s\ncd <dir> && git merge %s   # resolve, commit\nbun install && bun run type-check && git push -u %s %s\ngit -C %s worktree remove <dir> && git -C %s branch -D %s\n```' \
+            "${conflicts:-(none listed — see the merge log)}" "$ORIGIN" "$BRANCH" "$LIVE_DIR" "$BRANCH" "$LIVE_BRANCH" "$TAG" "$ORIGIN" "$BRANCH" "$LIVE_DIR" "$LIVE_DIR" "$BRANCH")"
 fi
 log "merged $TAG into $BRANCH: $(git -C "$WORKTREE" rev-parse --short HEAD)"
+fi
 
 # --- 4. prove it ---------------------------------------------------------------
 WORKTREE_KEPT="$WORKTREE"
@@ -466,6 +538,8 @@ if swap_live "$BRANCH" "$TAG"; then
 fi
 
 log "ERROR: $BRANCH is not healthy — rolling back to $LIVE_BRANCH ($LIVE_SHA)"
+NEW_SHA=$(git -C "$LIVE_DIR" rev-parse "$BRANCH" 2>/dev/null)
+[ -n "$NEW_SHA" ] && printf '%s\n' "$NEW_SHA" > "$ROLLED_BACK_FILE"
 if swap_live "$LIVE_BRANCH" "$CURRENT" || swap_live "$LIVE_SHA" "$CURRENT"; then
     write_status failed failed health-rolled-back
     notify "Archon update rolled back" \
