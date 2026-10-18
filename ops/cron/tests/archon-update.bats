@@ -87,7 +87,7 @@ case "$*" in
             echo "@archon/cli test:  1 pass"; echo "@archon/cli test:  1 fail"; exit 1
         fi
         echo "@archon/cli test:  2 pass"; echo "@archon/cli test:  0 fail"; exit 0 ;;
-    "test ./scripts/")
+    "test --timeout 30000 ./scripts/")
         echo " 147 pass"; echo " 0 fail"; exit 0 ;;
     "run generate:bundled")
         [ "$STUB_GENERATE_CHANGE" = 1 ] && echo "// regenerated for $(cat VERSION)" >> packages/workflows/src/defaults/bundled-defaults.generated.ts
@@ -251,7 +251,7 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
     grep -q "^$wt :: install\$" "$BUN_ARGV"
     grep -q "^$wt :: run type-check\$" "$BUN_ARGV"
     grep -q "^$wt :: --filter \* test\$" "$BUN_ARGV"
-    grep -q "^$wt :: test ./scripts/\$" "$BUN_ARGV"
+    grep -q "^$wt :: test --timeout 30000 ./scripts/\$" "$BUN_ARGV"
     grep -q "^$wt :: run generate:bundled\$" "$BUN_ARGV"
     grep -q "^$T/projects/reli :: $wt/packages/cli/src/cli.ts validate workflows --cwd $T/projects/reli\$" "$BUN_ARGV"
     grep -q "^$wt :: $wt/packages/cli/src/cli.ts validate workflows --cwd $wt\$" "$BUN_ARGV"

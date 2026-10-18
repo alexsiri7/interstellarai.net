@@ -58,7 +58,7 @@
 #      live CLI lists in a directory must still be listed by the new one. A
 #      release that stops shipping a workflow (v0.12.0 dropped the legacy
 #      defaults) otherwise passes, because a missing workflow has no errors.
-#      The test suite is `bun --filter '*' test && bun test ./scripts/`, the
+#      The test suite is `bun --filter '*' test && bun test --timeout 30000 ./scripts/`, the
 #      serial form of package.json's `test` script: `bun run test` adds
 #      --parallel, which on this box turns 5 s per-test timeouts into red
 #      (2026-09-19: 5 fail parallel, 8766 pass / 0 fail serial, 1m40 + 2s).
@@ -475,7 +475,10 @@ fi
 if ! run_step test "$WORKTREE" bun --filter '*' test; then
     fail_run test "package tests failed" "$(grep -E '\(fail\)' "$STEP_LOG" | sort -u | head -n 40 | sed 's/^/    /'; step_tail)"
 fi
-if ! run_step test-scripts "$WORKTREE" bun test ./scripts/; then
+# --timeout: from v0.12.0 nine scripts/ tests drive the TypeScript compiler and take
+# 5.5-6.5 s each on this box, so bun's 5 s default fails them (they pass at 30 s;
+# pristine v0.12.1 fails the same nine at 5 s).
+if ! run_step test-scripts "$WORKTREE" bun test --timeout 30000 ./scripts/; then
     fail_run test-scripts "scripts/ tests failed" "$(grep -E '\(fail\)' "$STEP_LOG" | sort -u | head -n 40 | sed 's/^/    /'; step_tail)"
 fi
 if grep -q '"generate:bundled"' "$WORKTREE/package.json" 2>/dev/null; then
