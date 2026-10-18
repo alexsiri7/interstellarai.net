@@ -57,6 +57,15 @@ fi
 # 2026-10-11). When the log carries that JSON line it is the authority: its
 # decoded summary is the report, and delivered:true (a PR) settles nothing.
 # Otherwise the plain report is read, as from --recheck's parked verdict.
+#
+# Archon v0.12 (ship tail scripts/outcome.ts) reworded the stops. "No delivery
+# needed: " (triage NO_ACTION) is unchanged; "No delivery started: " is gone and
+# its cases now read "Not done: " (triage BLOCKED or needing contract work, an
+# inconclusive investigation, planning stopped on a person's call) or "No work
+# owed in this repository: " (the investigation refuted the report). Those park
+# as "No delivery started" did (only "No delivery needed" can close) instead of
+# matching nothing and being re-queued by unstick_stale.
+VERDICT_RE='^(No delivery (needed|started)|Not done|No work owed in this repository): '
 outcome_text="$run_log"
 outcome_json=$(grep -E '^\{.*"delivered" *:' "$run_log" \
   | jq -cR 'fromjson? | select(type == "object" and (.delivered | type) == "boolean")' 2>/dev/null \
@@ -64,11 +73,11 @@ outcome_json=$(grep -E '^\{.*"delivered" *:' "$run_log" \
 if [ -n "$outcome_json" ]; then
   outcome_text=$(mktemp) || exit 1
   trap 'rm -f "$outcome_text"' EXIT
-  jq -r 'select(.delivered == false and (.summary | type) == "string"
-           and (.summary | test("^No delivery (needed|started): "))) | .summary' \
+  jq -r --arg re "$VERDICT_RE" 'select(.delivered == false and (.summary | type) == "string"
+           and (.summary | test($re))) | .summary' \
     <<<"$outcome_json" > "$outcome_text" 2>/dev/null || exit 1
 fi
-verdict=$(grep -m1 -E '^No delivery (needed|started): ' "$outcome_text" || true)
+verdict=$(grep -m1 -E "$VERDICT_RE" "$outcome_text" || true)
 [ -n "$verdict" ] || exit 1
 
 repo="alexsiri7/$project"

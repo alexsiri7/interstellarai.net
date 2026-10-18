@@ -247,6 +247,62 @@ json_outcome() {  # <delivered> <summary, with literal \n escapes>
     [ "$(gh_calls 'api ')" -eq 0 ]
 }
 
+# Archon v0.12's ship tail (scripts/outcome.ts), as archon-ship-block prints it:
+# {delivered, reason, pr_url, summary}, with the stops reworded.
+@test "v0.12 Not done verdicts park and never close, even naming a merged PR" {
+    for summary in \
+        'Not done: blocked on #12 landing first. Triage says the fix needs #12; see PR #50.\nReport: /x/triage.md' \
+        'Not done: the work item needs contract work before a run can start. Scope unclear; PR #50 touched it.\nReport: /x/triage.md' \
+        'Not done: the investigation was inconclusive. PR #50 may be related.\nReport: /x/investigation.md' \
+        'Not done: planning stopped on calls only a person can make. Pick a storage engine.\n- Postgres or SQLite?\nReport: /x/plan.md'; do
+        : > "$GH_ARGV"
+        printf '{"delivered":false,"reason":"blocked","pr_url":"","summary":"%s"}\n' "$summary" > "$RUN_LOG"
+        fixture ref-50 merged-pr
+        printf '2\t0\n' > "$T/fixtures/sub-7"
+
+        run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+        [ "$status" -eq 0 ]
+        assert_parked 7
+        grep -q -- 'archon-ship finished without a PR: Not done: ' "$GH_ARGV"
+        [ "$(gh_calls 'api ')" -eq 0 ]
+    done
+}
+
+@test "a v0.12 refuted investigation (No work owed in this repository) parks and never closes" {
+    printf '{"delivered":false,"reason":"refuted","pr_url":"","summary":"%s"}\n' \
+        'No work owed in this repository: the crash is in the upstream SDK, fixed by PR #50.\nReport: /x/investigation.md' > "$RUN_LOG"
+    fixture ref-50 merged-pr
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_parked 7
+    grep -q -- 'archon-ship finished without a PR: No work owed in this repository: the crash is in the upstream SDK, fixed by PR #50.$' "$GH_ARGV"
+    [ "$(gh_calls 'api ')" -eq 0 ]
+}
+
+@test "a v0.12 No delivery needed report with reason and pr_url still closes on a merged PR" {
+    printf '{"delivered":false,"reason":"no_action","pr_url":"","summary":"%s"}\n' \
+        'No delivery needed: already fixed by merged PR #50.\nReport: /x/triage.md' > "$RUN_LOG"
+    fixture ref-50 merged-pr
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    grep -q -- 'issue close 7 --repo alexsiri7/testproj --reason completed' "$GH_ARGV"
+}
+
+@test "a v0.12 delivered:false report from a delivery that ran settles nothing" {
+    printf '{"delivered":false,"reason":"not_ready","pr_url":"https://github.com/alexsiri7/testproj/pull/9","summary":"%s"}\n' \
+        'Delivery ended not ready: CI red after 3 rounds.' > "$RUN_LOG"
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 1 ]
+    [ "$(gh_calls 'issue ')" -eq 0 ]
+}
+
 @test "a JSON delivered:true report settles nothing, even when the log also carries a plain verdict" {
     {
         echo 'No delivery needed: an earlier node said so, but the run went on to open a PR (#50).'

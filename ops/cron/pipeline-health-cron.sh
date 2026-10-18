@@ -95,6 +95,8 @@ source "$SCRIPT_DIR/lib/archon-projects.sh"
 load_archon_projects REPOS
 # shellcheck source=lib/throttle.sh
 source "$SCRIPT_DIR/lib/throttle.sh"
+# shellcheck source=lib/ship-workflow.sh
+source "$SCRIPT_DIR/lib/ship-workflow.sh"
 if [ "$MODE" = tick ]; then
   should_tick "pipeline-health" || exit 0
   runas_may_launch "pipeline-health" || exit 0
@@ -453,8 +455,8 @@ fire_ship_and_settle() {
   (
     cd "$repo_dir"
     CLAUDECODE=0 SETTLE_SCRIPT="$SCRIPT_DIR/lib/settle-ship-outcome.sh" SETTLE_PROJECT="$project" \
-      nohup bash -c '
-        archon workflow run archon-ship "fix #$1" >"$2" 2>&1
+      SHIP_WF="$(ship_workflow)" nohup bash -c '
+        archon workflow run "$SHIP_WF" "fix #$1" >"$2" 2>&1
         "$SETTLE_SCRIPT" "$SETTLE_PROJECT" "$1" "$2"' \
       ship-wrapper "$issue_num" "${logf#"$repo_dir"/}" 2>/dev/null &
     disown
