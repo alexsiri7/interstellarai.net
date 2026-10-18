@@ -149,6 +149,8 @@ declare -A DEPLOY_URLS=(
   ["kindred"]="https://kindred.up.railway.app/healthz"
   ["zoomies"]="https://zoomies.interstellarai.net/"
   ["catscape"]="https://catscape.interstellarai.net/"
+  # /readyz, not /healthz: 503 while Kith cannot reach its database.
+  ["kith"]="https://kith.interstellarai.net/readyz"
 )
 
 # Staging deploy URLs — subset of projects that have verified staging environments.

@@ -288,6 +288,12 @@ setup_main_ci_env() {
     [ "${DEPLOY_URLS[reli]}" = "https://reli.interstellarai.net/healthz" ]
 }
 
+@test "DEPLOY_URLS probes kith at /readyz, so a lost database counts as down" {
+    # shellcheck disable=SC1090
+    source <(awk '/^declare -A DEPLOY_URLS=\(/{p=1} p{print} p && /^\)$/{p=0}' "$SCRIPT_FILE")
+    [ "${DEPLOY_URLS[kith]}" = "https://kith.interstellarai.net/readyz" ]
+}
+
 @test "STAGING_DEPLOY_URLS probes reli staging at /healthz, not the site root" {
     # shellcheck disable=SC1090
     source <(awk '/^declare -A STAGING_DEPLOY_URLS=\(/{p=1} p{print} p && /^\)$/{p=0}' "$SCRIPT_FILE")
