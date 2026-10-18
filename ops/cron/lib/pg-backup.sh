@@ -34,7 +34,8 @@
 # (role `filmduel`), Word Coach Annie into schema `annie` (role `annie`), and
 # Reli into schema `reli` (role `reli`). Muse & Mingle (formerly Thaleia; role
 # `musenmingle`) was born there (schema
-# `events`).
+# `events`). Kith was born there too (2026-10-18): schema `kith`, role
+# `kith_app`, KITH_DB_URL = that role on the session pooler.
 # `kindred-auth` backs up the Supabase Auth users of that project (schema
 # `auth`), which a `--schema=public` dump never contains.
 # shellcheck disable=SC2034  # consumed by the sourcing scripts
@@ -45,6 +46,7 @@ PG_BACKUP_PROJECTS=(
     'kindred|KINDRED_DB_URL|public|entries'
     'lachesis|LACHESIS_DB_URL|lachesis|lachesis_backlog'
     'musenmingle|MUSENMINGLE_DB_URL|events|sources'
+    'kith|KITH_DB_URL|kith|users'
     'kindred-auth|KINDRED_DB_URL|auth|users'
 )
 

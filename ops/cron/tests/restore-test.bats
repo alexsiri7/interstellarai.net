@@ -163,7 +163,7 @@ cluster_dirs() { find "$T" -maxdepth 1 -name 'restore-test.*' 2>/dev/null; }
     [[ "$output" == *"Throwaway cluster up: $T/restore-test."* ]]
     [[ "$output" == *"OK: reli restored: $T/backups/reli/reli-20260919-091701.sql.gz (224 rows in reli.things = backup count, 9 tables in reli,"* ]]
     [[ "$output" == *"SKIP: annie"* ]]
-    [[ "$output" == *"Restore test complete (ok: reli; skipped: annie filmduel kindred lachesis musenmingle kindred-auth)"* ]]
+    [[ "$output" == *"Restore test complete (ok: reli; skipped: annie filmduel kindred lachesis musenmingle kith kindred-auth)"* ]]
     grep -q -- '-A trust' "$T/initdb.argv"
     grep -q -- "-k $T/restore-test\." "$T/pg_ctl.argv"
     grep -q -- "listen_addresses=''" "$T/pg_ctl.argv"
@@ -199,7 +199,7 @@ cluster_dirs() { find "$T" -maxdepth 1 -name 'restore-test.*' 2>/dev/null; }
     run "$SCRIPT"
     [ "$status" -eq 1 ]
     [[ "$output" == *"ERROR: reli restore FAILED — reli.things has 200 rows after restore, backup recorded 224"* ]]
-    [[ "$output" == *"ERROR: restore test FAILED for: reli (ok: none; skipped: annie filmduel kindred lachesis musenmingle kindred-auth)"* ]]
+    [[ "$output" == *"ERROR: restore test FAILED for: reli (ok: none; skipped: annie filmduel kindred lachesis musenmingle kith kindred-auth)"* ]]
     grep -q '^last_run_status=failed$' "$T/state/restore-test-status"
     grep -q '^last_run_failed=reli$' "$T/state/restore-test-status"
     grep -q '^last_ok=0$' "$T/state/restore-test-status"
@@ -346,7 +346,7 @@ SQL
     run "$SCRIPT"
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK: musenmingle restored: $T/backups/musenmingle/musenmingle-20260919-091701.sql.gz (2 rows in events.sources = backup count, 9 tables in events,"* ]]
-    [[ "$output" == *"Restore test complete (ok: musenmingle; skipped: annie reli filmduel kindred lachesis kindred-auth)"* ]]
+    [[ "$output" == *"Restore test complete (ok: musenmingle; skipped: annie reli filmduel kindred lachesis kith kindred-auth)"* ]]
     f="$T/restored-restore_musenmingle.sql"
     ! grep -q 'DROP SCHEMA public' "$f"
     grep -q '^CREATE FUNCTION auth.uid()' "$f"
@@ -358,7 +358,7 @@ SQL
     run "$SCRIPT"
     [ "$status" -eq 1 ]
     [[ "$output" == *"ERROR: $T/bin/initdb missing"* ]]
-    [[ "$output" == *"ERROR: restore test FAILED for: annie,reli,filmduel,kindred,lachesis,musenmingle,kindred-auth"* ]]
+    [[ "$output" == *"ERROR: restore test FAILED for: annie,reli,filmduel,kindred,lachesis,musenmingle,kith,kindred-auth"* ]]
     grep -q '^reli=failed cluster-not-started$' "$T/state/restore-test-status"
     grep -q '^last_run_status=failed$' "$T/state/restore-test-status"
 }

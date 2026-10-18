@@ -174,4 +174,5 @@ STUB
     [ "$(printf '%s\n' "${names[@]}" | sort | uniq -d)" = "" ]
     [[ " ${PG_BACKUP_PROJECTS[*]} " == *" musenmingle|MUSENMINGLE_DB_URL|events|sources "* ]]
     [[ " ${PG_BACKUP_PROJECTS[*]} " == *" kindred-auth|KINDRED_DB_URL|auth|users "* ]]
+    [[ " ${PG_BACKUP_PROJECTS[*]} " == *" kith|KITH_DB_URL|kith|users "* ]]
 }
