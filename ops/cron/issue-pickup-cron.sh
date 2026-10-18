@@ -795,10 +795,13 @@ lachesis_next_fetch() {
   if LACHESIS_NEXT_JSON=$(lachesis_call next_issue '{}') \
       && jq -e 'has("reason")' <<<"$LACHESIS_NEXT_JSON" >/dev/null 2>&1; then
     LACHESIS_NEXT_STATE=ok
+    lachesis_next_record ok
     log "Lachesis next_issue: $(jq -r '.explanation // .reason' <<<"$LACHESIS_NEXT_JSON")"
     return 0
   fi
   LACHESIS_NEXT_STATE=failed
+  # pipeline-health and pipeline-status report a streak of these as a failure.
+  lachesis_next_record failed
   log "Lachesis next_issue could not be read — no pickup this tick"
   return 1
 }

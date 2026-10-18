@@ -102,3 +102,56 @@ lachesis_ask_once() {
   mkdir -p "$LACHESIS_STATE_DIR" 2>/dev/null && : > "$marker"
   return 0
 }
+
+# The factory's reads of next_issue, one per issue-pickup tick that asks
+# (lachesis_next_record), so that a run of failures is a visible fault: from
+# 2026-10-17 every tick's next_issue timed out and no issue was picked up for a
+# day while pipeline-health and pipeline-status called the factory healthy.
+#   $LACHESIS_NEXT_STATUS (default $LACHESIS_STATE_DIR/next-issue-status)
+#   failures=<ticks in a row that could not read it>
+#   last_ok=<epoch of the last read>   last_failed=<epoch of the last failure>
+# A streak of LACHESIS_NEXT_FAIL_MAX (default 3) or more is a failure.
+LACHESIS_NEXT_STATUS="${LACHESIS_NEXT_STATUS:-$LACHESIS_STATE_DIR/next-issue-status}"
+LACHESIS_NEXT_FAIL_MAX="${LACHESIS_NEXT_FAIL_MAX:-3}"
+
+# lachesis_next_status_get <key> — a field of the status file, empty if none.
+lachesis_next_status_get() {
+  sed -n "s/^$1=\([0-9]*\)\$/\1/p" "$LACHESIS_NEXT_STATUS" 2>/dev/null | tail -n 1
+}
+
+# lachesis_next_record ok|failed — this tick's read of next_issue. Best effort:
+# a status file that cannot be written must never cost the tick its pickup.
+lachesis_next_record() {
+  local now failures last_ok last_failed
+  now=$(date +%s)
+  failures=$(lachesis_next_status_get failures)
+  last_ok=$(lachesis_next_status_get last_ok)
+  last_failed=$(lachesis_next_status_get last_failed)
+  if [ "$1" = ok ]; then
+    failures=0 last_ok=$now
+  else
+    failures=$(( ${failures:-0} + 1 )) last_failed=$now
+  fi
+  {
+    mkdir -p "$(dirname "$LACHESIS_NEXT_STATUS")" &&
+      printf 'failures=%s\nlast_ok=%s\nlast_failed=%s\n' \
+        "$failures" "${last_ok:-0}" "${last_failed:-0}" > "$LACHESIS_NEXT_STATUS.tmp" &&
+      mv "$LACHESIS_NEXT_STATUS.tmp" "$LACHESIS_NEXT_STATUS"
+  } 2>/dev/null || true
+}
+
+# shellcheck disable=SC2034  # LACHESIS_NEXT_PROBLEM is read by its callers
+# lachesis_next_failing — true when the last LACHESIS_NEXT_FAIL_MAX or more
+# ticks in a row could not read next_issue. Sets LACHESIS_NEXT_PROBLEM to say
+# so, with when it last answered.
+lachesis_next_failing() {
+  local failures last_ok since
+  failures=$(lachesis_next_status_get failures)
+  LACHESIS_NEXT_PROBLEM=""
+  [ "${failures:-0}" -ge "$LACHESIS_NEXT_FAIL_MAX" ] || return 1
+  last_ok=$(lachesis_next_status_get last_ok)
+  since="never recorded"
+  [ "${last_ok:-0}" -gt 0 ] && since=$(date -d "@$last_ok" '+%F %H:%M' 2>/dev/null || echo "?")
+  LACHESIS_NEXT_PROBLEM="Lachesis next_issue could not be read on $failures issue-pickup ticks in a row (last read: $since)"
+  return 0
+}

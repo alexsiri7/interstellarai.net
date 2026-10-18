@@ -1082,6 +1082,24 @@ issue_json() {
     grep -q "Lachesis next_issue could not be read" "$LACHESIS_ARGV" "$LOGGED"
 }
 
+@test "lachesis: each tick's read of next_issue is recorded, so a streak of failures shows" {
+    lachesis_on
+    export LACHESIS_NEXT_RC=2
+    lachesis_pick testproj
+    LACHESIS_NEXT_STATE=""
+    lachesis_pick testproj
+    [ "$(lachesis_next_status_get failures)" = 2 ]
+    [ "$LACHESIS_NEXT_STATUS" = "$T/lachesis-state/next-issue-status" ]
+
+    unset LACHESIS_NEXT_RC
+    next_offers alexsiri7/testproj 42
+    issue_json 42
+    LACHESIS_NEXT_STATE=""
+    lachesis_pick testproj
+    [ "$(lachesis_next_status_get failures)" = 0 ]
+    [ "$(lachesis_next_status_get last_ok)" -gt 0 ]
+}
+
 @test "lachesis: a busy repo keeps the no-stacking guard and does not ask Lachesis" {
     lachesis_on
     next_offers alexsiri7/testproj 42
