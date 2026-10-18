@@ -243,7 +243,7 @@ review_fired() { # review_fired <pr-number>
     [[ "$output" == *"fired archon-review"* ]]
     [[ "$output" == *"1 on-hold, 0 ship-merging, 1 fired"* ]]
     review_fired 300
-    ! grep -q 'review PR #299' "$STUB_ARCHON_ARGV"
+    run ! grep -q 'review PR #299' "$STUB_ARCHON_ARGV"
     [ ! -f "$HOME/.archon/state/pr-review/proj-299.pid" ]
 }
 
@@ -255,7 +255,7 @@ review_fired() { # review_fired <pr-number>
     [ "$status" -eq 0 ]
     [[ "$output" == *"proj: PR #300 is a CLEAN archon-ship PR, reviewed by its run and about to merge — skipping"* ]]
     [[ "$output" == *"1 ship-merging, 0 fired"* ]]
-    ! grep -q 'workflow run archon-review' "$STUB_ARCHON_ARGV"
+    run ! grep -q 'workflow run archon-review' "$STUB_ARCHON_ARGV"
     [ ! -f "$HOME/.archon/state/pr-review/proj-300.pid" ]
 }
 
