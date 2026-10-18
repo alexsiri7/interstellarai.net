@@ -28,6 +28,8 @@ source "$SCRIPT_DIR/lib/archon-active-runs.sh"
 archon_runs_snapshot
 # shellcheck source=lib/ship-breaker.sh
 source "$SCRIPT_DIR/lib/ship-breaker.sh"
+# shellcheck source=lib/ship-workflow.sh
+source "$SCRIPT_DIR/lib/ship-workflow.sh"
 # shellcheck source=lib/quota-pause.sh
 source "$SCRIPT_DIR/lib/quota-pause.sh"
 # Checked once per tick: while the Claude account is rate limited no phase
@@ -185,7 +187,7 @@ auto_triage() {
     return
   fi
   # Parked-run guard: sdlc runs suspended at a wait: node have no process.
-  if archon_run_active "$repo_dir" "$project" '^archon-(ship|fix-github-issue|triage-issue)$'; then
+  if archon_run_active "$repo_dir" "$project" "^archon-($SHIP_WF_ALT|fix-github-issue|triage-issue)\$"; then
     return
   fi
 
@@ -422,14 +424,14 @@ unstick_stale() {
     # command line which includes the issue number in "fix #N".
     # Anchor project match to $repo_dir so e.g. `reli` does not substring-match
     # a worktree path containing `reliability`.
-    if pgrep -fa "archon workflow run archon-(ship|fix-github-issue).*#$num\\b" >/dev/null 2>&1 \
-        && pgrep -fa "archon workflow run archon-(ship|fix-github-issue)" | grep -qE "(^|[[:space:]=/])$project([[:space:]/]|\$)"; then
+    if pgrep -fa "archon workflow run archon-($SHIP_WF_ALT|fix-github-issue) .*#$num\\b" >/dev/null 2>&1 \
+        && pgrep -fa "archon workflow run archon-($SHIP_WF_ALT|fix-github-issue) " | grep -qE "(^|[[:space:]=/])$project([[:space:]/]|\$)"; then
       continue
     fi
 
     # Parked-run guard: an archon-ship run waiting durably on CI has status
     # paused and no live process — it is working, not stuck. Never re-queue it.
-    if archon_run_active "$repo_dir" "$project" '^archon-(ship|fix-github-issue)$' "#$num([^0-9]|$)"; then
+    if archon_run_active "$repo_dir" "$project" "^archon-($SHIP_WF_ALT|fix-github-issue)\$" "#$num([^0-9]|$)"; then
       continue
     fi
 
@@ -634,7 +636,7 @@ ship_slot_busy() {
   # Don't stack — if an archon run is already in flight for this repo, skip.
   # Capture the issue number from the cmdline ("fix #N") for the summary note.
   local running_for
-  running_for=$(pgrep -fa "archon workflow run archon-(ship|fix-github-issue).*--cwd.*$repo_dir" 2>/dev/null \
+  running_for=$(pgrep -fa "archon workflow run archon-($SHIP_WF_ALT|fix-github-issue) .*--cwd.*$repo_dir" 2>/dev/null \
     | grep -oE 'fix #[0-9]+' | head -1 | tr -d '#')
   if [ -n "$running_for" ]; then
     log "$project: archon already running, skipping"
@@ -645,7 +647,7 @@ ship_slot_busy() {
   # Fallback detector: look for runs started via direct cd (no --cwd).
   # Anchor project match so e.g. `reli` does not false-positive on
   # `reliability` or another slug containing the substring.
-  running_for=$(pgrep -fa "archon workflow run archon-(ship|fix-github-issue)" 2>/dev/null \
+  running_for=$(pgrep -fa "archon workflow run archon-($SHIP_WF_ALT|fix-github-issue) " 2>/dev/null \
     | grep -E "(^|[[:space:]=/])$project([[:space:]/]|\$)" | grep -oE 'fix #[0-9]+' | head -1 | tr -d '#')
   if [ -n "$running_for" ]; then
     log "$project: archon already running (cwd match), skipping"
@@ -655,7 +657,7 @@ ship_slot_busy() {
   fi
   # Parked-run guard: an archon-ship run suspended at a durable wait (CI pause)
   # has no process but is still active — do not stack a second run on the repo.
-  running_for=$(archon_run_active_msg "$repo_dir" "$project" '^archon-(ship|fix-github-issue)$' \
+  running_for=$(archon_run_active_msg "$repo_dir" "$project" "^archon-($SHIP_WF_ALT|fix-github-issue)\$" \
     | grep -oE 'fix #[0-9]+' | head -1 | tr -d '#')
   if [ -n "$running_for" ]; then
     log "$project: archon run active in DB (running or parked), skipping"
@@ -702,9 +704,11 @@ fire_ship() {
   # wrapper's command line carries the literal "fix #$1", never "#<issue>",
   # and the helper path and project travel in the environment so no path
   # substring can match another project's anchor.
+  # The workflow name rides in the environment too (lib/ship-workflow.sh), so
+  # the wrapper's own command line stays free of it.
   CLAUDECODE=0 SETTLE_SCRIPT="$SCRIPT_DIR/lib/settle-ship-outcome.sh" SETTLE_PROJECT="$project" \
-    nohup bash -c '
-      archon workflow run archon-ship "fix #$1" >"$2" 2>&1
+    SHIP_WF="$(ship_workflow)" nohup bash -c '
+      archon workflow run "$SHIP_WF" "fix #$1" >"$2" 2>&1
       "$SETTLE_SCRIPT" "$SETTLE_PROJECT" "$1" "$2"' \
     ship-wrapper "$issue" "$logf" 2>/dev/null &
   disown

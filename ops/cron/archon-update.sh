@@ -130,7 +130,7 @@ HEALTH_TIMEOUT="${ARCHON_UPDATE_HEALTH_TIMEOUT:-60}"
 PROJECT_ROOT="${ARCHON_UPDATE_PROJECT_ROOT:-/mnt/ext-fast}"
 # What the ops crons launch (issue-pickup, pr-review, pr-maintenance,
 # pipeline-health, sweep-audits) and archon-user/install.sh + verify.sh run.
-REQUIRED_WORKFLOWS="${ARCHON_UPDATE_REQUIRED_WORKFLOWS-archon-ship archon-review archon-triage-issue archon-pr-maintenance archon-assist archon-architect archon-security-audit archon-test-audit archon-requirements-audit}"
+REQUIRED_WORKFLOWS="${ARCHON_UPDATE_REQUIRED_WORKFLOWS-archon-ship archon-ship-block archon-review archon-triage-issue archon-pr-maintenance archon-assist archon-architect archon-security-audit archon-test-audit archon-requirements-audit}"
 RUNBOOK="ops/cron/ARCHON-0.10-CUTOVER.md and the 'Archon auto-update' section of ops/cron/README.md (interstellarai.net)"
 
 # shellcheck source=lib/secrets.sh

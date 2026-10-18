@@ -78,6 +78,7 @@ DEFAULT_FUEL = (
 # Workflow → Lachesis kind of work. Workflows not listed are not reported.
 KINDS = {
     "archon-ship": "implementation",
+    "archon-ship-block": "implementation",
     "archon-pr-maintenance": "implementation",
     "archon-triage-issue": "triage",
     "archon-review": "audit",

@@ -136,7 +136,7 @@ The lists come from the ~500 newest issues and PRs of every repo in `archon-proj
 
 Otherwise it is not:
 - triaged, queued, promoted or re-queued;
-- picked for `archon-ship`;
+- picked for `archon-ship` — launched as `archon-ship-block` once the engine ships it (Archon v0.12+, `lib/ship-workflow.sh`, decided from `/mnt/ext-fast/archon` on every launch so the archon-update swap and a rollback switch it). From v0.12 `archon-ship` pauses on an attention item whenever it ends where only a person can take it forward, with no timeout, which would hold the project's ship slot and freeze its PR; `archon-ship-block` is the same graph without that pause, and `lib/settle-ship-outcome.sh` settles its no-PR endings (`No delivery needed:` may close; `Not done:`, `No work owed in this repository:` and the older `No delivery started:` park). Every matcher accepts both names, so runs from before the swap are still seen;
 - counted as pending work by `check_progress`.
 
 `dedupe_sentry` and `settle_parked` start no archon run, so they check the author only.

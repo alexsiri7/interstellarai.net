@@ -69,7 +69,7 @@ ship_breaker_rows() {
                      OR e.data LIKE '%lacks \`workflow\` scope%'))
     FROM remote_agent_workflow_runs r
     JOIN remote_agent_codebases c ON c.id = r.codebase_id
-    WHERE r.workflow_name = 'archon-ship'
+    WHERE r.workflow_name IN ('archon-ship', 'archon-ship-block')
       AND r.user_message = 'fix #$issue'
       AND c.name = 'alexsiri7/$project'
       AND r.started_at > '$since'

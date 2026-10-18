@@ -113,7 +113,8 @@ maintenance_launched_for() {
 pr_owned_by_live_run() {
   local pr="$1" head="$2" body="$3" wf issue
   case "$head" in
-    archon/task-archon-ship-*) wf='^archon-ship$' ;;
+    # archon/task-archon-ship-block-* too: the branch of an archon-ship-block run.
+    archon/task-archon-ship-*) wf='^archon-ship(-block)?$' ;;
     archon/task-archon-fix-github-issue-*) wf='^archon-fix-github-issue$' ;;
     *) return 1 ;;
   esac
