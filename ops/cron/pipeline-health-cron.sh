@@ -2653,6 +2653,35 @@ check_gh_factory() {
 }
 
 # ----------------------------------------------------------------------------
+# Check 9h: issue pickup reading Lachesis. issue-pickup takes its work from
+#   Lachesis next_issue and records every tick's read (lib/lachesis.sh). From
+#   2026-10-17 each read timed out and no issue was picked up for a day, while
+#   check_progress saw no queued work and called the factory idle. ntfy once
+#   per episode when LACHESIS_NEXT_FAIL_MAX (3) or more ticks in a row could
+#   not read it, log when a read succeeds again. The alert is marked sent only
+#   once ntfy took it.
+# ----------------------------------------------------------------------------
+check_lachesis_next_issue() {
+  local marker="$STATE_DIR/lachesis-next-issue-alerted"
+  if ! lachesis_next_failing; then
+    if [ -f "$marker" ]; then
+      rm -f "$marker"
+      log "lachesis-next-issue: recovered — issue-pickup read next_issue again"
+    fi
+    return 0
+  fi
+  log "lachesis-next-issue: $LACHESIS_NEXT_PROBLEM"
+  [ -f "$marker" ] && return 0   # alert once per episode
+  if notify_checked "Factory issue pickup failing" \
+    "$LACHESIS_NEXT_PROBLEM. No issue is picked up until it answers. Check $LOG_DIR/issue-pickup.log and time it: cd ops/cron/lib && source ./lachesis.sh && time lachesis_call next_issue '{}' (the client gives up at 60s). Lachesis logs: Railway, project lachesis." \
+    high rotating_light; then
+    touch "$marker"
+  else
+    log "lachesis-next-issue: ntfy not delivered — retrying next tick"
+  fi
+}
+
+# ----------------------------------------------------------------------------
 # Check 10: Paused archon runs nothing will resume. reconcile_zombies reaps
 # stale `running` rows and deliberately leaves `paused` ones to the server's
 # continuation scheduler; this is the other half — the runs that scheduler has
@@ -2748,6 +2777,7 @@ check_restore_test
 check_cron_heartbeats
 check_claude_auth
 check_gh_factory
+check_lachesis_next_issue
 check_doppler_token
 check_progress
 log "=== done ==="

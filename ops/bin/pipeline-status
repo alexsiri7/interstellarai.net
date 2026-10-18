@@ -15,6 +15,9 @@ SWEEP_STATUS_FILE="$HOME/.archon/sweep-state/last-sweep"   # written by ops/cron
 source "$SCRIPT_DIR/../cron/lib/run-as.sh"
 # shellcheck source=../cron/lib/gh-factory.sh
 source "$SCRIPT_DIR/../cron/lib/gh-factory.sh"
+# issue-pickup's record of its reads of Lachesis next_issue.
+# shellcheck source=../cron/lib/lachesis.sh
+source "$SCRIPT_DIR/../cron/lib/lachesis.sh"
 OWNER="alexsiri7"
 
 # Colours
@@ -81,6 +84,28 @@ gh_factory_status() {
     esac
 }
 
+issue_pickup_status() {
+    if lachesis_next_failing; then
+        printf "${RED}FAILING${RESET}  %s — no issue is picked up" "$LACHESIS_NEXT_PROBLEM"
+        return
+    fi
+    local last_ok failures
+    last_ok=$(lachesis_next_status_get last_ok)
+    failures=$(lachesis_next_status_get failures)
+    if [ -z "$last_ok" ]; then
+        printf "${DIM}no next_issue read recorded${RESET}"
+        return
+    fi
+    if [ "${failures:-0}" -gt 0 ]; then
+        printf "${YELLOW}last tick failed${RESET}  Lachesis next_issue unread on %s tick(s) in a row" "$failures"
+    else
+        printf "${GREEN}OK${RESET}"
+    fi
+    if [ "$last_ok" -gt 0 ]; then
+        printf "  next_issue last read %s" "$(date -d "@$last_ok" '+%F %H:%M' 2>/dev/null || echo "?")"
+    fi
+}
+
 # --- Header ---
 echo ""
 printf "${BOLD}%-22s  %4s  %6s  %5s  %s${RESET}\n" "REPO" "PRs" "ISSUES" "CI" "NOTES"
@@ -125,7 +150,11 @@ done
 
 echo ""
 printf "last sweep: %s\n" "$(sweep_status)"
-printf "factory GitHub: %s\n\n" "$(gh_factory_status)"
+printf "factory GitHub: %s\n" "$(gh_factory_status)"
+printf "issue pickup: %s\n\n" "$(issue_pickup_status)"
+if lachesis_next_failing; then
+    printf "${RED}Issue pickup is failing: %s.${RESET}\n\n" "$LACHESIS_NEXT_PROBLEM"
+fi
 if [ "$any_stuck" -eq 1 ]; then
     printf "${RED}CI red on main in at least one project — check above.${RESET}\n\n"
 fi

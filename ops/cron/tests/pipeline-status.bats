@@ -12,6 +12,13 @@ setup() {
     source <(awk '/^record_sweep\(\)/{p=1} p{print} p && /^}$/{p=0}' "$cron_dir/sweep-audits.sh")
     # shellcheck disable=SC1090
     source <(awk '/^sweep_status\(\)/{p=1} p{print} p && /^}$/{p=0}' "$cron_dir/../bin/pipeline-status")
+    # shellcheck disable=SC1090
+    source <(awk '/^issue_pickup_status\(\)/{p=1} p{print} p && /^}$/{p=0}' "$cron_dir/../bin/pipeline-status")
+    unset _LACHESIS_SH
+    export LACHESIS_STATE_DIR="$TEST_TMP/lachesis"
+    unset LACHESIS_NEXT_STATUS
+    # shellcheck source=../lib/lachesis.sh
+    source "$cron_dir/lib/lachesis.sh"
 
     # Read by the extracted functions.
     # shellcheck disable=SC2034
@@ -20,7 +27,7 @@ setup() {
         SWEEP_STATUS_FILE="$TEST_TMP/last-sweep"
         sweep_name="security"
         repo_name="cosmic-match"
-        GREEN="" RED="" DIM="" RESET=""
+        GREEN="" RED="" DIM="" YELLOW="" RESET=""
     }
     log() { :; }
 }
@@ -57,4 +64,32 @@ teardown() {
 @test "no state file reads no sweep recorded" {
     run sweep_status
     [ "$output" = "no sweep recorded" ]
+}
+
+@test "issue pickup reads FAILING after three ticks in a row could not read next_issue" {
+    lachesis_next_record ok
+    lachesis_next_record failed
+    lachesis_next_record failed
+    lachesis_next_record failed
+    run issue_pickup_status
+    [[ "$output" == "FAILING  Lachesis next_issue could not be read on 3 issue-pickup ticks in a row (last read: $(date +%F) "*") — no issue is picked up" ]]
+}
+
+@test "issue pickup reads OK with the last read once next_issue answers" {
+    lachesis_next_record failed
+    lachesis_next_record ok
+    run issue_pickup_status
+    [[ "$output" == "OK  next_issue last read $(date +%F) "* ]]
+}
+
+@test "issue pickup flags a single failed tick without calling it failing" {
+    lachesis_next_record ok
+    lachesis_next_record failed
+    run issue_pickup_status
+    [[ "$output" == "last tick failed  Lachesis next_issue unread on 1 tick(s) in a row  next_issue last read "* ]]
+}
+
+@test "issue pickup with no record says so" {
+    run issue_pickup_status
+    [ "$output" = "no next_issue read recorded" ]
 }

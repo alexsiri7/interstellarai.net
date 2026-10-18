@@ -97,3 +97,98 @@ STUB
     lachesis_ask_once testproj 12 other 'q?'
     [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 3 ]
 }
+
+# ── the next_issue read streak ───────────────────────────────────────────────
+
+@test "lachesis_next_record counts failures in a row and a read resets them" {
+    [ "$LACHESIS_NEXT_STATUS" = "$T/state/next-issue-status" ]
+    lachesis_next_record failed
+    lachesis_next_record failed
+    [ "$(lachesis_next_status_get failures)" = 2 ]
+    [ "$(lachesis_next_status_get last_ok)" = 0 ]
+    [ "$(lachesis_next_status_get last_failed)" -gt 0 ]
+    lachesis_next_record ok
+    [ "$(lachesis_next_status_get failures)" = 0 ]
+    [ "$(lachesis_next_status_get last_ok)" -gt 0 ]
+}
+
+@test "lachesis_next_failing: three failed ticks in a row are a failure, two are not" {
+    run ! lachesis_next_failing
+    lachesis_next_record ok
+    lachesis_next_record failed
+    lachesis_next_record failed
+    run ! lachesis_next_failing
+    lachesis_next_record failed
+    lachesis_next_failing
+    [[ "$LACHESIS_NEXT_PROBLEM" == "Lachesis next_issue could not be read on 3 issue-pickup ticks in a row (last read: $(date +%F) "* ]]
+    lachesis_next_record ok
+    run ! lachesis_next_failing
+}
+
+@test "lachesis_next_failing names a streak with no read ever recorded" {
+    mkdir -p "$(dirname "$LACHESIS_NEXT_STATUS")"
+    printf 'failures=5\n' > "$LACHESIS_NEXT_STATUS"
+    lachesis_next_failing
+    [[ "$LACHESIS_NEXT_PROBLEM" == *"on 5 issue-pickup ticks in a row (last read: never recorded)" ]]
+}
+
+@test "lachesis_next_record never fails the tick when the status cannot be written" {
+    LACHESIS_NEXT_STATUS=/proc/nope/next-issue-status
+    lachesis_next_record failed
+}
+
+# ── check_lachesis_next_issue (pipeline-health-cron.sh) ──────────────────────
+
+load_check() {
+    STATE_DIR="$T/ph-state"
+    mkdir -p "$STATE_DIR"
+    LOG_DIR="$T/logs"
+    export NTFY_SENT="$T/ntfy"
+    log() { echo "$*"; }
+    notify_checked() { echo "$1 | $2 | $3" >> "$NTFY_SENT"; return "${STUB_NTFY_RC:-0}"; }
+    # shellcheck disable=SC1090
+    source <(awk '/^check_lachesis_next_issue\(\)/{p=1} p{print} p && /^}$/{p=0}' "$LIB/../pipeline-health-cron.sh")
+}
+
+@test "check_lachesis_next_issue: a failing streak alerts once per episode, a read clears it" {
+    load_check
+    lachesis_next_record failed
+    lachesis_next_record failed
+    run check_lachesis_next_issue
+    [ ! -e "$NTFY_SENT" ]
+    lachesis_next_record failed
+    run check_lachesis_next_issue
+    [ "$(wc -l < "$NTFY_SENT")" -eq 1 ]
+    grep -q '^Factory issue pickup failing | Lachesis next_issue could not be read on 3 issue-pickup ticks in a row' "$NTFY_SENT"
+    grep -q '| high$' "$NTFY_SENT"
+    lachesis_next_record failed
+    run check_lachesis_next_issue
+    [[ "$output" == *"on 4 issue-pickup ticks in a row"* ]]
+    [ "$(wc -l < "$NTFY_SENT")" -eq 1 ]       # the marker holds the repeat
+
+    lachesis_next_record ok
+    run check_lachesis_next_issue
+    [[ "$output" == *"lachesis-next-issue: recovered"* ]]
+    [ ! -f "$STATE_DIR/lachesis-next-issue-alerted" ]
+
+    lachesis_next_record failed; lachesis_next_record failed; lachesis_next_record failed
+    run check_lachesis_next_issue
+    [ "$(wc -l < "$NTFY_SENT")" -eq 2 ]       # a new episode alerts again
+}
+
+@test "check_lachesis_next_issue: an undelivered ntfy is retried next tick" {
+    load_check
+    lachesis_next_record failed; lachesis_next_record failed; lachesis_next_record failed
+    export STUB_NTFY_RC=1
+    run check_lachesis_next_issue
+    [ ! -f "$STATE_DIR/lachesis-next-issue-alerted" ]
+    [[ "$output" == *"ntfy not delivered"* ]]
+}
+
+@test "check_lachesis_next_issue: no record yet is quiet" {
+    load_check
+    run check_lachesis_next_issue
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ ! -e "$NTFY_SENT" ]
+}
