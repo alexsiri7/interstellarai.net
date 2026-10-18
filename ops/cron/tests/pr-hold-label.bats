@@ -104,6 +104,13 @@ gh_called() { grep -qE "$1" "$STUB_GH_ARGV"; }
 
 merge_argv() { grep -E "^pr merge $1 " "$STUB_GH_ARGV"; }
 
+# pr-review-cron.sh fires archon-review with `nohup ... & disown` and exits
+# without waiting, so the stub may not have recorded its argv yet.
+review_fired() { # review_fired <pr-number>
+    for _ in $(seq 1 100); do grep -q "review PR #$1\$" "$STUB_ARCHON_ARGV" && return 0; sleep 0.05; done
+    return 1
+}
+
 # ── pr-maintenance-cron.sh ───────────────────────────────────────────────────
 
 @test "maintenance: CLEAN non-draft PR with hold label is not merged" {
@@ -235,7 +242,7 @@ merge_argv() { grep -E "^pr merge $1 " "$STUB_GH_ARGV"; }
     [[ "$output" == *"proj: PR #299 is on hold — skipping"* ]]
     [[ "$output" == *"fired archon-review"* ]]
     [[ "$output" == *"1 on-hold, 0 ship-merging, 1 fired"* ]]
-    grep -q 'review PR #300' "$STUB_ARCHON_ARGV"
+    review_fired 300
     ! grep -q 'review PR #299' "$STUB_ARCHON_ARGV"
     [ ! -f "$HOME/.archon/state/pr-review/proj-299.pid" ]
 }
@@ -257,8 +264,8 @@ merge_argv() { grep -E "^pr merge $1 " "$STUB_GH_ARGV"; }
     run "$CRON_DIR/pr-review-cron.sh"
     [ "$status" -eq 0 ]
     [[ "$output" == *"0 ship-merging, 2 fired"* ]]
-    grep -q 'review PR #300' "$STUB_ARCHON_ARGV"
-    grep -q 'review PR #301' "$STUB_ARCHON_ARGV"
+    review_fired 300
+    review_fired 301
 }
 
 @test "maintenance: merging a PR with an active review abandons the review" {
