@@ -14,12 +14,22 @@ setup() {
     # "<total>\t<open>" (absent = no sub-issues), and runs the script's own --jq
     # over the ref-<N> GitHub JSON for a single issue or PR (see ref()).
     # `issue view` prints the body-<issue> fixture (default: an ordinary body),
-    # or fails with GH_VIEW_RC.
+    # or fails with GH_VIEW_RC. The deferral checks (#211) read state-<N>
+    # ("issue|pr<TAB>open|closed") and pull-<N> ("<state><TAB><merged><TAB>
+    # <cross><TAB><login>"); gone-<N> makes both answer 404; comments-<N>
+    # holds the issue's comment bodies.
     cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_ARGV"
 case "$*" in
   *sub_issues*)       cat "$GH_FIXTURES/sub-$(sed -E 's#.*/issues/([0-9]+)/.*#\1#' <<<"$*")" 2>/dev/null || printf '0\t0\n' ;;
+  *"/comments"*)      cat "$GH_FIXTURES/comments-$(sed -E 's#.*/issues/([0-9]+)/.*#\1#' <<<"$*")" 2>/dev/null; exit "${GH_COMMENTS_RC:-0}" ;;
+  "api "*/pulls/*)
+    [ -e "$GH_FIXTURES/gone-${2##*/}" ] && { echo 'gh: Not Found (HTTP 404)' >&2; exit 1; }
+    cat "$GH_FIXTURES/pull-${2##*/}" 2>/dev/null || exit 1 ;;
+  "api "*/issues/*@tsv*)
+    [ -e "$GH_FIXTURES/gone-${2##*/}" ] && { echo 'gh: Not Found (HTTP 404)' >&2; exit 1; }
+    cat "$GH_FIXTURES/state-${2##*/}" 2>/dev/null || exit 1 ;;
   "api "*/issues/*)   [ "$3" = --jq ] && jq -r "$4" "$GH_FIXTURES/ref-${2##*/}" 2>/dev/null ;;
   *"issue view"*)
     [ -n "${GH_VIEW_RC:-}" ] && exit "$GH_VIEW_RC"
@@ -35,6 +45,8 @@ STUB
     export GH_FIXTURES="$T/fixtures"
     : > "$GH_ARGV"
     RUN_LOG="$T/run.log"
+    # trust.sh: no Doppler call, default TRUSTED_AUTHORS.
+    export NTFY_TOPIC=test ARCHON_CRON_TRUST_FILE=/nonexistent
 }
 
 teardown() {
@@ -355,7 +367,9 @@ json_outcome() {  # <delivered> <summary, with literal \n escapes>
         [ "$status" -eq 0 ]
         assert_parked 7
         grep -q -- 'archon-ship finished without a PR: Not done: ' "$GH_ARGV"
-        [ "$(gh_calls 'api ')" -eq 0 ]
+        # Only "blocked on" looks its refs up, and only to release (#211).
+        [ "$(gh_calls 'sub_issues')" -eq 0 ]
+        [ "$(gh_calls 'merged-pr')" -eq 0 ]
     done
 }
 
@@ -686,4 +700,208 @@ STUB
     [ "$(gh_calls 'issue edit')" -eq 0 ]
     [ "$(gh_calls 'issue comment')" -eq 0 ]
     [[ "$output" == *"could not record a question in Lachesis"* ]]
+}
+
+# ── Deferring to a PR that cannot merge (#211) ───────────────────────────────
+
+# 2026-10-13: GitHub hid every PR the flagged factory account opened, and six
+# issues stayed parked a week behind PR numbers nothing could merge.
+assert_released() {
+    grep -q -- "issue edit $1 --repo alexsiri7/testproj --remove-label archon:in-progress${2:+ $2}\$" "$GH_ARGV"
+    [ "$(gh_calls 'archon:skipped')" -eq 0 ]
+    [ "$(gh_calls 'issue close')" -eq 0 ]
+}
+
+@test "blocked on a PR that answers 404 releases the issue to the queue once" {
+    printf 'Not done: blocked on PR #186 implementing this, waiting on it to merge. Triage stopped.\nReport: /x\n' > "$RUN_LOG"
+    touch "$T/fixtures/gone-186"
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_released 7 "--add-label archon:queued"
+    grep -q -- "- #186 does not resolve (GitHub answers 404" "$GH_ARGV"
+    grep -q -- "<!-- archon-settle-stale-refs: 186 -->" "$GH_ARGV"
+    grep -q -- "Re-queued as archon:queued" "$GH_ARGV"
+    [[ "$output" == *"#7 released to run again (stale PR refs: #186)"* ]]
+}
+
+@test "lachesis pickup on: a release only drops archon:in-progress and asks nothing" {
+    lachesis_on
+    printf 'Not done: blocked on PR #186. Triage stopped.\n' > "$RUN_LOG"
+    touch "$T/fixtures/gone-186"
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_released 7
+    [ "$(gh_calls 'archon:queued')" -eq 0 ]
+    grep -q -- "Lachesis next_issue decides" "$GH_ARGV"
+    [ ! -s "$LACHESIS_ARGV" ]
+}
+
+@test "blocked on an open PR by a trusted author parks as today" {
+    printf 'Not done: blocked on PR #9. Triage stopped.\n' > "$RUN_LOG"
+    printf 'pr\topen\n' > "$T/fixtures/state-9"
+    printf 'open\tfalse\tfalse\talexsiri7\n' > "$T/fixtures/pull-9"
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_parked 7
+    [ "$(gh_calls '/comments')" -eq 0 ]
+}
+
+@test "an open PR by an untrusted author, a fork, a closed or a merged PR each release" {
+    printf 'pr\topen\n' > "$T/fixtures/state-9"
+    printf 'open\tfalse\tfalse\tstranger\n' > "$T/fixtures/pull-9"
+    printf 'pr\topen\n' > "$T/fixtures/state-10"
+    printf 'open\tfalse\ttrue\talexsiri7\n' > "$T/fixtures/pull-10"
+    printf 'pr\tclosed\n' > "$T/fixtures/state-11"
+    printf 'closed\tfalse\tfalse\talexsiri7\n' > "$T/fixtures/pull-11"
+    printf 'pr\tclosed\n' > "$T/fixtures/state-12"
+    printf 'closed\ttrue\tfalse\talexsiri7\n' > "$T/fixtures/pull-12"
+    printf 'Not done: blocked on PRs #9, #10, #11 and #12. Triage stopped.\n' > "$RUN_LOG"
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_released 7 "--add-label archon:queued"
+    grep -q -- "- #9 is by stranger, not an account the factory can act for" "$GH_ARGV"
+    grep -q -- "- #10 comes from a fork" "$GH_ARGV"
+    grep -q -- "- #11 is closed without merging" "$GH_ARGV"
+    grep -q -- "- #12 is already merged" "$GH_ARGV"
+    grep -q -- "<!-- archon-settle-stale-refs: 9 10 11 12 -->" "$GH_ARGV"
+}
+
+@test "a hidden PR alongside an open issue parks" {
+    printf 'Not done: blocked on PR #186 and issue #8. Triage stopped.\n' > "$RUN_LOG"
+    touch "$T/fixtures/gone-186"
+    printf 'issue\topen\n' > "$T/fixtures/state-8"
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_parked 7
+}
+
+@test "a hidden PR alongside a closed issue releases" {
+    printf 'Not done: blocked on PR #186, see #8. Triage stopped.\n' > "$RUN_LOG"
+    touch "$T/fixtures/gone-186"
+    printf 'issue\tclosed\n' > "$T/fixtures/state-8"
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_released 7 "--add-label archon:queued"
+    grep -q -- "<!-- archon-settle-stale-refs: 186 -->" "$GH_ARGV"
+}
+
+@test "a hidden PR alongside a ref that cannot be looked up parks" {
+    printf 'Not done: blocked on PR #186 and #8. Triage stopped.\n' > "$RUN_LOG"
+    touch "$T/fixtures/gone-186"
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_parked 7
+}
+
+@test "an open PR whose pulls lookup fails parks" {
+    printf 'Not done: blocked on PR #9. Triage stopped.\n' > "$RUN_LOG"
+    printf 'pr\topen\n' > "$T/fixtures/state-9"
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_parked 7
+}
+
+@test "a PR an earlier settle already released parks with a note" {
+    printf 'Not done: blocked on PR #186. Triage stopped.\n' > "$RUN_LOG"
+    touch "$T/fixtures/gone-186"
+    printf 'archon-ship finished without a PR: ...\n\n<!-- archon-settle-stale-refs: 12 186 -->\n' > "$T/fixtures/comments-7"
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_parked 7
+    grep -q -- "Not released again: the run deferred again to #186" "$GH_ARGV"
+}
+
+@test "a marker naming a different PR does not stop a release" {
+    printf 'Not done: blocked on PR #18. Triage stopped.\n' > "$RUN_LOG"
+    touch "$T/fixtures/gone-18"
+    printf '<!-- archon-settle-stale-refs: 186 -->\n' > "$T/fixtures/comments-7"
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_released 7 "--add-label archon:queued"
+}
+
+@test "a comment listing that fails parks" {
+    printf 'Not done: blocked on PR #186. Triage stopped.\n' > "$RUN_LOG"
+    touch "$T/fixtures/gone-186"
+    export GH_COMMENTS_RC=1
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_parked 7
+}
+
+@test "a failed release edit exits 1 without commenting" {
+    printf 'Not done: blocked on PR #186. Triage stopped.\n' > "$RUN_LOG"
+    touch "$T/fixtures/gone-186"
+    export GH_EDIT_RC=1
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 1 ]
+    [ "$(gh_calls 'issue comment')" -eq 0 ]
+    [[ "$output" == *"could not release to run again"* ]]
+}
+
+@test "No delivery needed deferring to a hidden PR releases" {
+    json_outcome false 'No delivery needed: PR #186 already implements this.\nReport: /x'
+    touch "$T/fixtures/gone-186"
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_released 7 "--add-label archon:queued"
+}
+
+@test "a Not done verdict that is not a deferral parks even when its PR is hidden" {
+    printf 'Not done: planning stopped on calls only a person can make; see PR #186.\n' > "$RUN_LOG"
+    touch "$T/fixtures/gone-186"
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_parked 7
+    [ "$(gh_calls 'api ')" -eq 0 ]
+}
+
+@test "a health-filed issue blocked on a hidden PR parks" {
+    health_verdict 'Not done: blocked on PR #186. Triage stopped.'
+    touch "$T/fixtures/gone-186"
+
+    run "$SCRIPT" testproj 450 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    grep -q -- "issue edit 450 --repo alexsiri7/testproj --remove-label archon:in-progress --add-label archon:skipped" "$GH_ARGV"
+    [ "$(gh_calls 'api ')" -eq 0 ]
+    grep -q -- "Not auto-closed" "$GH_ARGV"
+}
+
+@test "--recheck never releases, even when the parked verdict's PR is hidden" {
+    parked_verdict 'PR #186 already implements this.'
+    touch "$T/fixtures/gone-186"
+
+    run "$SCRIPT" --recheck testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 1 ]
+    assert_untouched
 }
