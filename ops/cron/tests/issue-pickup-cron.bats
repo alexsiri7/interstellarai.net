@@ -1013,6 +1013,7 @@ STUB
     source "$(dirname "$SCRIPT_FILE")/lib/lachesis.sh"
     load_fn lachesis_next_fetch
     load_fn lachesis_issue_for
+    load_fn lachesis_why_none
     load_fn lachesis_pick
     load_fn lachesis_may_triage
 }
@@ -1068,6 +1069,33 @@ issue_json() {
     [ "$SUMMARY_NOTE" = "Lachesis offers nothing here: budget_spent" ]
     [ "$(gh_calls -- 'issue edit')" -eq 0 ]
     grep -q "Lachesis next_issue: The sprint budget is spent." "$LOGGED"
+}
+
+@test "lachesis: a repo offered nothing says its own reason, not the whole answer's" {
+    lachesis_on
+    jq -n '{issue: {repo: "alexsiri7/otherrepo", number: 99}, reason: "selected", explanation: "x",
+      blocked: [{repo: "alexsiri7/lachesis", number: 191, blocked_by: [{number: 189}]}],
+      repos: {"alexsiri7/otherrepo": {reason: "selected", issue: 99},
+              "alexsiri7/TestProj": {reason: "none_ready", issue: null,
+                explanation: "There are open issues but every one is parked (42 parked)."}}}' \
+        > "$T/fixtures/next.json"
+
+    lachesis_pick testproj
+
+    [ "$SUMMARY_ACTION" = "none" ]
+    [ "$SUMMARY_NOTE" = "Lachesis offers nothing here: none_ready — There are open issues but every one is parked (42 parked)." ]
+    [ "$(gh_calls -- 'issue edit')" -eq 0 ]
+}
+
+@test "lachesis: a repo missing from next_issue's repos is named as not registered" {
+    lachesis_on
+    jq -n '{issue: {repo: "alexsiri7/otherrepo", number: 99}, reason: "selected", explanation: "x",
+      repos: {"alexsiri7/otherrepo": {reason: "selected", issue: 99}}}' > "$T/fixtures/next.json"
+
+    lachesis_pick testproj
+
+    [ "$SUMMARY_ACTION" = "none" ]
+    [ "$SUMMARY_NOTE" = "Lachesis offers nothing here: not registered with Lachesis" ]
 }
 
 @test "lachesis: an unreachable Lachesis launches nothing (no fallback to labels)" {

@@ -818,6 +818,23 @@ lachesis_issue_for() {
     | .[0].number // empty' <<<"$LACHESIS_NEXT_JSON" 2>/dev/null
 }
 
+# lachesis_why_none <project> — why next_issue offers <project> nothing: the
+# repo's own outcome under .repos (a repo with every issue parked says so), not
+# the whole answer's reason, which another repo's blocked or selected issue
+# decides. A Lachesis answering .repos without the repo has not registered it;
+# one answering no .repos at all falls back to the whole answer's reason.
+lachesis_why_none() {
+  jq -r --arg repo "$TRUST_OWNER/$1" '
+    if has("repos") then
+      ((.repos | to_entries
+        | map(select((.key | ascii_downcase) == ($repo | ascii_downcase))) | .[0].value)
+       // null) as $own
+      | if $own == null then "not registered with Lachesis"
+        else "\($own.reason)" + (if $own.explanation then " — \($own.explanation)" else "" end)
+        end
+    else .reason end' <<<"$LACHESIS_NEXT_JSON" 2>/dev/null
+}
+
 lachesis_pick() {
   local project="$1" issue view rc
 
@@ -828,7 +845,7 @@ lachesis_pick() {
   fi
   issue=$(lachesis_issue_for "$project")
   if [ -z "$issue" ]; then
-    SUMMARY_NOTE="Lachesis offers nothing here: $(jq -r '.reason' <<<"$LACHESIS_NEXT_JSON")"
+    SUMMARY_NOTE="Lachesis offers nothing here: $(lachesis_why_none "$project")"
     return
   fi
   SUMMARY_QUEUED=1
