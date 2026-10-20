@@ -14,7 +14,8 @@
 #
 # A "No delivery needed" verdict closes the issue as archon:done, but only when
 # GitHub confirms it (#103): every sub-issue is closed, or the verdict names a
-# same-repo issue closed as completed (closed as its duplicate) or a merged PR.
+# same-repo issue that is still open (closed as its duplicate, #212) or a merged
+# PR. A named closed issue never closes it: that is a maintainer's call.
 # It never closes on the model's prose alone, and "No delivery started" (an
 # undecided investigate/plan stop) never closes. Anything else, or any gh
 # failure on the way, parks the issue as archon:skipped with the verdict as a
@@ -102,6 +103,7 @@ Closed as archon:done: ${evidence}. Reopen and add archon:queued to run it again
 }
 
 health_filed=0
+closed_refs=""
 if [[ "$verdict" == "No delivery needed: "* ]]; then
   # Keyed on the marker every pipeline-health issue body carries. A failed
   # lookup counts as health-filed, since any gh failure parks.
@@ -129,13 +131,17 @@ if [ "$health_filed" = 0 ] && [[ "$verdict" == "No delivery needed: "* ]]; then
   for ref in "${refs[@]}"; do
     kind[$ref]=$(gh api "repos/$repo/issues/$ref" --jq '
       if .pull_request then (if .pull_request.merged_at then "merged-pr" else "pr" end)
-      elif .state == "closed" and .state_reason == "completed" then "completed-issue"
-      else "other" end' 2>/dev/null)
+      elif .state == "open" then "open-issue"
+      else "closed-issue" end' 2>/dev/null)
+    [ "${kind[$ref]}" = "closed-issue" ] && closed_refs+="${closed_refs:+, }#$ref"
   done
-  # A named closed issue is the more exact record than the PR that fixed it.
+  # The triage policy's two closes without a person: a duplicate of an issue
+  # that is still open, and an outcome a merged change already delivered. The
+  # open original is the more exact record. A duplicate of a closed issue is a
+  # maintainer's call, so it is parked with that issue named (below).
   for ref in "${refs[@]}"; do
-    [ "${kind[$ref]}" = "completed-issue" ] \
-      && close_as_done "duplicate of #$ref, closed as completed" --duplicate-of "$ref"
+    [ "${kind[$ref]}" = "open-issue" ] \
+      && close_as_done "duplicate of #$ref, which is still open" --duplicate-of "$ref"
   done
   for ref in "${refs[@]}"; do
     [ "${kind[$ref]}" = "merged-pr" ] \
@@ -154,9 +160,11 @@ fi
 rerun_note="Remove the label and add archon:queued to run it again."
 # shellcheck source=lib/lachesis.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lachesis.sh"
+question="archon-ship finished on #$issue without a PR, and GitHub does not confirm that nothing is needed. Close the issue, or answer this question to let the factory run it again."
+[ -n "$closed_refs" ] \
+  && question="archon-ship finished on #$issue without a PR. Its verdict names closed issue ${closed_refs}: if #$issue duplicates it, close #$issue as a duplicate (a maintainer's call, so not closed automatically); otherwise answer this question to let the factory run it again."
 if lachesis_pickup_enabled; then
-  if ! lachesis_ask "$project" "$issue" \
-      "archon-ship finished on #$issue without a PR, and GitHub does not confirm that nothing is needed. Close the issue, or answer this question to let the factory run it again." \
+  if ! lachesis_ask "$project" "$issue" "$question" \
       "The run's verdict: ${verdict:0:600}"; then
     echo "$(date -Is) [issue-pickup] $project: #$issue — could not record a question in Lachesis; left archon:in-progress, settled again later"
     exit 0
@@ -169,12 +177,14 @@ if ! gh issue edit "$issue" --repo "$repo" \
   echo "$(date -Is) [issue-pickup] $project: #$issue — could not park as archon:skipped"
   exit 1
 fi
-health_note=""
+park_note=""
 [ "$health_filed" = 1 ] \
-  && health_note=" Not auto-closed: the issue was filed by pipeline-health-cron.sh (CI/deploy state), or its body could not be read, so a human decides."
+  && park_note=" Not auto-closed: the issue was filed by pipeline-health-cron.sh (CI/deploy state), or its body could not be read, so a human decides."
+[ -n "$closed_refs" ] \
+  && park_note=" Not auto-closed: the verdict names closed issue ${closed_refs}, and a duplicate of a closed issue is a maintainer's call. Close this as its duplicate if it is one."
 gh issue comment "$issue" --repo "$repo" --body "archon-ship finished without a PR: ${verdict}
 
-Parked as archon:skipped. ${rerun_note}${health_note} Run log: \`${run_log}\`
+Parked as archon:skipped. ${rerun_note}${park_note} Run log: \`${run_log}\`
 
 <!-- lachesis:automated -->" >/dev/null 2>&1 || true
 echo "$(date -Is) [issue-pickup] $project: #$issue settled as archon:skipped (${verdict:0:120})"

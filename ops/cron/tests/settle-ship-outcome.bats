@@ -12,7 +12,7 @@ setup() {
 
     # Stub gh: records argv and answers `gh api` with what its --jq would print:
     # "<total>\t<open>" for sub_issues (absent = no sub-issues), one of
-    # completed-issue / merged-pr / pr / other for a single issue or PR.
+    # open-issue / closed-issue / merged-pr / pr for a single issue or PR.
     # `issue view` prints the body-<issue> fixture (default: an ordinary body),
     # or fails with GH_VIEW_RC.
     cat > "$T/bin/gh" <<'STUB'
@@ -53,24 +53,53 @@ assert_parked() {
     [ "$(gh_calls '--add-label archon:done')" -eq 0 ]
 }
 
-# The verdict archon-ship actually left on un-reminder #431 (2026-09-16).
-@test "the real #431 verdict closes as a duplicate of the closed issue it names" {
+# The verdict archon-ship actually left on un-reminder #431 (2026-09-16). The
+# closed duplicate is a maintainer's call (#212); the merged PR is not.
+@test "the real #431 verdict closes on the merged PR it names, not as a duplicate of the closed issue" {
     cat > "$RUN_LOG" <<'LOG'
 [outcome] running
 No delivery needed: Issue #431 and closed issue #432 are duplicate GitHub records of the exact same Sentry event (UN-REMINDER-1C). The merged PR #433 already fixed #432 at HEAD. No engineering work remains; #431 just needs closing as a duplicate. Full evidence in /home/x/triage.md.
 Report: /home/x/artifacts/triage.md
 LOG
-    fixture ref-432 completed-issue
+    fixture ref-432 closed-issue
     fixture ref-433 merged-pr
 
     run "$SCRIPT" testproj 431 "$RUN_LOG"
 
     [ "$status" -eq 0 ]
-    grep -q -- "issue close 431 --repo alexsiri7/testproj --duplicate-of 432 --comment" "$GH_ARGV"
+    grep -q -- "issue close 431 --repo alexsiri7/testproj --reason completed --comment" "$GH_ARGV"
+    [ "$(gh_calls '--duplicate-of')" -eq 0 ]
     grep -q -- "issue edit 431 --repo alexsiri7/testproj --remove-label archon:in-progress --add-label archon:done" "$GH_ARGV"
     [ "$(gh_calls 'archon:skipped')" -eq 0 ]
     [ "$(gh_calls 'api repos/alexsiri7/testproj/issues/431 ')" -eq 0 ]
-    [[ "$output" == *"#431 settled as archon:done (duplicate of #432, closed as completed)"* ]]
+    [[ "$output" == *"#431 settled as archon:done (already fixed by merged PR #433)"* ]]
+}
+
+# #212: the triage policy closes a duplicate of a still-open issue without a person.
+@test "a verdict naming an open original closes as its duplicate, before any merged PR" {
+    printf 'No delivery needed: duplicate of #8, which tracks the same crash; PR #50 touched it.\nReport: /x\n' > "$RUN_LOG"
+    fixture ref-8 open-issue
+    fixture ref-50 merged-pr
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    grep -q -- "issue close 7 --repo alexsiri7/testproj --duplicate-of 8 --comment archon-ship finished without a PR: No delivery needed: duplicate of #8" "$GH_ARGV"
+    [ "$(gh_calls '--reason')" -eq 0 ]
+    grep -q -- "issue edit 7 --repo alexsiri7/testproj --remove-label archon:in-progress --add-label archon:done" "$GH_ARGV"
+    [ "$(gh_calls 'archon:skipped')" -eq 0 ]
+    [[ "$output" == *"#7 settled as archon:done (duplicate of #8, which is still open)"* ]]
+}
+
+@test "a verdict naming only a closed original parks for a maintainer, naming it" {
+    printf 'No delivery needed: duplicate of #8, closed last week.\nReport: /x\n' > "$RUN_LOG"
+    fixture ref-8 closed-issue
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_parked 7
+    grep -q -- "Not auto-closed: the verdict names closed issue #8, and a duplicate of a closed issue is a maintainer's call" "$GH_ARGV"
 }
 
 @test "a verdict naming only a merged PR closes as completed" {
@@ -116,11 +145,12 @@ LOG
     grep -q -- "issue comment 7 " "$GH_ARGV"
 }
 
-@test "a self-reference, an open issue, an unmerged PR and another repo's issue do not close" {
+@test "a self-reference, a closed issue, an unmerged PR and another repo's issue do not close" {
     printf 'No delivery needed: #7 duplicates #8, see PR #9 and alexsiri7/other#10.\nReport: /x\n' > "$RUN_LOG"
-    fixture ref-8 other
+    fixture ref-7 open-issue
+    fixture ref-8 closed-issue
     fixture ref-9 pr
-    fixture ref-10 completed-issue
+    fixture ref-10 open-issue
 
     run "$SCRIPT" testproj 7 "$RUN_LOG"
 
@@ -175,7 +205,7 @@ LOG
 @test "a multi-line summary is searched past its first line, but not past Report" {
     printf 'No delivery needed: nothing left to do here.\nThe crash was fixed by PR #50.\nReport: /x\nlater noise #60\n' > "$RUN_LOG"
     fixture ref-50 merged-pr
-    fixture ref-60 completed-issue
+    fixture ref-60 open-issue
 
     run "$SCRIPT" testproj 7 "$RUN_LOG"
 
@@ -226,7 +256,7 @@ json_outcome() {  # <delivered> <summary, with literal \n escapes>
 @test "a JSON summary is searched past its first line, but not past Report" {
     json_outcome false 'No delivery needed: nothing left to do here.\n\nThe crash was fixed by PR #50.\nReport: /x\nlater noise #60'
     fixture ref-50 merged-pr
-    fixture ref-60 completed-issue
+    fixture ref-60 open-issue
 
     run "$SCRIPT" testproj 7 "$RUN_LOG"
 
@@ -421,7 +451,7 @@ assert_untouched() {
 
 @test "--recheck does not search past the Parked paragraph" {
     printf 'No delivery needed: nothing left to do, see #61.\n\nParked as archon:skipped. See #60.\n' > "$RUN_LOG"
-    fixture ref-60 completed-issue
+    fixture ref-60 open-issue
 
     run "$SCRIPT" --recheck testproj 7 "$RUN_LOG"
 
@@ -532,6 +562,26 @@ STUB
     assert_parked 9
     grep -q '^ask_question .*"repo":"alexsiri7/testproj".*"blocks":\[9\]' "$LACHESIS_ARGV"
     grep -q -- "Waiting on the author's answer" "$GH_ARGV"
+}
+
+@test "lachesis pickup on: a duplicate of an open issue closes without a question" {
+    lachesis_on
+    echo 'No delivery needed: duplicate of #8.' > "$RUN_LOG"
+    fixture ref-8 open-issue
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    grep -q -- "issue close 9 --repo alexsiri7/testproj --duplicate-of 8 --comment" "$GH_ARGV"
+    [ ! -s "$LACHESIS_ARGV" ]
+}
+
+@test "lachesis pickup on: a duplicate of a closed issue asks, naming it" {
+    lachesis_on
+    echo 'No delivery needed: duplicate of #8.' > "$RUN_LOG"
+    fixture ref-8 closed-issue
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 9
+    grep -q '^ask_question .*names closed issue #8: if #9 duplicates it, close #9 as a duplicate' "$LACHESIS_ARGV"
 }
 
 @test "lachesis pickup on: a question Lachesis refuses leaves the issue in progress" {
