@@ -18,6 +18,9 @@
 #   - the newest counted run hit GitHub's workflow-permission push refusal:
 #     trip at once — another run cannot push it either;
 #   - the last SHIP_BREAKER_THRESHOLD (3) counted runs all failed: trip.
+# A run the DB records as completed but whose no-PR verdict is a placeholder
+# (lib/ship-verdict.sh, #209) counts as failed: its triage degenerated, and
+# settle leaves the issue to be relaunched, so it must not reset the count.
 # Runs that failed on a Claude rate limit are not counted (a quota wave must not
 # park every issue it touched; lib/quota-pause.sh holds launches instead), and
 # only runs started after the breaker's last park comment on the issue count,
@@ -33,6 +36,9 @@ _SHIP_BREAKER_SH=1
 
 SHIP_BREAKER_THRESHOLD="${SHIP_BREAKER_THRESHOLD:-3}"
 SHIP_BREAKER_MARKER="<!-- archon:ship-breaker -->"
+
+# shellcheck source=lib/ship-verdict.sh
+source "$(dirname "${BASH_SOURCE[0]}")/ship-verdict.sh"
 
 # The run DB of whichever user runs the factory (lib/run-as.sh). Under bats
 # only an explicit ARCHON_DB counts: tests must never read the host's live DB.
@@ -50,13 +56,17 @@ ship_breaker_db() {
 
 # ship_breaker_rows <project> <issue> [since 'YYYY-MM-DD HH:MM:SS' UTC]
 # Newest first, at most 10: status<TAB>rate_limited(0|1)<TAB>workflow_scope(0|1).
+# A completed run whose outcome node printed a placeholder verdict reads failed.
+# Both json_valid guards matter: one malformed node_output would otherwise fail
+# the whole query, and the breaker would refuse every launch.
 ship_breaker_rows() {
-  local project="$1" issue="$2" since="${3:-1970-01-01 00:00:00}" db
+  local project="$1" issue="$2" since="${3:-1970-01-01 00:00:00}" db out
+  local status rate scope verdict
   [[ "$project" =~ ^[A-Za-z0-9._-]+$ && "$issue" =~ ^[0-9]+$ \
      && "$since" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]] || return 2
   db=$(ship_breaker_db)
   [ -r "$db" ] || return 2
-  sqlite3 -readonly -separator $'\t' "file:$db?mode=ro" "
+  out=$(sqlite3 -readonly -separator $'\t' "file:$db?mode=ro" "
     SELECT r.status,
       EXISTS (SELECT 1 FROM remote_agent_workflow_events e
               WHERE e.workflow_run_id = r.id
@@ -66,7 +76,15 @@ ship_breaker_rows() {
               WHERE e.workflow_run_id = r.id
                 AND (e.data LIKE '%create or update workflow%'
                      OR e.data LIKE '%without \`workflow\` scope%'
-                     OR e.data LIKE '%lacks \`workflow\` scope%'))
+                     OR e.data LIKE '%lacks \`workflow\` scope%')),
+      (SELECT replace(CASE WHEN instr(s, char(10)) > 0
+                           THEN substr(s, 1, instr(s, char(10)) - 1) ELSE s END, char(9), ' ')
+       FROM (SELECT CASE WHEN json_valid(o) THEN json_extract(o, '\$.summary') END AS s
+             FROM (SELECT json_extract(e.data, '\$.node_output') AS o
+                   FROM remote_agent_workflow_events e
+                   WHERE e.workflow_run_id = r.id AND e.event_type = 'node_completed'
+                     AND e.step_name = 'outcome' AND json_valid(e.data)
+                   ORDER BY e.rowid DESC LIMIT 1)))
     FROM remote_agent_workflow_runs r
     JOIN remote_agent_codebases c ON c.id = r.codebase_id
     WHERE r.workflow_name IN ('archon-ship', 'archon-ship-block')
@@ -74,7 +92,12 @@ ship_breaker_rows() {
       AND c.name = 'alexsiri7/$project'
       AND r.started_at > '$since'
     ORDER BY r.started_at DESC
-    LIMIT 10;" 2>/dev/null || return 2
+    LIMIT 10;" 2>/dev/null) || return 2
+  while IFS=$'\t' read -r status rate scope verdict; do
+    [ -n "$status" ] || continue
+    [ "$status" = completed ] && verdict_is_placeholder "$verdict" && status=failed
+    printf '%s\t%s\t%s\n' "$status" "$rate" "$scope"
+  done <<<"$out"
 }
 
 # ship_breaker_verdict — reads ship_breaker_rows on stdin; prints

@@ -359,6 +359,39 @@ json_outcome() {  # <delivered> <summary, with literal \n escapes>
     done
 }
 
+# filmduel #814 and musenmingle #348 (2026-10-18/20): triage__triage returned
+# "test" in every reason field; the outcome node printed exactly this.
+@test "a placeholder verdict (blocked on test. test) is not settled: no park, no question (#209)" {
+    lachesis_on
+    printf '{"delivered":false,"reason":"blocked","pr_url":"","summary":"%s"}\n' \
+        'Not done: blocked on test. test\nReport: /x/triage.md' > "$RUN_LOG"
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 1 ]
+    [ ! -s "$GH_ARGV" ]
+    [ ! -s "$LACHESIS_ARGV" ]
+    [[ "$output" == *"placeholder verdict"* ]]
+}
+
+@test "placeholder verdicts of other shapes are not settled, nor closed on recheck (#209)" {
+    for summary in 'No delivery needed: placeholder' 'Not done: blocked on asdf. asdf' 'Not done: blocked on . '; do
+        : > "$GH_ARGV"
+        printf '{"delivered":false,"reason":"blocked","pr_url":"","summary":"%s"}\n' "$summary" > "$RUN_LOG"
+
+        run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+        [ "$status" -eq 1 ]
+        [ ! -s "$GH_ARGV" ]
+    done
+
+    printf 'No delivery needed: placeholder\n' > "$RUN_LOG"
+    run "$SCRIPT" --recheck testproj 7 "$RUN_LOG"
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+    [ ! -s "$GH_ARGV" ]
+}
+
 @test "a v0.12 refuted investigation (No work owed in this repository) parks and never closes" {
     printf '{"delivered":false,"reason":"refuted","pr_url":"","summary":"%s"}\n' \
         'No work owed in this repository: the crash is in the upstream SDK, fixed by PR #50.\nReport: /x/investigation.md' > "$RUN_LOG"

@@ -17,7 +17,7 @@ setup() {
       CREATE TABLE remote_agent_workflow_runs (id TEXT PRIMARY KEY, codebase_id TEXT,
         workflow_name TEXT, user_message TEXT, status TEXT, started_at TEXT);
       CREATE TABLE remote_agent_workflow_events (id INTEGER PRIMARY KEY,
-        workflow_run_id TEXT, event_type TEXT, data TEXT,
+        workflow_run_id TEXT, event_type TEXT, step_name TEXT, data TEXT,
         created_at TEXT DEFAULT (datetime('now')));
       INSERT INTO remote_agent_codebases VALUES ('cb', 'alexsiri7/testproj');"
 
@@ -92,6 +92,33 @@ run_row() {
     run_row failed 70
     run_row failed 50
     run_row completed 30
+    run_row failed 10
+    run ship_breaker_check testproj 5
+    [ "$status" -eq 0 ]
+}
+
+# outcome_row <minutes ago> <summary> — a completed run whose outcome node
+# printed {delivered:false, summary} (Archon v0.12 ship tail).
+outcome_row() {
+    run_row completed "$1"
+    local out; out=$(jq -cn --arg s "$2" '{delivered: false, reason: "blocked", pr_url: "", summary: $s}')
+    sqlite3 "$ARCHON_DB" "INSERT INTO remote_agent_workflow_events (workflow_run_id, event_type, step_name, data)
+      VALUES ('r$N', 'node_completed', 'outcome', '$(jq -cn --arg o "$out" '{node_output: $o}')');"
+}
+
+@test "completed runs with a placeholder verdict count as failed (#209)" {
+    outcome_row 50 $'Not done: blocked on test. test\nReport: /x/triage.md'
+    outcome_row 30 $'Not done: blocked on test. test\nReport: /x/triage.md'
+    outcome_row 10 $'Not done: blocked on test. test\nReport: /x/triage.md'
+    run ship_breaker_check testproj 5
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"circuit open (failed:3)"* ]]
+}
+
+@test "a completed run with a real verdict still resets the count" {
+    run_row failed 50
+    run_row failed 40
+    outcome_row 30 $'Not done: blocked on #12 landing first. Triage says the fix needs #12.\nReport: /x/triage.md'
     run_row failed 10
     run ship_breaker_check testproj 5
     [ "$status" -eq 0 ]
