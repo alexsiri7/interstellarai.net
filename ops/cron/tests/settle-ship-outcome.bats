@@ -905,3 +905,17 @@ assert_released() {
     [ "$status" -eq 1 ]
     assert_untouched
 }
+
+@test "No delivery needed naming a merged PR whose close failed parks, not releases" {
+    printf 'No delivery needed: already fixed by PR #50.\nReport: /x\n' > "$RUN_LOG"
+    fixture ref-50 merged-pr
+    printf 'pr\tclosed\n' > "$T/fixtures/state-50"
+    printf 'closed\ttrue\tfalse\talexsiri7\n' > "$T/fixtures/pull-50"
+    export GH_CLOSE_RC=1
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    grep -q -- "--add-label archon:skipped" "$GH_ARGV"
+    [ "$(gh_calls 'archon-settle-stale-refs')" -eq 0 ]
+}
