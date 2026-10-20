@@ -14,8 +14,9 @@
 #
 # A "No delivery needed" verdict closes the issue as archon:done, but only when
 # GitHub confirms it (#103): every sub-issue is closed, or the verdict names a
-# same-repo issue that is still open (closed as its duplicate, #212) or a merged
-# PR. A named closed issue never closes it: that is a maintainer's call.
+# merged PR, or else exactly one same-repo issue that is still open (closed as
+# its duplicate, #212). A named closed issue never closes it: that is a
+# maintainer's call.
 # It never closes on the model's prose alone, and "No delivery started" (an
 # undecided investigate/plan stop) never closes. Anything else, or any gh
 # failure on the way, parks the issue as archon:skipped with the verdict as a
@@ -135,18 +136,19 @@ if [ "$health_filed" = 0 ] && [[ "$verdict" == "No delivery needed: "* ]]; then
       else "closed-issue" end' 2>/dev/null)
     [ "${kind[$ref]}" = "closed-issue" ] && closed_refs+="${closed_refs:+, }#$ref"
   done
-  # The triage policy's two closes without a person: a duplicate of an issue
-  # that is still open, and an outcome a merged change already delivered. The
-  # open original is the more exact record. A duplicate of a closed issue is a
-  # maintainer's call, so it is parked with that issue named (below).
-  for ref in "${refs[@]}"; do
-    [ "${kind[$ref]}" = "open-issue" ] \
-      && close_as_done "duplicate of #$ref, which is still open" --duplicate-of "$ref"
-  done
+  # The triage policy's two closes without a person: an outcome a merged change
+  # already delivered, and a duplicate of an issue that is still open. The
+  # verdict's refs are free prose, so a lone open issue is read as the original
+  # and several are a maintainer's call. A duplicate of a closed issue is too,
+  # so it is parked with that issue named (below).
+  open_refs=()
   for ref in "${refs[@]}"; do
     [ "${kind[$ref]}" = "merged-pr" ] \
       && close_as_done "already fixed by merged PR #$ref" --reason completed
+    [ "${kind[$ref]}" = "open-issue" ] && open_refs+=("$ref")
   done
+  [ "${#open_refs[@]}" -eq 1 ] \
+    && close_as_done "duplicate of #${open_refs[0]}, which is still open" --duplicate-of "${open_refs[0]}"
 fi
 [ "$recheck" = 1 ] && exit 1
 
