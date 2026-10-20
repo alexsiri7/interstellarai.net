@@ -257,7 +257,7 @@ load_trust() {
     [ "$status" -eq 0 ]
     [ "$(grep -c '^pr comment 420 --body @dependabot rebase$' "$STUB_GH_ARGV")" -eq 1 ]
     [ "$(grep -c '^pr comment 421 --body @dependabot rebase$' "$STUB_GH_ARGV")" -eq 1 ]
-    ! grep -q 'archon-pr-maintenance' "$STUB_ARCHON_ARGV"
+    [ "$(grep -c 'archon-pr-maintenance' "$STUB_ARCHON_ARGV")" -eq 0 ]
 
     run "$CRON_DIR/pr-maintenance-cron.sh"
     [ "$status" -eq 0 ]
@@ -278,15 +278,24 @@ load_trust() {
     export GH_PR_LIST="[$(pr 422 false BEHIND app/dependabot false dependabot/a 'bump a from 1.0.0 to 1.0.1' | jq -c '.labels=[{"name":"hold"}]'), $(pr 423 false BEHIND app/dependabot false dependabot/b 'bump b from 1.9.0 to 2.0.0')]"
     run "$CRON_DIR/pr-maintenance-cron.sh"
     [ "$status" -eq 0 ]
-    ! gh_called '^pr comment'
+    [ "$(grep -c '^pr comment' "$STUB_GH_ARGV")" -eq 0 ]
     [[ "$output" == *"PR #422 is on hold — skipping"* ]]
 
     export GH_PR_VIEW='{"title":"t","body":"b","statusCheckRollup":[{"conclusion":"SUCCESS"},{"conclusion":"FAILURE"}]}'
     export GH_PR_LIST="[$(pr 424 false BEHIND app/dependabot false dependabot/c 'bump c from 1.0.0 to 1.0.1')]"
     run "$CRON_DIR/pr-maintenance-cron.sh"
     [ "$status" -eq 0 ]
-    ! gh_called '^pr comment'
+    [ "$(grep -c '^pr comment' "$STUB_GH_ARGV")" -eq 0 ]
     [[ "$output" == *"dependabot PR #424 is BEHIND but its checks are not all green"* ]]
+}
+
+@test "maintenance: another merge-only bot's BEHIND PR gets no @dependabot rebase" {
+    export GH_PR_VIEW='{"title":"t","body":"b","statusCheckRollup":[{"conclusion":"SUCCESS"}]}'
+    export GH_PR_LIST="[$(pr 425 false BEHIND app/github-actions false actions/x 'bump x from 1.0.0 to 1.0.1'), $(pr 426 false DIRTY dependabot[bot] false dependabot/z 'bump z from 1.0.0 to 1.0.1')]"
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    [ "$status" -eq 0 ]
+    [ "$(grep -c '^pr comment 425 ' "$STUB_GH_ARGV")" -eq 0 ]
+    [ "$(grep -c '^pr comment 426 --body @dependabot rebase$' "$STUB_GH_ARGV")" -eq 1 ]
 }
 
 @test "maintenance: the owner's DIRTY PR with a stranger's comment is passed over" {

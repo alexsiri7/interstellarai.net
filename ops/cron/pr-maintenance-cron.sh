@@ -190,14 +190,14 @@ abandon_reviews() {
 # list_prs full|merge <jq select expression> — open PRs of the current repo
 # whose author the trust gate admits at that level (lib/trust.sh: `full` =
 # archon may work it, `merge` = may also be a merge-only bot's PR), one
-# "<number>\t<headRefName>\t<hold>\t<headRefOid>\t<mergeStateStatus>\t<body>"
+# "<number>\t<headRefName>\t<hold>\t<headRefOid>\t<mergeStateStatus>\t<author>\t<body>"
 # row each. Untrusted PRs are dropped here, before any phase sees them, and
 # the owner is told once.
 list_prs() {
   local level="$1" select="$2" json
   json=$(gh pr list --state open --json number,mergeStateStatus,isDraft,headRefName,headRefOid,labels,body,author,isCrossRepository,title,createdAt 2>/dev/null || echo "[]")
   trust_filter_prs "$PROJECT" "$level" <<<"$json" \
-    | jq -r --arg held "$TRUST_HELD_LABEL" ".[] | select($select)"' | [.number, .headRefName, ((.labels // []) | map(.name) | (index("hold") or index($held))), .headRefOid, .mergeStateStatus, ((.body // "") | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null || true
+    | jq -r --arg held "$TRUST_HELD_LABEL" ".[] | select($select)"' | [.number, .headRefName, ((.labels // []) | map(.name) | (index("hold") or index($held))), .headRefOid, .mergeStateStatus, (.author.login // ""), ((.body // "") | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null || true
 }
 
 # UNSAFE_CHANGE_CHECK: the repo-side check (pull_request_target, policy read
@@ -327,7 +327,7 @@ for PROJECT in "${PROJECTS[@]}"; do
   # Phase 1 can merge it on this same tick.
   GREEN_DRAFTS=$(list_prs merge '.isDraft == true and .mergeStateStatus == "CLEAN"')
 
-  while IFS=$'\t' read -r PR HEAD HOLD _ _ BODY; do
+  while IFS=$'\t' read -r PR HEAD HOLD _ _ _ BODY; do
     [ -n "$PR" ] || continue
     pr_on_hold "$PR" "$HOLD" && continue
     if pr_owned_by_live_run "$PR" "$HEAD" "$BODY"; then
@@ -344,7 +344,7 @@ for PROJECT in "${PROJECTS[@]}"; do
   # --- Phase 1: Merge CLEAN PRs directly (bash only, zero AI cost) ---
   CLEAN_PRS=$(list_prs merge '.isDraft == false and .mergeStateStatus == "CLEAN"')
 
-  while IFS=$'\t' read -r PR HEAD HOLD _ _ BODY; do
+  while IFS=$'\t' read -r PR HEAD HOLD _ _ _ BODY; do
     [ -n "$PR" ] || continue
     pr_on_hold "$PR" "$HOLD" && continue
     if pr_owned_by_live_run "$PR" "$HEAD" "$BODY"; then
@@ -411,10 +411,11 @@ for PROJECT in "${PROJECTS[@]}"; do
   # dependabot bumps (lib/trust.sh), so majors keep waiting for the owner.
   # The body is never read: the comment is a constant. Phase 1 merges the PR
   # once it comes back CLEAN.
-  REBASE_PRS=$(list_prs merge '(.mergeStateStatus == "BEHIND" or .mergeStateStatus == "DIRTY") and ((.author.login // "") | ascii_downcase | IN("app/dependabot", "dependabot[bot]"))')
+  REBASE_PRS=$(list_prs merge '.mergeStateStatus == "BEHIND" or .mergeStateStatus == "DIRTY"')
 
-  while IFS=$'\t' read -r PR _ HOLD SHA STATE _; do
+  while IFS=$'\t' read -r PR _ HOLD SHA STATE AUTHOR _; do
     [ -n "$PR" ] || continue
+    trust_is_dependabot "$AUTHOR" || continue
     pr_on_hold "$PR" "$HOLD" && continue
     rebase_requested_for "$PR" "$SHA" && continue
     if ! pr_checks_green "$PR"; then
@@ -442,7 +443,7 @@ for PROJECT in "${PROJECTS[@]}"; do
   CANDIDATES=$(list_prs full '(.isDraft == false and (.mergeStateStatus == "BEHIND" or .mergeStateStatus == "DIRTY" or .mergeStateStatus == "UNSTABLE" or .mergeStateStatus == "UNKNOWN")) or (.isDraft == true and .mergeStateStatus == "DIRTY")')
 
   ACTIONABLE=""
-  while IFS=$'\t' read -r PR HEAD HOLD SHA STATE BODY; do
+  while IFS=$'\t' read -r PR HEAD HOLD SHA STATE _ BODY; do
     [ -n "$PR" ] || continue
     pr_on_hold "$PR" "$HOLD" && continue
     maintenance_launched_for "$PR" "$SHA" "$STATE" && continue
