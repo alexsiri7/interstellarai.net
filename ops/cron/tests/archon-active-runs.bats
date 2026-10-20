@@ -138,6 +138,15 @@ ci_wait() {
       "waitingSince": "%s", "resumeAt": "%s"}' "$(iso "-$2")" "$(iso "$1")"
 }
 
+ci_attention() {
+    # $1 seconds since waitingSince, $2 the bodyWaitId (default the CI attention step)
+    printf '"wait": {"owner": "loop_group", "nodeId": "deliver__ci-attention", "bodyWaitId": "%s",
+      "iteration": 1, "sessionId": null, "sessionProvider": null, "kind": "attention",
+      "waitingSince": "%s",
+      "message": "CI remains non-green for pull request #735: validate-specs (failure) Re-run the failing check, then resume this run."}' \
+      "${2:-attention-ci-pause}" "$(iso "-$1")"
+}
+
 snapshot_field() { awk -F'\t' -v n="$1" 'NR==1 { print $n }' "$ARCHON_RUNS_SNAPSHOT"; }
 
 no_running() { export STUB_PAYLOAD='{"runs": []}'; }
@@ -201,10 +210,71 @@ no_running() { export STUB_PAYLOAD='{"runs": []}'; }
       '"approval": {"nodeId": "review-gate", "message": "Ship it?", "type": "approval"}')"
     archon_runs_snapshot
     [ "$(snapshot_field 6)" = "gate" ]
+    [ "$(snapshot_field 10)" = "review-gate" ]
+    [ "$(snapshot_field 11)" = "Ship it?" ]
     [ "$(archon_parked_runs 1800 | cut -f2)" = "gate" ]
     # Reported to a human, yet still active: pr-maintenance must not merge or
     # abandon the PR a run pending an answer still owns.
     archon_run_active /mnt/ext-fast/un-reminder un-reminder '^archon-ship$'
+}
+
+@test "a CI attention pause classifies as attention with its step and message, and stays active" {
+    no_running
+    export STUB_PAYLOAD_PAUSED="$(paused_run 5deb98da-aaaa "$(ci_attention 3600)")"
+    archon_runs_snapshot
+    [ "$(snapshot_field 6)" = "attention" ]
+    [ "$(snapshot_field 10)" = "deliver__ci-attention.attention-ci-pause" ]
+    [[ "$(snapshot_field 11)" == "CI remains non-green for pull request #735:"*"resume this run." ]]
+    [ "$(snapshot_field 8)" -gt 0 ]
+    # pr-maintenance resumes it once its PR is green; until then nobody else
+    # hears about it, and it still owns its PR.
+    [ -z "$(archon_parked_runs 1800)" ]
+    archon_run_active /mnt/ext-fast/un-reminder un-reminder '^archon-ship$'
+}
+
+@test "a CI attention pause past the day's grace is parked, naming step and need" {
+    no_running
+    export STUB_PAYLOAD_PAUSED="$(paused_run 5deb98da-bbbb "$(ci_attention 90000)")"
+    archon_runs_snapshot
+    row=$(archon_parked_runs 1800)
+    [ "$(printf '%s\n' "$row" | wc -l)" -eq 1 ]
+    [ "$(printf '%s' "$row" | cut -f1)" = "5deb98da-bbbb" ]
+    [ "$(printf '%s' "$row" | cut -f2)" = "attention" ]
+    [ "$(printf '%s' "$row" | cut -f7)" = "deliver__ci-attention.attention-ci-pause" ]
+    [[ "$(printf '%s' "$row" | cut -f8)" == "CI remains non-green"* ]]
+}
+
+@test "any other attention pause is parked immediately" {
+    no_running
+    # redeploy-attention-ci-pause only ends like the CI attention step.
+    for step in deploy-approval-pause redeploy-attention-ci-pause; do
+        export STUB_PAYLOAD_PAUSED="$(paused_run 5deb98da-cccc "$(ci_attention 60 "$step")")"
+        archon_runs_snapshot
+        [ "$(snapshot_field 6)" = "attention" ]
+        [ "$(archon_parked_runs 1800 | cut -f7)" = "deliver__ci-attention.$step" ]
+    done
+}
+
+@test "archon_branch_ci_attention_run names the CI attention run whose worktree is the branch" {
+    no_running
+    attention_on() { # $1 id, $2 metadata — paused on archon/task-archon-ship-17
+        printf '{"id": "%s", "workflow_name": "archon-ship", "status": "paused", "user_message": "fix #74",
+          "working_path": "/w/proj/worktrees/archon/task-archon-ship-17",
+          "metadata": {"workflow_source": {"origin": "/mnt/ext-fast/proj"}, %s}}' "$1" "$2"
+    }
+    export STUB_PAYLOAD_PAUSED="{\"runs\": [$(attention_on run-ci "$(ci_attention 60)")]}"
+    archon_runs_snapshot
+    [ "$(archon_branch_ci_attention_run archon/task-archon-ship-17)" = "run-ci" ]
+    run ! archon_branch_ci_attention_run archon/task-archon-ship-7
+    run ! archon_branch_ci_attention_run ""
+
+    for meta in "$(ci_attention 60 deploy-approval-pause)" "$(ci_attention 60 redeploy-attention-ci-pause)" \
+                "$(ci_wait 240 60)" \
+                '"approval": {"nodeId": "attention-ci-pause", "message": "Ship it?", "type": "approval"}'; do
+        export STUB_PAYLOAD_PAUSED="{\"runs\": [$(attention_on run-other "$meta")]}"
+        archon_runs_snapshot
+        run ! archon_branch_ci_attention_run archon/task-archon-ship-17
+    done
 }
 
 @test "a resolved gate is reported: the machine owed the resume and did not make it" {
