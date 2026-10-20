@@ -250,6 +250,45 @@ load_trust() {
     grep -q 'Dependabot PR #412 on proj' "$STUB_CURL_ARGV"
 }
 
+@test "maintenance: dependabot's BEHIND and DIRTY same-major PRs get one @dependabot rebase per head SHA" {
+    export GH_PR_VIEW='{"title":"t","body":"b","statusCheckRollup":[{"conclusion":"SUCCESS"}]}'
+    export GH_PR_LIST="[$(pr 420 false BEHIND app/dependabot false dependabot/x 'bump x from 1.0.0 to 1.0.1'), $(pr 421 false DIRTY app/dependabot false dependabot/y 'bump y from 1.0.0 to 1.0.1')]"
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    [ "$status" -eq 0 ]
+    [ "$(grep -c '^pr comment 420 --body @dependabot rebase$' "$STUB_GH_ARGV")" -eq 1 ]
+    [ "$(grep -c '^pr comment 421 --body @dependabot rebase$' "$STUB_GH_ARGV")" -eq 1 ]
+    ! grep -q 'archon-pr-maintenance' "$STUB_ARCHON_ARGV"
+
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"PR #420 already asked dependabot to rebase at abc420"* ]]
+    [ "$(grep -c '^pr comment 420 ' "$STUB_GH_ARGV")" -eq 1 ]
+    [ "$(grep -c '^pr comment 421 ' "$STUB_GH_ARGV")" -eq 1 ]
+
+    # Dependabot rebased 420 and main moved again: a new head re-arms it.
+    GH_PR_LIST=$(jq -c 'map(if .number == 420 then .headRefOid = "def420" else . end)' <<<"$GH_PR_LIST")
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    [ "$status" -eq 0 ]
+    [ "$(grep -c '^pr comment 420 ' "$STUB_GH_ARGV")" -eq 2 ]
+    [ "$(grep -c '^pr comment 421 ' "$STUB_GH_ARGV")" -eq 1 ]
+}
+
+@test "maintenance: a held, a major and a red-checked dependabot PR get no rebase request" {
+    export GH_PR_VIEW='{"title":"t","body":"b","statusCheckRollup":[{"conclusion":"SUCCESS"}]}'
+    export GH_PR_LIST="[$(pr 422 false BEHIND app/dependabot false dependabot/a 'bump a from 1.0.0 to 1.0.1' | jq -c '.labels=[{"name":"hold"}]'), $(pr 423 false BEHIND app/dependabot false dependabot/b 'bump b from 1.9.0 to 2.0.0')]"
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    [ "$status" -eq 0 ]
+    ! gh_called '^pr comment'
+    [[ "$output" == *"PR #422 is on hold — skipping"* ]]
+
+    export GH_PR_VIEW='{"title":"t","body":"b","statusCheckRollup":[{"conclusion":"SUCCESS"},{"conclusion":"FAILURE"}]}'
+    export GH_PR_LIST="[$(pr 424 false BEHIND app/dependabot false dependabot/c 'bump c from 1.0.0 to 1.0.1')]"
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    [ "$status" -eq 0 ]
+    ! gh_called '^pr comment'
+    [[ "$output" == *"dependabot PR #424 is BEHIND but its checks are not all green"* ]]
+}
+
 @test "maintenance: the owner's DIRTY PR with a stranger's comment is passed over" {
     export GH_PR_LIST="[$(pr 408 false DIRTY alexsiri7 false), $(pr 409 false BEHIND alexsiri7 false)]"
     echo stranger > "$GH_COMMENTS_DIR/issues-408-comments"

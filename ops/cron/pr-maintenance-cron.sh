@@ -54,7 +54,9 @@ mkdir -p "$LOG_DIR"
 # unmerged — e.g. an asset-upload PR whose head another workflow fetches from.
 HOLD_LABEL="hold"
 # One marker per project and PR holding the "<headRefOid> <mergeStateStatus>"
-# Phase 2 last launched archon-pr-maintenance for.
+# Phase 2 last launched archon-pr-maintenance for, and one
+# (<project>-<PR>.rebase-requested) holding the head SHA Phase 1b last asked
+# dependabot to rebase.
 MAINTENANCE_STATE_DIR="$HOME/.archon/state/pr-maintenance"
 mkdir -p "$MAINTENANCE_STATE_DIR"
 
@@ -93,6 +95,15 @@ maintenance_launched_for() {
   local marker="$MAINTENANCE_STATE_DIR/${PROJECT}-$1.launched"
   [ "$(cat "$marker" 2>/dev/null)" = "$2 $3" ] || return 1
   log "$PROJECT: PR #$1 already had maintenance launched at ${2:0:7} ($3) — waiting for a new head or merge state"
+}
+
+# rebase_requested_for <number> <headRefOid> — true (with a log line) when
+# Phase 1b already asked dependabot to rebase this PR at this head. A rebase
+# changes the head and re-arms it; a request dependabot ignored is not repeated.
+rebase_requested_for() {
+  local marker="$MAINTENANCE_STATE_DIR/${PROJECT}-$1.rebase-requested"
+  [ "$(cat "$marker" 2>/dev/null)" = "$2" ] || return 1
+  log "$PROJECT: PR #$1 already asked dependabot to rebase at ${2:0:7} — waiting for a new head"
 }
 
 # pr_owned_by_live_run <number> <headRefName> <body>
@@ -393,6 +404,31 @@ for PROJECT in "${PROJECTS[@]}"; do
     fi
   done <<< "$CLEAN_PRS"
 
+  # --- Phase 1b: Ask dependabot to rebase its BEHIND/DIRTY PRs (zero AI) ---
+  # Phase 2 never sees a merge-only bot's PR, so on a repo whose main requires
+  # up-to-date branches a dependabot PR that fell behind sat until a human
+  # rebased it (#210). `merge` trust already admits only aged, same-major
+  # dependabot bumps (lib/trust.sh), so majors keep waiting for the owner.
+  # The body is never read: the comment is a constant. Phase 1 merges the PR
+  # once it comes back CLEAN.
+  REBASE_PRS=$(list_prs merge '(.mergeStateStatus == "BEHIND" or .mergeStateStatus == "DIRTY") and ((.author.login // "") | ascii_downcase | IN("app/dependabot", "dependabot[bot]"))')
+
+  while IFS=$'\t' read -r PR _ HOLD SHA STATE _; do
+    [ -n "$PR" ] || continue
+    pr_on_hold "$PR" "$HOLD" && continue
+    rebase_requested_for "$PR" "$SHA" && continue
+    if ! pr_checks_green "$PR"; then
+      log "$PROJECT: dependabot PR #$PR is $STATE but its checks are not all green — not asking for a rebase"
+      continue
+    fi
+    log "$PROJECT: dependabot PR #$PR is $STATE — asking dependabot to rebase"
+    if gh pr comment "$PR" --body "@dependabot rebase" >/dev/null 2>>"$LOG_DIR/pr-maintenance-errors.log"; then
+      echo "$SHA" > "$MAINTENANCE_STATE_DIR/${PROJECT}-${PR}.rebase-requested"
+    else
+      log "$PROJECT: PR #$PR — could not comment (see $LOG_DIR/pr-maintenance-errors.log), retrying next tick"
+    fi
+  done <<< "$REBASE_PRS"
+
   # --- Phase 2: Check for one PR needing AI attention ---
   # Drafts count only when DIRTY. GitHub runs no pull_request workflow on a
   # conflicting PR, so a draft that goes DIRTY has no CI for the health cron's
@@ -401,7 +437,8 @@ for PROJECT in "${PROJECTS[@]}"; do
   # word-coach-annie #1121 sat conflicted for 2.5h after #1122 merged the same
   # file). Other draft states are still the opening run's to finish.
   # Only `full` trust: archon-pr-maintenance reads the PR, so a merge-only
-  # bot's PR (dependabot: upstream release notes in the body) never gets here.
+  # bot's PR (dependabot: upstream release notes in the body) never gets here;
+  # Phase 1b asks dependabot to rebase its own instead.
   CANDIDATES=$(list_prs full '(.isDraft == false and (.mergeStateStatus == "BEHIND" or .mergeStateStatus == "DIRTY" or .mergeStateStatus == "UNSTABLE" or .mergeStateStatus == "UNKNOWN")) or (.isDraft == true and .mergeStateStatus == "DIRTY")')
 
   ACTIONABLE=""
