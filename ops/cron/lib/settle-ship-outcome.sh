@@ -15,8 +15,8 @@
 # A "No delivery needed" verdict closes the issue as archon:done, but only when
 # GitHub confirms it (#103): every sub-issue is closed, or the verdict names a
 # merged PR, or else exactly one same-repo issue that is still open (closed as
-# its duplicate, #212). A named closed issue never closes it: that is a
-# maintainer's call.
+# its duplicate, #212) while every other ref it names was looked up. A named
+# closed issue never closes it: that is a maintainer's call.
 # It never closes on the model's prose alone, and "No delivery started" (an
 # undecided investigate/plan stop) never closes. Anything else, or any gh
 # failure on the way, parks the issue as archon:skipped with the verdict as a
@@ -123,31 +123,35 @@ if [ "$health_filed" = 0 ] && [[ "$verdict" == "No delivery needed: "* ]]; then
   fi
 
   # Bare same-repo refs only ("owner/repo#N" is excluded), self dropped, the
-  # first five checked to bound the API calls.
+  # first five checked to bound the API calls; a sixth marks the rest unchecked.
   mapfile -t refs < <(
     awk '/^No delivery needed: /{p=1} p && /^(Report: |Parked as archon:skipped)/{exit} p' "$outcome_text" \
       | grep -oE '(^|[^A-Za-z0-9/_.-])#[0-9]+' | grep -oE '[0-9]+$' \
-      | awk -v self="$issue" '$0 != self && !seen[$0]++' | head -5)
+      | awk -v self="$issue" '$0 != self && !seen[$0]++' | head -6)
+  all_refs_known=1
+  [ "${#refs[@]}" -gt 5 ] && { all_refs_known=0; refs=("${refs[@]:0:5}"); }
   declare -A kind=()
   for ref in "${refs[@]}"; do
     kind[$ref]=$(gh api "repos/$repo/issues/$ref" --jq '
       if .pull_request then (if .pull_request.merged_at then "merged-pr" else "pr" end)
       elif .state == "open" then "open-issue"
       else "closed-issue" end' 2>/dev/null)
+    [ -n "${kind[$ref]}" ] || all_refs_known=0
     [ "${kind[$ref]}" = "closed-issue" ] && closed_refs+="${closed_refs:+, }#$ref"
   done
   # The triage policy's two closes without a person: an outcome a merged change
   # already delivered, and a duplicate of an issue that is still open. The
   # verdict's refs are free prose, so a lone open issue is read as the original
-  # and several are a maintainer's call. A duplicate of a closed issue is too,
-  # so it is parked with that issue named (below).
+  # and several are a maintainer's call, as is a ref left unchecked or whose
+  # lookup failed, since it may be a second open issue. A duplicate of a closed
+  # issue is too, so it is parked with that issue named (below).
   open_refs=()
   for ref in "${refs[@]}"; do
     [ "${kind[$ref]}" = "merged-pr" ] \
       && close_as_done "already fixed by merged PR #$ref" --reason completed
     [ "${kind[$ref]}" = "open-issue" ] && open_refs+=("$ref")
   done
-  [ "${#open_refs[@]}" -eq 1 ] \
+  [ "${#open_refs[@]}" -eq 1 ] && [ "$all_refs_known" = 1 ] \
     && close_as_done "duplicate of #${open_refs[0]}, which is still open" --duplicate-of "${open_refs[0]}"
 fi
 [ "$recheck" = 1 ] && exit 1

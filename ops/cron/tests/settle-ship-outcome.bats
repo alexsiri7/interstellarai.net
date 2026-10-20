@@ -128,6 +128,29 @@ LOG
     assert_parked 7
 }
 
+@test "a verdict whose sixth ref goes unchecked does not close as a duplicate" {
+    printf 'No delivery needed: duplicate of #8; see #1, #2, #3, #4 and the parent epic #9.\nReport: /x\n' > "$RUN_LOG"
+    ref 8 open-issue
+    ref 1 pr; ref 2 pr; ref 3 pr; ref 4 pr
+    ref 9 open-issue
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    [ "$(gh_calls 'api repos/alexsiri7/testproj/issues/9 ')" -eq 0 ]
+    assert_parked 7
+}
+
+@test "a verdict with one open issue and a ref whose lookup fails does not close as a duplicate" {
+    printf 'No delivery needed: duplicate of #8; see #9 the parent epic.\nReport: /x\n' > "$RUN_LOG"
+    ref 8 open-issue
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_parked 7
+}
+
 @test "a verdict naming only a closed original parks for a maintainer, naming it" {
     printf 'No delivery needed: duplicate of #8, closed last week.\nReport: /x\n' > "$RUN_LOG"
     ref 8 closed-issue
