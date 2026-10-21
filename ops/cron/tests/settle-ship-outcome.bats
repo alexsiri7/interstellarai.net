@@ -337,6 +337,22 @@ json_outcome() {  # <delivered> <summary, with literal \n escapes>
     [ ! -s "$GH_ARGV" ]
 }
 
+# The factory comments as the owner; Lachesis tells its comments from the
+# author's answers by this last line (lachesis #386).
+@test "the park and close comments end with the lachesis:automated marker" {
+    printf 'No delivery needed: false positive alert, not a code change.\nReport: /x\n' > "$RUN_LOG"
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    [ "$(tail -n 1 "$GH_ARGV")" = "<!-- lachesis:automated -->" ]
+
+    : > "$GH_ARGV"
+    printf 'No delivery needed: fixed by PR #50.\nReport: /x\n' > "$RUN_LOG"
+    fixture ref-50 merged-pr
+    run "$SCRIPT" testproj 8 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    [ "$(grep -B1 '^issue edit 8 ' "$GH_ARGV" | head -n 1)" = "<!-- lachesis:automated -->" ]
+}
+
 @test "the parked comment a JSON verdict leaves is one --recheck reads back" {
     json_outcome false 'No delivery needed: PR #50 is not merged yet.\nReport: /x'
     fixture ref-50 pr

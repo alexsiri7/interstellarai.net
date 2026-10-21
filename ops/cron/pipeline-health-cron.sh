@@ -416,7 +416,9 @@ open_escalations() {
 close_escalation() {
   local repo="$1" issue_num="$2" reason="$3"
   if gh issue close "$issue_num" --repo "$repo" \
-      --comment "Resolved: $reason Closed by \`pipeline-health-cron.sh\`, which filed this escalation." \
+      --comment "Resolved: $reason Closed by \`pipeline-health-cron.sh\`, which filed this escalation.
+
+<!-- lachesis:automated -->" \
       >/dev/null 2>&1; then
     log "$repo: closed escalation #$issue_num — $reason"
   else

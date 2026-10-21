@@ -154,6 +154,7 @@ closed_issue() { printf '{"number":%s,"body":"%s","stateReason":"%s"}' "$1" "$2"
 
     grep -q -- "issue close 431 --repo alexsiri7/testproj --duplicate-of 432 " "$GH_ARGV"
     [ "$SUMMARY_DEDUPED" -eq 1 ]
+    grep -qx -- '<!-- lachesis:automated -->' "$GH_ARGV"
     grep -q "#431 closed as duplicate of #432 (Sentry 147429034)" "$LOGGED"
 }
 
@@ -351,6 +352,7 @@ STUB
 
     grep -q -- "issue edit 71 --repo alexsiri7/testproj --remove-label archon:in-progress --add-label archon:skipped" "$GH_ARGV"
     grep -q -- "issue comment 71 " "$GH_ARGV"
+    grep -qx -- '<!-- lachesis:automated -->' "$GH_ARGV"
     [ "$(gh_calls -- '--add-label archon:queued')" -eq 0 ]
     [ "$SUMMARY_STALE" -eq 1 ]
     [ "$SUMMARY_IN_PROGRESS" -eq 1 ]

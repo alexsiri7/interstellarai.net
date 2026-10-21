@@ -169,6 +169,7 @@ issue() { # issue <number> <title> <body> <labels-json> [author]
     screen_bridge_issues proj 2>/dev/null
     grep -q -- 'issue edit 5 --repo alexsiri7/proj --add-label archon:auto-approved --add-label type:bug-report' "$GH_ARGV"
     grep -q -- 'issue comment 5 .*Automated screening: passed (source: sentry-bridge, type: bug_report)' "$GH_ARGV"
+    grep -qx -- '<!-- lachesis:automated -->' "$GH_ARGV"
     ! grep -q 'QUOTED ATTACKER TEXT' "$GH_ARGV"
     ! grep -q ntfy.sh "$CURL_ARGV"
 }
@@ -178,6 +179,7 @@ issue() { # issue <number> <title> <body> <labels-json> [author]
     screen_bridge_issues proj 2>/dev/null
     grep -q -- 'issue edit 6 --repo alexsiri7/proj --add-label needs-owner-review' "$GH_ARGV"
     grep -q -- 'issue comment 6 .*held for the owner (source: feedback; checks: H-INJECT)' "$GH_ARGV"
+    grep -qx -- '<!-- lachesis:automated -->' "$GH_ARGV"
     [ "$(grep -c ntfy.sh "$CURL_ARGV")" -eq 1 ]
 }
 

@@ -396,7 +396,9 @@ build_drift_close() {
   while IFS= read -r num; do
     [ -n "$num" ] || continue
     if gh issue close "$num" --repo "$repo" \
-        --comment "Resolved: $why Closed by \`pipeline-health-cron.sh\`, which filed this build-drift issue." \
+        --comment "Resolved: $why Closed by \`pipeline-health-cron.sh\`, which filed this build-drift issue.
+
+<!-- lachesis:automated -->" \
         >/dev/null 2>&1; then
       log "$project: closed drift issue #$num — $why"
     else
