@@ -368,6 +368,7 @@ STUB
     unstick_stale testproj
 
     grep -q -- "issue edit 72 --repo alexsiri7/testproj --remove-label archon:in-progress --add-label archon:queued" "$GH_ARGV"
+    grep -qx -- '<!-- lachesis:automated -->' "$GH_ARGV"
     [ "$(gh_calls 'archon:skipped')" -eq 0 ]
     [ "$SUMMARY_STALE" -eq 1 ]
 }
@@ -1243,6 +1244,7 @@ issue_json() {
     unstick_stale testproj
 
     grep -q -- "issue edit 71 --repo alexsiri7/testproj --remove-label archon:in-progress$" "$GH_ARGV"
+    grep -qx -- '<!-- lachesis:automated -->' "$GH_ARGV"
     [ "$(gh_calls -- 'archon:queued')" -eq 0 ]
     [ "$(gh_calls -- 'archon:skipped')" -eq 0 ]
     [ "$SUMMARY_STALE" -eq 1 ]

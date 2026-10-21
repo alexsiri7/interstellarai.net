@@ -60,7 +60,12 @@ setup() {
                     [ "${args[$i]}" = "--title" ] && printf '%s\n' "${args[$((i + 1))]}" > "$STATE_DIR/issue-title"
                 done
                 echo "https://github.com/alexsiri7/proj/issues/42"; return 0 ;;
-            "issue close") echo "$3" >> "$STATE_DIR/closed"; return 0 ;;
+            "issue close")
+                echo "$3" >> "$STATE_DIR/closed"
+                for ((i = 0; i < ${#args[@]}; i++)); do
+                    [ "${args[$i]}" = "--comment" ] && printf '%s\n' "${args[$((i + 1))]}" >> "$STATE_DIR/closed-comment"
+                done
+                return 0 ;;
             "api "*)
                 a="$2"
                 case "$a" in
@@ -505,6 +510,7 @@ pending_rerun() {
     check_build_drift proj
 
     [ "$(cat "$STATE_DIR/closed")" = 7 ]
+    grep -qx -- '<!-- lachesis:automated -->' "$STATE_DIR/closed-comment"
 }
 
 @test "daily pass: an open drift issue stays open while the newest main run is red" {
