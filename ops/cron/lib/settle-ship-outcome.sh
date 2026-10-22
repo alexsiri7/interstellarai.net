@@ -87,7 +87,9 @@ close_as_done() {
   local evidence="$1"; shift
   gh issue close "$issue" --repo "$repo" "$@" --comment "archon-ship finished without a PR: ${verdict}
 
-Closed as archon:done: ${evidence}. Reopen and add archon:queued to run it again. ${close_note}" >/dev/null 2>&1 || {
+Closed as archon:done: ${evidence}. Reopen and add archon:queued to run it again. ${close_note}
+
+<!-- lachesis:automated -->" >/dev/null 2>&1 || {
     [ "$recheck" = 1 ] \
       && echo "$(date -Is) [issue-pickup] $project: #$issue — GitHub confirms ${evidence}, but the close failed"
     return 1
@@ -172,5 +174,7 @@ health_note=""
   && health_note=" Not auto-closed: the issue was filed by pipeline-health-cron.sh (CI/deploy state), or its body could not be read, so a human decides."
 gh issue comment "$issue" --repo "$repo" --body "archon-ship finished without a PR: ${verdict}
 
-Parked as archon:skipped. ${rerun_note}${health_note} Run log: \`${run_log}\`" >/dev/null 2>&1 || true
+Parked as archon:skipped. ${rerun_note}${health_note} Run log: \`${run_log}\`
+
+<!-- lachesis:automated -->" >/dev/null 2>&1 || true
 echo "$(date -Is) [issue-pickup] $project: #$issue settled as archon:skipped (${verdict:0:120})"

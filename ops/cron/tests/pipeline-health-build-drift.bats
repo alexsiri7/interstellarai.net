@@ -505,6 +505,7 @@ pending_rerun() {
     check_build_drift proj
 
     [ "$(cat "$STATE_DIR/closed")" = 7 ]
+    grep -qx -- '<!-- lachesis:automated -->' "$GH_LOG"
 }
 
 @test "daily pass: an open drift issue stays open while the newest main run is red" {

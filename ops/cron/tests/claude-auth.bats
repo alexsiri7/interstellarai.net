@@ -93,6 +93,7 @@ open_issue_for() {
     run claude_auth_check "$BAD"
     [ "$(wc -l < "$NTFY_SENTINEL")" -eq 2 ]
     grep -q '^issue comment 7' "$GH_CALLS"
+    grep -qx -- '<!-- lachesis:automated -->' "$GH_CALLS"
     [ "$(grep -c '^issue create' "$GH_CALLS")" -eq 0 ]
 }
 
@@ -118,6 +119,7 @@ open_issue_for() {
     run claude_auth_check "$BAD"
     [ "$status" -eq 0 ]
     grep -q '^issue close 7' "$GH_CALLS"
+    grep -qx -- '<!-- lachesis:automated -->' "$GH_CALLS"
     [[ "$output" == *"recovered — closed #7"* ]]
     [ ! -e "$CLAUDE_AUTH_STATE_DIR/${BAD//\//_}.failing" ]
     [ ! -e "$CLAUDE_AUTH_STATE_DIR/${BAD//\//_}.alerted" ]

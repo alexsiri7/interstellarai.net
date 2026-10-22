@@ -150,6 +150,7 @@ ${SHIP_BREAKER_MARKER}"; then
 
 Remove \`manual-review\` and \`archon:skipped\` and add \`archon:queued\` to run it again; only runs after this comment will count.
 
-${SHIP_BREAKER_MARKER}" >/dev/null 2>&1 || true
+${SHIP_BREAKER_MARKER}
+<!-- lachesis:automated -->" >/dev/null 2>&1 || true
   return 1
 }

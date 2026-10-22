@@ -559,9 +559,10 @@ ESCALATIONS_FIXTURE='[
 
     close_resolved_pr_escalations "test-project"
 
-    [ "$(cut -d' ' -f1 "$STATE_DIR/closed" | tr '\n' ' ')" = "22 23 " ]
+    [ "$(grep -oE '^[0-9]+ Resolved' "$STATE_DIR/closed" | cut -d' ' -f1 | tr '\n' ' ')" = "22 23 " ]
     grep -q "^22 Resolved: PR #7 has been merged\." "$STATE_DIR/closed"
     grep -q "^23 Resolved: PR #8 has been closed without merging\." "$STATE_DIR/closed"
+    grep -qx -- '<!-- lachesis:automated -->' "$STATE_DIR/closed"
 }
 
 @test "close_resolved_pr_escalations leaves the escalation open when the PR lookup fails" {

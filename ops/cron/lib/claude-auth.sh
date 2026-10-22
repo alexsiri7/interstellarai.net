@@ -109,7 +109,9 @@ EOF
       fi
     elif [ "$first_today" -eq 1 ]; then
       gh issue comment "$issue" --repo "$CLAUDE_AUTH_ISSUE_REPO" \
-        --body "Still failing on $today: \`$detail\`" >/dev/null 2>&1 || true
+        --body "Still failing on $today: \`$detail\`
+
+<!-- lachesis:automated -->" >/dev/null 2>&1 || true
     fi
   else
     log "claude-auth: WARNING: could not list issues on $CLAUDE_AUTH_ISSUE_REPO"
@@ -133,7 +135,9 @@ claude_auth_recovered() {
     return 0
   fi
   if [ -n "$issue" ] && ! gh issue close "$issue" --repo "$CLAUDE_AUTH_ISSUE_REPO" \
-      --comment "The probe passes again on $(date +%F); closing." >/dev/null 2>&1; then
+      --comment "The probe passes again on $(date +%F); closing.
+
+<!-- lachesis:automated -->" >/dev/null 2>&1; then
     log "claude-auth: WARNING: could not close tracking issue #$issue for $dir"
     return 0
   fi

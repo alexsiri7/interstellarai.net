@@ -330,7 +330,9 @@ dedupe_sentry() {
       continue
     fi
     if gh issue close "$num" --repo "alexsiri7/$project" --duplicate-of "$survivor" \
-        --comment "Duplicate of #$survivor: both carry Sentry issue $sentry_id. Closed by issue-pickup's Sentry dedupe." >/dev/null 2>&1; then
+        --comment "Duplicate of #$survivor: both carry Sentry issue $sentry_id. Closed by issue-pickup's Sentry dedupe.
+
+<!-- lachesis:automated -->" >/dev/null 2>&1; then
       log "$project: #$num closed as duplicate of #$survivor (Sentry $sentry_id)"
       SUMMARY_DEDUPED=$((SUMMARY_DEDUPED + 1))
     else
@@ -483,7 +485,9 @@ unstick_stale() {
         }
       SUMMARY_STALE=$((SUMMARY_STALE + 1))
       gh issue comment "$num" --repo "alexsiri7/$project" \
-        --body "archon was labeled in-progress ${age}s ago but no live or parked (paused) run and no linked PR were found. Released archon:in-progress: Lachesis next_issue decides when it runs again." 2>/dev/null || true
+        --body "archon was labeled in-progress ${age}s ago but no live or parked (paused) run and no linked PR were found. Released archon:in-progress: Lachesis next_issue decides when it runs again.
+
+<!-- lachesis:automated -->" 2>/dev/null || true
       continue
     fi
 
@@ -504,7 +508,9 @@ unstick_stale() {
         }
       SUMMARY_STALE=$((SUMMARY_STALE + 1))
       gh issue comment "$num" --repo "alexsiri7/$project" \
-        --body "archon was labeled in-progress ${age}s ago but no live or parked (paused) run and no linked PR were found. This issue carries a human-intent label, so it was parked as archon:skipped instead of re-queued. Remove the label and add archon:queued to run it again." 2>/dev/null || true
+        --body "archon was labeled in-progress ${age}s ago but no live or parked (paused) run and no linked PR were found. This issue carries a human-intent label, so it was parked as archon:skipped instead of re-queued. Remove the label and add archon:queued to run it again.
+
+<!-- lachesis:automated -->" 2>/dev/null || true
       continue
     fi
 
@@ -516,7 +522,9 @@ unstick_stale() {
       }
     SUMMARY_STALE=$((SUMMARY_STALE + 1))
     gh issue comment "$num" --repo "alexsiri7/$project" \
-      --body "archon was labeled in-progress ${age}s ago but no live or parked (paused) run and no linked PR were found. Re-queued for another attempt." 2>/dev/null || true
+      --body "archon was labeled in-progress ${age}s ago but no live or parked (paused) run and no linked PR were found. Re-queued for another attempt.
+
+<!-- lachesis:automated -->" 2>/dev/null || true
   done
 }
 

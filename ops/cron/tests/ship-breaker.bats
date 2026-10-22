@@ -76,6 +76,7 @@ run_row() {
     grep -q -- "issue edit 5 --repo alexsiri7/testproj .*--add-label manual-review --add-label archon:skipped" "$GH_ARGV"
     grep -q -- "issue comment 5 " "$GH_ARGV"
     [[ "$output" == *"circuit open (failed:3)"* ]]
+    grep -qx -- '<!-- lachesis:automated -->' "$GH_ARGV"
 }
 
 @test "a park whose relabel fails posts no marker comment (it would reset the count)" {

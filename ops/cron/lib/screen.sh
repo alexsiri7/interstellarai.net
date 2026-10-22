@@ -253,13 +253,17 @@ screen_bridge_issues() {
         local tl="type:${type//_/-}"
         gh label create "$tl" --repo "$repo" --color "bfd4f2" --description "Issue type set by automated screening" 2>/dev/null || true
         if gh issue edit "$num" --repo "$repo" --add-label "$SCREEN_AUTO_LABEL" --add-label "$tl" >/dev/null 2>&1; then
-          gh issue comment "$num" --repo "$repo" --body "Automated screening: passed (source: $source, type: $type). The factory may work this issue; a PR built from it is merged only when the repository's unsafe-change check passes." >/dev/null 2>&1 || true
+          gh issue comment "$num" --repo "$repo" --body "Automated screening: passed (source: $source, type: $type). The factory may work this issue; a PR built from it is merged only when the repository's unsafe-change check passes.
+
+<!-- lachesis:automated -->" >/dev/null 2>&1 || true
           _screen_log "$project: #$num ($source) screened safe as $type"
         fi
         ;;
       suspicious)
         if gh issue edit "$num" --repo "$repo" --add-label "$SCREEN_HOLD_LABEL" >/dev/null 2>&1; then
-          gh issue comment "$num" --repo "$repo" --body "Automated screening: held for the owner (source: $source; checks: ${codes:-none}). The factory will not work this issue unless the owner adds \`$TRUST_APPROVED_LABEL\`." >/dev/null 2>&1 || true
+          gh issue comment "$num" --repo "$repo" --body "Automated screening: held for the owner (source: $source; checks: ${codes:-none}). The factory will not work this issue unless the owner adds \`$TRUST_APPROVED_LABEL\`.
+
+<!-- lachesis:automated -->" >/dev/null 2>&1 || true
           _screen_log "$project: #$num ($source) held: $codes"
           trust_notify_once "$project" issue-screen "$num" \
             "$project #$num from $source held by screening ($codes). Add $TRUST_APPROVED_LABEL to let the factory work it. https://github.com/$repo/issues/$num"
