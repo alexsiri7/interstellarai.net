@@ -54,7 +54,9 @@ mkdir -p "$LOG_DIR"
 # unmerged — e.g. an asset-upload PR whose head another workflow fetches from.
 HOLD_LABEL="hold"
 # One marker per project and PR holding the "<headRefOid> <mergeStateStatus>"
-# Phase 2 last launched archon-pr-maintenance for.
+# Phase 2 last launched archon-pr-maintenance for, and one
+# (<project>-<PR>.rebase-requested) holding the head SHA Phase 1b last asked
+# dependabot to rebase.
 MAINTENANCE_STATE_DIR="$HOME/.archon/state/pr-maintenance"
 mkdir -p "$MAINTENANCE_STATE_DIR"
 
@@ -93,6 +95,15 @@ maintenance_launched_for() {
   local marker="$MAINTENANCE_STATE_DIR/${PROJECT}-$1.launched"
   [ "$(cat "$marker" 2>/dev/null)" = "$2 $3" ] || return 1
   log "$PROJECT: PR #$1 already had maintenance launched at ${2:0:7} ($3) — waiting for a new head or merge state"
+}
+
+# rebase_requested_for <number> <headRefOid> — true (with a log line) when
+# Phase 1b already asked dependabot to rebase this PR at this head. A rebase
+# changes the head and re-arms it; a request dependabot ignored is not repeated.
+rebase_requested_for() {
+  local marker="$MAINTENANCE_STATE_DIR/${PROJECT}-$1.rebase-requested"
+  [ "$(cat "$marker" 2>/dev/null)" = "$2" ] || return 1
+  log "$PROJECT: PR #$1 already asked dependabot to rebase at ${2:0:7} — waiting for a new head"
 }
 
 # pr_owned_by_live_run <number> <headRefName> <body>
@@ -179,14 +190,14 @@ abandon_reviews() {
 # list_prs full|merge <jq select expression> — open PRs of the current repo
 # whose author the trust gate admits at that level (lib/trust.sh: `full` =
 # archon may work it, `merge` = may also be a merge-only bot's PR), one
-# "<number>\t<headRefName>\t<hold>\t<headRefOid>\t<mergeStateStatus>\t<body>"
+# "<number>\t<headRefName>\t<hold>\t<headRefOid>\t<mergeStateStatus>\t<author>\t<body>"
 # row each. Untrusted PRs are dropped here, before any phase sees them, and
 # the owner is told once.
 list_prs() {
   local level="$1" select="$2" json
   json=$(gh pr list --state open --json number,mergeStateStatus,isDraft,headRefName,headRefOid,labels,body,author,isCrossRepository,title,createdAt 2>/dev/null || echo "[]")
   trust_filter_prs "$PROJECT" "$level" <<<"$json" \
-    | jq -r --arg held "$TRUST_HELD_LABEL" ".[] | select($select)"' | [.number, .headRefName, ((.labels // []) | map(.name) | (index("hold") or index($held))), .headRefOid, .mergeStateStatus, ((.body // "") | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null || true
+    | jq -r --arg held "$TRUST_HELD_LABEL" ".[] | select($select)"' | [.number, .headRefName, ((.labels // []) | map(.name) | (index("hold") or index($held))), .headRefOid, .mergeStateStatus, (.author.login // ""), ((.body // "") | gsub("[\\t\\r\\n]"; " "))] | @tsv' 2>/dev/null || true
 }
 
 # UNSAFE_CHANGE_CHECK: the repo-side check (pull_request_target, policy read
@@ -316,7 +327,7 @@ for PROJECT in "${PROJECTS[@]}"; do
   # Phase 1 can merge it on this same tick.
   GREEN_DRAFTS=$(list_prs merge '.isDraft == true and .mergeStateStatus == "CLEAN"')
 
-  while IFS=$'\t' read -r PR HEAD HOLD _ _ BODY; do
+  while IFS=$'\t' read -r PR HEAD HOLD _ _ _ BODY; do
     [ -n "$PR" ] || continue
     pr_on_hold "$PR" "$HOLD" && continue
     if pr_owned_by_live_run "$PR" "$HEAD" "$BODY"; then
@@ -333,7 +344,7 @@ for PROJECT in "${PROJECTS[@]}"; do
   # --- Phase 1: Merge CLEAN PRs directly (bash only, zero AI cost) ---
   CLEAN_PRS=$(list_prs merge '.isDraft == false and .mergeStateStatus == "CLEAN"')
 
-  while IFS=$'\t' read -r PR HEAD HOLD _ _ BODY; do
+  while IFS=$'\t' read -r PR HEAD HOLD _ _ _ BODY; do
     [ -n "$PR" ] || continue
     pr_on_hold "$PR" "$HOLD" && continue
     if pr_owned_by_live_run "$PR" "$HEAD" "$BODY"; then
@@ -393,6 +404,32 @@ for PROJECT in "${PROJECTS[@]}"; do
     fi
   done <<< "$CLEAN_PRS"
 
+  # --- Phase 1b: Ask dependabot to rebase its BEHIND/DIRTY PRs (zero AI) ---
+  # Phase 2 never sees a merge-only bot's PR, so on a repo whose main requires
+  # up-to-date branches a dependabot PR that fell behind sat until a human
+  # rebased it (#210). `merge` trust already admits only aged, same-major
+  # dependabot bumps (lib/trust.sh), so majors keep waiting for the owner.
+  # The body is never read: the comment is a constant. Phase 1 merges the PR
+  # once it comes back CLEAN.
+  REBASE_PRS=$(list_prs merge '.mergeStateStatus == "BEHIND" or .mergeStateStatus == "DIRTY"')
+
+  while IFS=$'\t' read -r PR _ HOLD SHA STATE AUTHOR _; do
+    [ -n "$PR" ] || continue
+    trust_is_dependabot "$AUTHOR" || continue
+    pr_on_hold "$PR" "$HOLD" && continue
+    rebase_requested_for "$PR" "$SHA" && continue
+    if ! pr_checks_green "$PR"; then
+      log "$PROJECT: dependabot PR #$PR is $STATE but its checks are not all green — not asking for a rebase"
+      continue
+    fi
+    log "$PROJECT: dependabot PR #$PR is $STATE — asking dependabot to rebase"
+    if gh pr comment "$PR" --body "@dependabot rebase" >/dev/null 2>>"$LOG_DIR/pr-maintenance-errors.log"; then
+      echo "$SHA" > "$MAINTENANCE_STATE_DIR/${PROJECT}-${PR}.rebase-requested"
+    else
+      log "$PROJECT: PR #$PR — could not comment (see $LOG_DIR/pr-maintenance-errors.log), retrying next tick"
+    fi
+  done <<< "$REBASE_PRS"
+
   # --- Phase 2: Check for one PR needing AI attention ---
   # Drafts count only when DIRTY. GitHub runs no pull_request workflow on a
   # conflicting PR, so a draft that goes DIRTY has no CI for the health cron's
@@ -401,11 +438,12 @@ for PROJECT in "${PROJECTS[@]}"; do
   # word-coach-annie #1121 sat conflicted for 2.5h after #1122 merged the same
   # file). Other draft states are still the opening run's to finish.
   # Only `full` trust: archon-pr-maintenance reads the PR, so a merge-only
-  # bot's PR (dependabot: upstream release notes in the body) never gets here.
+  # bot's PR (dependabot: upstream release notes in the body) never gets here;
+  # Phase 1b asks dependabot to rebase its own instead.
   CANDIDATES=$(list_prs full '(.isDraft == false and (.mergeStateStatus == "BEHIND" or .mergeStateStatus == "DIRTY" or .mergeStateStatus == "UNSTABLE" or .mergeStateStatus == "UNKNOWN")) or (.isDraft == true and .mergeStateStatus == "DIRTY")')
 
   ACTIONABLE=""
-  while IFS=$'\t' read -r PR HEAD HOLD SHA STATE BODY; do
+  while IFS=$'\t' read -r PR HEAD HOLD SHA STATE _ BODY; do
     [ -n "$PR" ] || continue
     pr_on_hold "$PR" "$HOLD" && continue
     maintenance_launched_for "$PR" "$SHA" "$STATE" && continue

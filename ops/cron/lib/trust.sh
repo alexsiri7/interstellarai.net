@@ -9,6 +9,7 @@
 #   source "$SCRIPT_DIR/lib/trust.sh"
 #   trust_issue_ok "<author login>"                 # issue author trusted?
 #   trust_pr_level "<author login>" "<isCrossRepository>"   # full|merge|none
+#   trust_is_dependabot "<author login>"            # dependabot's PR?
 #   trust_filter_issues <project> <<<"$issues_json" # trusted issues only
 #   trust_filter_prs <project> full|merge <<<"$prs_json"
 #   trust_comments_ok <project> issue|pr <number>   # no untrusted commenter?
@@ -61,6 +62,12 @@ trust_canon_login() {
   local l="${1,,}"
   case "$l" in app/*) l="${l#app/}[bot]" ;; esac
   printf '%s' "$l"
+}
+
+# trust_is_dependabot <login> — true when the login is dependabot's, however
+# GitHub spells it.
+trust_is_dependabot() {
+  [ "$(trust_canon_login "$1")" = "dependabot[bot]" ]
 }
 
 # _trust_in_list <login> <space-separated list...> — exact membership; an
@@ -251,7 +258,7 @@ trust_filter_prs() {
     case "$need:$level" in
       full:full|merge:full) keep="$keep $num" ;;
       merge:merge)
-        if [ "$(trust_canon_login "$author")" = "dependabot[bot]" ] \
+        if trust_is_dependabot "$author" \
            && ! trust_dependabot_merge_ok "$title" "$created"; then
           local held="$TRUST_STATE_DIR/$project-dependabot-held-$num"
           if [[ "$title" =~ from[[:space:]]+[^0-9]*([0-9]+)[^[:space:]]*[[:space:]]+to[[:space:]]+[^0-9]*([0-9]+) ]] \
