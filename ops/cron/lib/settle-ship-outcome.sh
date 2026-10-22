@@ -29,6 +29,8 @@
 #
 # Exit 0 when a verdict was found and recorded, 1 when the log carries none
 # (crash, rate limit, delivered PR) so the caller keeps its existing handling.
+# A verdict whose reason is a placeholder (lib/ship-verdict.sh, #209) counts as
+# none: it is the shape of a degenerate triage, not a decision to record.
 #
 # --recheck: issue-pickup's settle_parked passes the verdict parked on an
 # archon:skipped issue, so one GitHub could not confirm at run time (or parked
@@ -60,14 +62,9 @@ fi
 # decoded summary is the report, and delivered:true (a PR) settles nothing.
 # Otherwise the plain report is read, as from --recheck's parked verdict.
 #
-# Archon v0.12 (ship tail scripts/outcome.ts) reworded the stops. "No delivery
-# needed: " (triage NO_ACTION) is unchanged; "No delivery started: " is gone and
-# its cases now read "Not done: " (triage BLOCKED or needing contract work, an
-# inconclusive investigation, planning stopped on a person's call) or "No work
-# owed in this repository: " (the investigation refuted the report). Those park
-# as "No delivery started" did (only "No delivery needed" can close) instead of
-# matching nothing and being re-queued by unstick_stale.
-VERDICT_RE='^(No delivery (needed|started)|Not done|No work owed in this repository): '
+# VERDICT_RE, the no-PR verdict line, lives in lib/ship-verdict.sh.
+# shellcheck source=lib/ship-verdict.sh
+source "$(dirname "${BASH_SOURCE[0]}")/ship-verdict.sh"
 outcome_text="$run_log"
 outcome_json=$(grep -E '^\{.*"delivered" *:' "$run_log" \
   | jq -cR 'fromjson? | select(type == "object" and (.delivered | type) == "boolean")' 2>/dev/null \
@@ -81,6 +78,11 @@ if [ -n "$outcome_json" ]; then
 fi
 verdict=$(grep -m1 -E "$VERDICT_RE" "$outcome_text" || true)
 [ -n "$verdict" ] || exit 1
+if verdict_is_placeholder "$verdict"; then
+  [ "$recheck" = 1 ] \
+    || echo "$(date -Is) [issue-pickup] $project: #$issue — placeholder verdict (${verdict:0:120}), not settled: left archon:in-progress for unstick_stale (#209). Run log: ${run_log}"
+  exit 1
+fi
 
 repo="alexsiri7/$project"
 
