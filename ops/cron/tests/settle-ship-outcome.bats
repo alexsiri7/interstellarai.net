@@ -10,9 +10,9 @@ setup() {
     mkdir -p "$T/bin" "$T/fixtures"
     SCRIPT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/lib/settle-ship-outcome.sh"
 
-    # Stub gh: records argv and answers `gh api` with what its --jq would print:
-    # "<total>\t<open>" for sub_issues (absent = no sub-issues), one of
-    # completed-issue / merged-pr / pr / other for a single issue or PR.
+    # Stub gh: records argv, answers sub_issues with what its --jq would print,
+    # "<total>\t<open>" (absent = no sub-issues), and runs the script's own --jq
+    # over the ref-<N> GitHub JSON for a single issue or PR (see ref()).
     # `issue view` prints the body-<issue> fixture (default: an ordinary body),
     # or fails with GH_VIEW_RC.
     cat > "$T/bin/gh" <<'STUB'
@@ -20,7 +20,7 @@ setup() {
 printf '%s\n' "$*" >> "$GH_ARGV"
 case "$*" in
   *sub_issues*)       cat "$GH_FIXTURES/sub-$(sed -E 's#.*/issues/([0-9]+)/.*#\1#' <<<"$*")" 2>/dev/null || printf '0\t0\n' ;;
-  "api "*/issues/*)   cat "$GH_FIXTURES/ref-${2##*/}" 2>/dev/null || exit 1 ;;
+  "api "*/issues/*)   [ "$3" = --jq ] && jq -r "$4" "$GH_FIXTURES/ref-${2##*/}" 2>/dev/null ;;
   *"issue view"*)
     [ -n "${GH_VIEW_RC:-}" ] && exit "$GH_VIEW_RC"
     cat "$GH_FIXTURES/body-$(sed -E 's/^issue view ([0-9]+).*/\1/' <<<"$*")" 2>/dev/null || echo 'An ordinary issue.' ;;
@@ -47,35 +47,124 @@ gh_calls() {
 
 fixture() { printf '%s\n' "$2" > "$T/fixtures/$1"; }
 
+# ref <N> open-issue|closed-issue|merged-pr|pr: what GitHub's issues API
+# returns for #N.
+ref() {
+    local json
+    case "$2" in
+        open-issue)   json='{"state":"open"}' ;;
+        closed-issue) json='{"state":"closed","state_reason":"completed"}' ;;
+        merged-pr)    json='{"state":"closed","pull_request":{"merged_at":"2026-09-16T10:00:00Z"}}' ;;
+        pr)           json='{"state":"open","pull_request":{"merged_at":null}}' ;;
+    esac
+    fixture "ref-$1" "$json"
+}
+
 assert_parked() {
     grep -q -- "issue edit $1 --repo alexsiri7/testproj --remove-label archon:in-progress --add-label archon:skipped" "$GH_ARGV"
     [ "$(gh_calls 'issue close')" -eq 0 ]
     [ "$(gh_calls '--add-label archon:done')" -eq 0 ]
 }
 
-# The verdict archon-ship actually left on un-reminder #431 (2026-09-16).
-@test "the real #431 verdict closes as a duplicate of the closed issue it names" {
+# The verdict archon-ship actually left on un-reminder #431 (2026-09-16). The
+# closed duplicate is a maintainer's call (#212); the merged PR is not.
+@test "the real #431 verdict closes on the merged PR it names, not as a duplicate of the closed issue" {
     cat > "$RUN_LOG" <<'LOG'
 [outcome] running
 No delivery needed: Issue #431 and closed issue #432 are duplicate GitHub records of the exact same Sentry event (UN-REMINDER-1C). The merged PR #433 already fixed #432 at HEAD. No engineering work remains; #431 just needs closing as a duplicate. Full evidence in /home/x/triage.md.
 Report: /home/x/artifacts/triage.md
 LOG
-    fixture ref-432 completed-issue
-    fixture ref-433 merged-pr
+    ref 432 closed-issue
+    ref 433 merged-pr
 
     run "$SCRIPT" testproj 431 "$RUN_LOG"
 
     [ "$status" -eq 0 ]
-    grep -q -- "issue close 431 --repo alexsiri7/testproj --duplicate-of 432 --comment" "$GH_ARGV"
+    grep -q -- "issue close 431 --repo alexsiri7/testproj --reason completed --comment" "$GH_ARGV"
+    [ "$(gh_calls '--duplicate-of')" -eq 0 ]
     grep -q -- "issue edit 431 --repo alexsiri7/testproj --remove-label archon:in-progress --add-label archon:done" "$GH_ARGV"
     [ "$(gh_calls 'archon:skipped')" -eq 0 ]
     [ "$(gh_calls 'api repos/alexsiri7/testproj/issues/431 ')" -eq 0 ]
-    [[ "$output" == *"#431 settled as archon:done (duplicate of #432, closed as completed)"* ]]
+    [[ "$output" == *"#431 settled as archon:done (already fixed by merged PR #433)"* ]]
+}
+
+# #212: the triage policy closes a duplicate of a still-open issue without a person.
+@test "a verdict naming one open original closes as its duplicate" {
+    printf 'No delivery needed: duplicate of #8, which tracks the same crash; PR #50 was abandoned.\nReport: /x\n' > "$RUN_LOG"
+    ref 8 open-issue
+    ref 50 pr
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    grep -q -- "issue close 7 --repo alexsiri7/testproj --duplicate-of 8 --comment archon-ship finished without a PR: No delivery needed: duplicate of #8" "$GH_ARGV"
+    [ "$(gh_calls '--reason')" -eq 0 ]
+    grep -q -- "issue edit 7 --repo alexsiri7/testproj --remove-label archon:in-progress --add-label archon:done" "$GH_ARGV"
+    [ "$(gh_calls 'archon:skipped')" -eq 0 ]
+    [[ "$output" == *"#7 settled as archon:done (duplicate of #8, which is still open)"* ]]
+}
+
+@test "a verdict naming a merged PR and an open issue closes on the PR, not as a duplicate" {
+    printf 'No delivery needed: merged PR #50 already delivered this; the follow-up refactor stays open in #8.\nReport: /x\n' > "$RUN_LOG"
+    ref 8 open-issue
+    ref 50 merged-pr
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    grep -q -- "issue close 7 --repo alexsiri7/testproj --reason completed --comment" "$GH_ARGV"
+    [ "$(gh_calls '--duplicate-of')" -eq 0 ]
+    [[ "$output" == *"#7 settled as archon:done (already fixed by merged PR #50)"* ]]
+}
+
+@test "a verdict naming two open issues parks, since neither is known to be the original" {
+    printf 'No delivery needed: duplicate of #8; see also the parent epic #9.\nReport: /x\n' > "$RUN_LOG"
+    ref 8 open-issue
+    ref 9 open-issue
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_parked 7
+}
+
+@test "a verdict whose sixth ref goes unchecked does not close as a duplicate" {
+    printf 'No delivery needed: duplicate of #8; see #1, #2, #3, #4 and the parent epic #9.\nReport: /x\n' > "$RUN_LOG"
+    ref 8 open-issue
+    ref 1 pr; ref 2 pr; ref 3 pr; ref 4 pr
+    ref 9 open-issue
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    [ "$(gh_calls 'api repos/alexsiri7/testproj/issues/9 ')" -eq 0 ]
+    assert_parked 7
+}
+
+@test "a verdict with one open issue and a ref whose lookup fails does not close as a duplicate" {
+    printf 'No delivery needed: duplicate of #8; see #9 the parent epic.\nReport: /x\n' > "$RUN_LOG"
+    ref 8 open-issue
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_parked 7
+}
+
+@test "a verdict naming only a closed original parks for a maintainer, naming it" {
+    printf 'No delivery needed: duplicate of #8, closed last week.\nReport: /x\n' > "$RUN_LOG"
+    ref 8 closed-issue
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_parked 7
+    grep -q -- "Not auto-closed: the verdict names closed issue #8, and a duplicate of a closed issue is a maintainer's call" "$GH_ARGV"
 }
 
 @test "a verdict naming only a merged PR closes as completed" {
     printf 'No delivery needed: already fixed at HEAD by PR #50.\nReport: /x\n' > "$RUN_LOG"
-    fixture ref-50 merged-pr
+    ref 50 merged-pr
 
     run "$SCRIPT" testproj 7 "$RUN_LOG"
 
@@ -116,11 +205,12 @@ LOG
     grep -q -- "issue comment 7 " "$GH_ARGV"
 }
 
-@test "a self-reference, an open issue, an unmerged PR and another repo's issue do not close" {
+@test "a self-reference, a closed issue, an unmerged PR and another repo's issue do not close" {
     printf 'No delivery needed: #7 duplicates #8, see PR #9 and alexsiri7/other#10.\nReport: /x\n' > "$RUN_LOG"
-    fixture ref-8 other
-    fixture ref-9 pr
-    fixture ref-10 completed-issue
+    ref 7 open-issue
+    ref 8 closed-issue
+    ref 9 pr
+    ref 10 open-issue
 
     run "$SCRIPT" testproj 7 "$RUN_LOG"
 
@@ -140,7 +230,7 @@ LOG
 
 @test "No delivery started never closes, even when it names a merged PR" {
     printf 'No delivery started: investigation found PR #50 may already cover this.\nReport: /x\n' > "$RUN_LOG"
-    fixture ref-50 merged-pr
+    ref 50 merged-pr
     printf '2\t0\n' > "$T/fixtures/sub-7"
 
     run "$SCRIPT" testproj 7 "$RUN_LOG"
@@ -152,7 +242,7 @@ LOG
 
 @test "a failed close falls back to parking" {
     printf 'No delivery needed: already fixed by PR #50.\nReport: /x\n' > "$RUN_LOG"
-    fixture ref-50 merged-pr
+    ref 50 merged-pr
     export GH_CLOSE_RC=1
 
     run "$SCRIPT" testproj 7 "$RUN_LOG"
@@ -174,8 +264,8 @@ LOG
 
 @test "a multi-line summary is searched past its first line, but not past Report" {
     printf 'No delivery needed: nothing left to do here.\nThe crash was fixed by PR #50.\nReport: /x\nlater noise #60\n' > "$RUN_LOG"
-    fixture ref-50 merged-pr
-    fixture ref-60 completed-issue
+    ref 50 merged-pr
+    ref 60 open-issue
 
     run "$SCRIPT" testproj 7 "$RUN_LOG"
 
@@ -214,7 +304,7 @@ json_outcome() {  # <delivered> <summary, with literal \n escapes>
 
 @test "a JSON No delivery needed verdict naming a merged PR closes as completed" {
     json_outcome false 'No delivery needed: already fixed at HEAD by PR #50.\nReport: /x/triage.md'
-    fixture ref-50 merged-pr
+    ref 50 merged-pr
 
     run "$SCRIPT" testproj 7 "$RUN_LOG"
 
@@ -225,8 +315,8 @@ json_outcome() {  # <delivered> <summary, with literal \n escapes>
 
 @test "a JSON summary is searched past its first line, but not past Report" {
     json_outcome false 'No delivery needed: nothing left to do here.\n\nThe crash was fixed by PR #50.\nReport: /x\nlater noise #60'
-    fixture ref-50 merged-pr
-    fixture ref-60 completed-issue
+    ref 50 merged-pr
+    ref 60 open-issue
 
     run "$SCRIPT" testproj 7 "$RUN_LOG"
 
@@ -237,7 +327,7 @@ json_outcome() {  # <delivered> <summary, with literal \n escapes>
 
 @test "a JSON No delivery started verdict parks and never closes, even naming a merged PR" {
     json_outcome false 'No delivery started: investigate found no safe fix boundary; see PR #50.\nReport: /x/investigation.md'
-    fixture ref-50 merged-pr
+    ref 50 merged-pr
 
     run "$SCRIPT" testproj 7 "$RUN_LOG"
 
@@ -257,7 +347,7 @@ json_outcome() {  # <delivered> <summary, with literal \n escapes>
         'Not done: planning stopped on calls only a person can make. Pick a storage engine.\n- Postgres or SQLite?\nReport: /x/plan.md'; do
         : > "$GH_ARGV"
         printf '{"delivered":false,"reason":"blocked","pr_url":"","summary":"%s"}\n' "$summary" > "$RUN_LOG"
-        fixture ref-50 merged-pr
+        ref 50 merged-pr
         printf '2\t0\n' > "$T/fixtures/sub-7"
 
         run "$SCRIPT" testproj 7 "$RUN_LOG"
@@ -272,7 +362,7 @@ json_outcome() {  # <delivered> <summary, with literal \n escapes>
 @test "a v0.12 refuted investigation (No work owed in this repository) parks and never closes" {
     printf '{"delivered":false,"reason":"refuted","pr_url":"","summary":"%s"}\n' \
         'No work owed in this repository: the crash is in the upstream SDK, fixed by PR #50.\nReport: /x/investigation.md' > "$RUN_LOG"
-    fixture ref-50 merged-pr
+    ref 50 merged-pr
 
     run "$SCRIPT" testproj 7 "$RUN_LOG"
 
@@ -285,7 +375,7 @@ json_outcome() {  # <delivered> <summary, with literal \n escapes>
 @test "a v0.12 No delivery needed report with reason and pr_url still closes on a merged PR" {
     printf '{"delivered":false,"reason":"no_action","pr_url":"","summary":"%s"}\n' \
         'No delivery needed: already fixed by merged PR #50.\nReport: /x/triage.md' > "$RUN_LOG"
-    fixture ref-50 merged-pr
+    ref 50 merged-pr
 
     run "$SCRIPT" testproj 7 "$RUN_LOG"
 
@@ -308,7 +398,7 @@ json_outcome() {  # <delivered> <summary, with literal \n escapes>
         echo 'No delivery needed: an earlier node said so, but the run went on to open a PR (#50).'
         echo '{"delivered":true,"summary":"https://github.com/alexsiri7/testproj/pull/51\n\nDelivered on red (1)"}'
     } > "$RUN_LOG"
-    fixture ref-50 merged-pr
+    ref 50 merged-pr
 
     run "$SCRIPT" testproj 7 "$RUN_LOG"
 
@@ -347,7 +437,7 @@ json_outcome() {  # <delivered> <summary, with literal \n escapes>
 
     : > "$GH_ARGV"
     printf 'No delivery needed: fixed by PR #50.\nReport: /x\n' > "$RUN_LOG"
-    fixture ref-50 merged-pr
+    ref 50 merged-pr
     run "$SCRIPT" testproj 8 "$RUN_LOG"
     [ "$status" -eq 0 ]
     [ "$(grep -B1 '^issue edit 8 ' "$GH_ARGV" | head -n 1)" = "<!-- lachesis:automated -->" ]
@@ -355,7 +445,7 @@ json_outcome() {  # <delivered> <summary, with literal \n escapes>
 
 @test "the parked comment a JSON verdict leaves is one --recheck reads back" {
     json_outcome false 'No delivery needed: PR #50 is not merged yet.\nReport: /x'
-    fixture ref-50 pr
+    ref 50 pr
     run "$SCRIPT" testproj 7 "$RUN_LOG"
     [ "$status" -eq 0 ]
     assert_parked 7
@@ -365,7 +455,7 @@ json_outcome() {  # <delivered> <summary, with literal \n escapes>
     [[ "$body" == "archon-ship finished without a PR: No delivery needed: PR #50 is not merged yet." ]]
     sed -n '/^issue comment 7 /,$p' "$GH_ARGV" | sed '1s/^.*--body archon-ship finished without a PR: //' > "$RUN_LOG"
     grep -q '^Parked as archon:skipped\.' "$RUN_LOG"
-    fixture ref-50 merged-pr
+    ref 50 merged-pr
     : > "$GH_ARGV"
 
     run "$SCRIPT" --recheck testproj 7 "$RUN_LOG"
@@ -407,7 +497,7 @@ assert_untouched() {
 # The verdict parked on filmduel #535 (2026-09-10).
 @test "--recheck closes a parked verdict naming a merged PR, removing archon:skipped" {
     parked_verdict 'Merged PR #541 already delivered exactly that: the watchlist toggle ships on HEAD. Recommend closing #7.'
-    fixture ref-541 merged-pr
+    ref 541 merged-pr
 
     run "$SCRIPT" --recheck testproj 7 "$RUN_LOG"
 
@@ -421,7 +511,7 @@ assert_untouched() {
 
 @test "--recheck does not search past the Parked paragraph" {
     printf 'No delivery needed: nothing left to do, see #61.\n\nParked as archon:skipped. See #60.\n' > "$RUN_LOG"
-    fixture ref-60 completed-issue
+    ref 60 open-issue
 
     run "$SCRIPT" --recheck testproj 7 "$RUN_LOG"
 
@@ -433,7 +523,7 @@ assert_untouched() {
 
 @test "--recheck with a failed close exits 1 without re-parking" {
     parked_verdict 'already fixed at HEAD by PR #50.'
-    fixture ref-50 merged-pr
+    ref 50 merged-pr
     export GH_CLOSE_RC=1
 
     run "$SCRIPT" --recheck testproj 7 "$RUN_LOG"
@@ -449,7 +539,7 @@ assert_untouched() {
 health_verdict() {
     printf '%s\n' "$1" > "$RUN_LOG"
     printf '## Main CI red\n\nAuto-filed by `pipeline-health-cron.sh`. Main CI is a pipeline bottleneck.\n' > "$T/fixtures/body-450"
-    fixture ref-449 merged-pr
+    ref 449 merged-pr
 }
 
 @test "the real #450 verdict parks a health-filed issue instead of closing it via the merged PR it cites" {
@@ -479,7 +569,7 @@ Parked as archon:skipped. Remove the label and add archon:queued to run it again
 
 @test "a failed issue lookup parks rather than closes" {
     printf 'No delivery needed: already fixed by PR #50.\nReport: /x\n' > "$RUN_LOG"
-    fixture ref-50 merged-pr
+    ref 50 merged-pr
     export GH_VIEW_RC=1
 
     run "$SCRIPT" testproj 7 "$RUN_LOG"
@@ -490,7 +580,7 @@ Parked as archon:skipped. Remove the label and add archon:queued to run it again
 
 @test "an empty non-health body still closes on a merged PR" {
     printf 'No delivery needed: already fixed by PR #50.\nReport: /x\n' > "$RUN_LOG"
-    fixture ref-50 merged-pr
+    ref 50 merged-pr
     : > "$T/fixtures/body-7"
 
     run "$SCRIPT" testproj 7 "$RUN_LOG"
@@ -532,6 +622,26 @@ STUB
     assert_parked 9
     grep -q '^ask_question .*"repo":"alexsiri7/testproj".*"blocks":\[9\]' "$LACHESIS_ARGV"
     grep -q -- "Waiting on the author's answer" "$GH_ARGV"
+}
+
+@test "lachesis pickup on: a duplicate of an open issue closes without a question" {
+    lachesis_on
+    echo 'No delivery needed: duplicate of #8.' > "$RUN_LOG"
+    ref 8 open-issue
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    grep -q -- "issue close 9 --repo alexsiri7/testproj --duplicate-of 8 --comment" "$GH_ARGV"
+    [ ! -s "$LACHESIS_ARGV" ]
+}
+
+@test "lachesis pickup on: a duplicate of a closed issue asks, naming it" {
+    lachesis_on
+    echo 'No delivery needed: duplicate of #8.' > "$RUN_LOG"
+    ref 8 closed-issue
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 9
+    grep -q '^ask_question .*names closed issue #8: if #9 duplicates it, close #9 as a duplicate' "$LACHESIS_ARGV"
 }
 
 @test "lachesis pickup on: a question Lachesis refuses leaves the issue in progress" {
