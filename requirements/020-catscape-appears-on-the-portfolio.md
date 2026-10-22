@@ -1,8 +1,8 @@
 ---
 created: '2026-10-22'
-github_issue: null
+github_issue: 220
 id: '020'
-status: draft
+status: idea
 title: Catscape appears on the portfolio
 updated: '2026-10-22'
 ---
@@ -17,4 +17,4 @@ Catscape has a card on the homepage and /projects, and its own project page, nex
 
 ## Issues
 
-_None yet._
+- #220 — Add Catscape to the portfolio
