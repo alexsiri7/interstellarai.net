@@ -437,7 +437,7 @@ json_outcome() {  # <delivered> <summary, with literal \n escapes>
 
     : > "$GH_ARGV"
     printf 'No delivery needed: fixed by PR #50.\nReport: /x\n' > "$RUN_LOG"
-    fixture ref-50 merged-pr
+    ref 50 merged-pr
     run "$SCRIPT" testproj 8 "$RUN_LOG"
     [ "$status" -eq 0 ]
     [ "$(grep -B1 '^issue edit 8 ' "$GH_ARGV" | head -n 1)" = "<!-- lachesis:automated -->" ]
