@@ -2,9 +2,9 @@
 created: '2026-10-22'
 github_issue: 220
 id: '020'
-status: idea
+status: done
 title: Catscape appears on the portfolio
-updated: '2026-10-22'
+updated: '2026-10-23'
 ---
 
 ## Why
