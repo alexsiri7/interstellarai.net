@@ -13,3 +13,4 @@ zoomies
 catscape
 dibs
 kith
+catscape-watchface
