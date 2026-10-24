@@ -149,6 +149,8 @@ declare -A DEPLOY_URLS=(
   ["kindred"]="https://kindred.up.railway.app/healthz"
   ["zoomies"]="https://zoomies.interstellarai.net/"
   ["catscape"]="https://catscape.interstellarai.net/"
+  # Pages site only: the API (punland-api.interstellarai.net) has no TLS cert yet.
+  ["punland"]="https://punland.interstellarai.net/"
   # /readyz, not /healthz: 503 while Kith cannot reach its database.
   ["kith"]="https://kith.interstellarai.net/readyz"
 )
