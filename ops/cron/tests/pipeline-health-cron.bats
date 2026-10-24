@@ -300,6 +300,28 @@ setup_main_ci_env() {
     [ "${STAGING_DEPLOY_URLS[reli]}" = "https://reli-staging.up.railway.app/healthz" ]
 }
 
+# FilmDuel's staging service lives at Railway's generated domain; the
+# project-named one 404s and kept the staging alarm permanently raised (#221).
+@test "STAGING_DEPLOY_URLS probes filmduel staging at its Railway service domain" {
+    # shellcheck disable=SC1090
+    source <(awk '/^declare -A STAGING_DEPLOY_URLS=\(/{p=1} p{print} p && /^\)$/{p=0}' "$SCRIPT_FILE")
+    [ "${STAGING_DEPLOY_URLS[filmduel]}" = "https://web-staging-68e8.up.railway.app" ]
+}
+
+@test "check_staging_deploy_http treats a 404 on the configured URL as staging-down" {
+    curl() { printf "404"; return 0; }
+    export -f curl
+    notify() { echo "notify: $1" >> "$STATE_DIR/notified"; }
+    declare -gA STAGING_DEPLOY_URLS=(["test-project"]="https://staging.example.com/")
+    mkdir -p "$STATE_DIR/staging-health"
+    load_fn check_staging_deploy_http
+
+    check_staging_deploy_http "test-project"
+
+    [ -f "$STATE_DIR/staging-health/deploy-down-test-project" ]
+    grep -qx "notify: Staging down: test-project" "$STATE_DIR/notified"
+}
+
 
 # ── find_tracked_issue: the #75 dedup predicate ──────────────────────────────
 # Relabelling an auto-filed "Main CI" issue `human-needed` used to slip past the
