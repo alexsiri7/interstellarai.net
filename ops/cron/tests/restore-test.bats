@@ -358,7 +358,7 @@ SQL
     run "$SCRIPT"
     [ "$status" -eq 1 ]
     [[ "$output" == *"ERROR: $T/bin/initdb missing"* ]]
-    [[ "$output" == *"ERROR: restore test FAILED for: annie,reli,filmduel,kindred,lachesis,musenmingle,kith,kindred-auth"* ]]
+    [[ "$output" == *"ERROR: restore test FAILED for: annie,reli,filmduel,kindred,lachesis,musenmingle,kith,punland,kindred-auth"* ]]
     grep -q '^reli=failed cluster-not-started$' "$T/state/restore-test-status"
     grep -q '^last_run_status=failed$' "$T/state/restore-test-status"
 }
