@@ -252,7 +252,7 @@ archives() { find "$T/backups/reli" -name '*.sql.gz' 2>/dev/null; }
     [[ "$output" == *"OK: kindred backed up"*"4 rows in public.entries"* ]]
     [[ "$output" == *"OK: kindred-auth backed up: $T/backups/kindred-auth/kindred-auth-"*"4 rows in auth.users"* ]]
     [[ "$output" == *"OK: musenmingle backed up: $T/backups/musenmingle/musenmingle-"*"4 rows in events.sources"* ]]
-    [[ "$output" == *"Backup complete (ok: kindred musenmingle kindred-auth; skipped: annie reli filmduel lachesis kith)"* ]]
+    [[ "$output" == *"Backup complete (ok: kindred musenmingle kindred-auth; skipped: annie reli filmduel lachesis kith punland)"* ]]
     grep -q -- '--no-owner --no-acl --schema=auth' "$STUB_ARGV"
     grep -q -- '--no-owner --no-acl --schema=events' "$STUB_ARGV"
     grep -q '^table=auth.users$' "$T"/backups/kindred-auth/*.meta
