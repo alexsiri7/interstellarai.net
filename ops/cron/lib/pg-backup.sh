@@ -36,6 +36,11 @@
 # `musenmingle`) was born there (schema
 # `events`). Kith was born there too (2026-10-18): schema `kith`, role
 # `kith_app`, KITH_DB_URL = that role on the session pooler.
+# Punland was born there (2026-10-24): schema `punland`, role `punland`,
+# PUNLAND_DB_URL = that role on the session pooler (NEW_PUNLAND_DB_URL_SESSION in
+# ~/.config/archon-cron/consolidated-db.env). The schema stays empty until
+# punland#10 (autosave) creates tables, so leave PUNLAND_DB_URL unset until then
+# (the line SKIPs); switch the sanity table to the save table if #10 uses no Alembic.
 # `kindred-auth` backs up the Supabase Auth users of that project (schema
 # `auth`), which a `--schema=public` dump never contains.
 # shellcheck disable=SC2034  # consumed by the sourcing scripts
@@ -47,6 +52,7 @@ PG_BACKUP_PROJECTS=(
     'lachesis|LACHESIS_DB_URL|lachesis|lachesis_backlog'
     'musenmingle|MUSENMINGLE_DB_URL|events|sources'
     'kith|KITH_DB_URL|kith|users'
+    'punland|PUNLAND_DB_URL|punland|alembic_version'
     'kindred-auth|KINDRED_DB_URL|auth|users'
 )
 

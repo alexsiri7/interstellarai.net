@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Backup Annie, Reli, FilmDuel, Kindred (+ its Supabase Auth users), Lachesis,
-# Muse & Mingle (pg_dump, one schema per entry of PG_BACKUP_PROJECTS)
+# Muse & Mingle, Kith, Punland (pg_dump, one schema per entry of PG_BACKUP_PROJECTS)
 # - Local: /mnt/steam-slow/backups/<project>/ (7-day rotation)
 # - Remote: Google Drive via rclone (if configured)
 #
