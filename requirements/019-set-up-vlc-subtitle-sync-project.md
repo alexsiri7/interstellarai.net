@@ -2,9 +2,9 @@
 created: '2026-10-11'
 github_issue: 190
 id: '019'
-status: idea
+status: done
 title: Set up vlc-subtitle-sync project
-updated: '2026-10-11'
+updated: '2026-10-25'
 ---
 
 ## Why
