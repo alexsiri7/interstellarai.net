@@ -124,6 +124,7 @@ Several factory repos are public, and every archon run is a Claude session on th
 | `TRUSTED_AUTHORS` | `alexsiri7 alexsiri7-factory` | everything: issues, PRs, comments |
 | `TRUSTED_ISSUE_BOTS` | `sentry[bot] github-actions[bot]` | issues and comments (Sentry's integration, the repos' own workflows: Railway alerts, token-expiry issues) |
 | `TRUSTED_MERGE_ONLY_AUTHORS` | `dependabot[bot] github-actions[bot]` | PRs that `pr-maintenance` may merge when CLEAN, but that no archon run ever reads: dependabot bodies carry upstream release notes |
+| `TRUSTED_COMMENT_BOTS` | `cloudflare-workers-and-pages[bot] vercel[bot] railway-app[bot] dependabot[bot] github-actions[bot] netlify[bot] sentry-io[bot]` | comments only, and only when GitHub reports the commenter's user type as `Bot`: deploy-preview and CI apps that comment on every PR |
 
 The lists come from the ~500 newest issues and PRs of every repo in `archon-projects.txt` (2026-09-26). To override, set them in `~/.config/archon-cron/trust.env` (`ARCHON_CRON_TRUST_FILE`). That file is sourced when present, and its values win. An empty list trusts nobody.
 
@@ -203,7 +204,7 @@ Everything else passes: app code, tests, fixtures, docs, templates, CSS, ordinar
 
 `archon-pr-maintenance` no longer merges or enables auto-merge (Archon fork, `upstream-sync-0.10`, and `~/.archon/workflows`). The cron is the one place that merges.
 
-**Comments.** Before any archon run that reads a thread, `trust_comments_ok` lists the comments via the REST API, and for PRs also the reviews and review comments. It requires every author to be in `TRUSTED_AUTHORS` or `TRUSTED_ISSUE_BOTS`. A stranger's comment keeps archon off that issue or PR (the rest of the queue moves on) until the owner **deletes** the comment. Hiding it is not enough, because the API still returns it. A listing that cannot be read holds the item for that tick.
+**Comments.** Before any archon run that reads a thread, `trust_comments_ok` lists the comments via the REST API, and for PRs also the reviews and review comments. It requires every author to be in `TRUSTED_AUTHORS` or `TRUSTED_ISSUE_BOTS`, or to be on `TRUSTED_COMMENT_BOTS` with the user type `Bot` (the listing reads each author's login and type; a human account is never type `Bot`). Before this, a deploy-preview comment such as Cloudflare Pages' parked punland PR 18 for days. A stranger's comment keeps archon off that issue or PR (the rest of the queue moves on) until the owner **deletes** the comment. Hiding it is not enough, because the API still returns it. A listing that cannot be read holds the item for that tick.
 
 **Notification.** Each untrusted item gets one log line and one ntfy. Markers live in `~/.archon/state/untrusted/<project>-<kind>-<n>` (`TRUST_STATE_DIR`), shared by all scripts. A marker is written only once the ntfy went out. Only `NTFY_TOPIC` is read (`secret_get`), never the whole store, so its DB URLs stay out of archon runs' environment.
 

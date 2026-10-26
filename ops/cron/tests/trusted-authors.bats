@@ -28,7 +28,7 @@ setup() {
     echo "proj" > "$ARCHON_PROJECTS_FILE"
     # ntfy topic comes from secrets.env; nothing else of it may be sourced.
     printf 'NTFY_TOPIC=test-topic\nPROD_DB_URL=postgres://secret\n' > "$HOME/.config/archon-cron/secrets.env"
-    unset NTFY_TOPIC _ARCHON_TRUST_SH TRUSTED_AUTHORS TRUSTED_ISSUE_BOTS TRUSTED_MERGE_ONLY_AUTHORS TRUST_STATE_DIR ARCHON_CRON_TRUST_FILE ARCHON_CRON_SECRETS
+    unset NTFY_TOPIC _ARCHON_TRUST_SH TRUSTED_AUTHORS TRUSTED_ISSUE_BOTS TRUSTED_MERGE_ONLY_AUTHORS TRUSTED_COMMENT_BOTS TRUST_STATE_DIR ARCHON_CRON_TRUST_FILE ARCHON_CRON_SECRETS
 
     export STUB_GH_ARGV="$T/gh-argv" STUB_ARCHON_ARGV="$T/archon-argv" STUB_CURL_ARGV="$T/curl-argv"
     : > "$STUB_GH_ARGV"; : > "$STUB_ARCHON_ARGV"; : > "$STUB_CURL_ARGV"
@@ -186,6 +186,50 @@ load_trust() {
     gh() { return 1; }
     run trust_comments_ok proj issue 8
     [ "$status" -eq 2 ]
+}
+
+@test "lib: an allowlisted GitHub App's comment (type Bot) is trusted, alongside the owner's" {
+    load_trust
+    printf 'alexsiri7|User\ncloudflare-workers-and-pages[bot]|Bot\n' > "$GH_COMMENTS_DIR/issues-7-comments"
+    printf 'vercel[bot]|Bot\n' > "$GH_COMMENTS_DIR/pulls-7-reviews"
+    run trust_comments_ok proj pr 7
+    [ "$status" -eq 0 ]
+    [ "$(ntfys)" -eq 0 ]
+}
+
+@test "lib: an allowlisted bot login whose type is not Bot is untrusted" {
+    load_trust
+    printf 'vercel[bot]|User\n' > "$GH_COMMENTS_DIR/issues-7-comments"
+    run trust_comments_ok proj pr 7
+    [ "$status" -eq 1 ]
+    grep -q 'pr #7 on proj has comments by untrusted authors (vercel\[bot\])' "$STUB_CURL_ARGV"
+    # No type at all (a bare login) is not Bot either.
+    printf 'netlify[bot]\n' > "$GH_COMMENTS_DIR/issues-8-comments"
+    run trust_comments_ok proj issue 8
+    [ "$status" -eq 1 ]
+}
+
+@test "lib: a Bot that is not on TRUSTED_COMMENT_BOTS is untrusted" {
+    load_trust
+    printf 'alexsiri7|User\nrandom[bot]|Bot\n' > "$GH_COMMENTS_DIR/issues-7-comments"
+    run trust_comments_ok proj pr 7
+    [ "$status" -eq 1 ]
+    grep -q 'untrusted authors (random\[bot\])' "$STUB_CURL_ARGV"
+}
+
+@test "lib: TRUSTED_COMMENT_BOTS can be emptied from trust.env" {
+    echo 'TRUSTED_COMMENT_BOTS=""' > "$HOME/.config/archon-cron/trust.env"
+    load_trust
+    printf 'vercel[bot]|Bot\n' > "$GH_COMMENTS_DIR/issues-7-comments"
+    run trust_comments_ok proj pr 7
+    [ "$status" -eq 1 ]
+}
+
+@test "lib: an empty login in the <login>|<type> listing is untrusted, even typed Bot" {
+    load_trust
+    printf '|Bot\n' > "$GH_COMMENTS_DIR/issues-7-comments"
+    run trust_comments_ok proj pr 7
+    [ "$status" -eq 1 ]
 }
 
 # ── pr-maintenance-cron.sh ───────────────────────────────────────────────────
