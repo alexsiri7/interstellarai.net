@@ -24,8 +24,8 @@
 #
 # One file per item in DEADLINE_STATE_DIR, "<kind>--<project>--<number>", of
 # key=value lines: first_seen, last_seen (epochs), sha, branch, reason,
-# notified (epoch of the last ntfy) and salvaged (the sha it was last salvaged
-# or commented at). Written via tmp+mv; two crons write here. A mark keeps
+# notified (epoch of the last ntfy), salvaged (the sha it was last salvaged
+# or commented at) and salvaged_at (when). Written via tmp+mv; two crons write here. A mark keeps
 # first_seen, notified and salvaged, so a salvage that pushes a new head does
 # not restart the clock. An item is current while last_seen is within
 # DEADLINE_FRESH_SECONDS (both crons tick every 30 min under the throttle);
@@ -37,6 +37,9 @@
 #     at most once per item per day.
 #   >= DEADLINE_SALVAGE_SECONDS (24h): failed-run PRs and needs-author issues
 #     get one archon-assist salvage per item per head sha (issues: once),
+#     and never two within DEADLINE_SALVAGE_SECONDS of each other: the
+#     salvage runs in its own worktree, so a run snapshot cannot see it, and
+#     one that pushes would otherwise be followed by another every tick,
 #     gated on quota_may_launch and gh_factory_may_launch, at most
 #     DEADLINE_SALVAGE_MAX per tick, and never on a protected repo
 #     (ARCHON_RUNAS_PROTECTED_REPOS: the ntfy is enough there). Comments are
@@ -90,15 +93,17 @@ deadline_mark() {
   case "$kind" in failed-run|ops-merge|untrusted|needs-author) ;; *) return 0 ;; esac
   [[ "$num" =~ ^[0-9]+$ && "$project" =~ ^[A-Za-z0-9._-]+$ ]] || return 0
   mkdir -p "$DEADLINE_STATE_DIR" 2>/dev/null || return 0
-  local f="$DEADLINE_STATE_DIR/$kind--$project--$num" now first notified salvaged
+  local f="$DEADLINE_STATE_DIR/$kind--$project--$num" now first notified salvaged salvaged_at
   now=$(deadline_now)
+  salvaged_at=$(deadline_get "$f" salvaged_at); [[ "$salvaged_at" =~ ^[0-9]+$ ]] || salvaged_at=0
   first=$(deadline_get "$f" first_seen); [[ "$first" =~ ^[0-9]+$ ]] || first="$now"
   notified=$(deadline_get "$f" notified); [[ "$notified" =~ ^[0-9]+$ ]] || notified=0
   salvaged=$(deadline_get "$f" salvaged)
   _deadline_write "$f" "kind=$kind" "project=$project" "number=$num" \
     "first_seen=$first" "last_seen=$now" "sha=$(_deadline_clean "$sha")" \
     "branch=$(_deadline_clean "$branch")" "reason=$reason" \
-    "notified=$notified" "salvaged=$(_deadline_clean "$salvaged")" 2>/dev/null || true
+    "notified=$notified" "salvaged=$(_deadline_clean "$salvaged")" \
+    "salvaged_at=$salvaged_at" 2>/dev/null || true
   return 0
 }
 
@@ -150,7 +155,7 @@ _deadline_launch() {
 # after archon_runs_snapshot.
 deadline_escalate() {
   [ -d "$DEADLINE_STATE_DIR" ] || return 0
-  local now f kind project num first last sha branch reason notified salvaged age
+  local now f kind project num first last sha branch reason notified salvaged salvaged_at age
   local -a batch=() batch_files=()
   local launched=0 gate="" ckind rc logf   # gate: "" unchecked, ok, or why launches are held
   now=$(deadline_now)
@@ -173,6 +178,7 @@ deadline_escalate() {
     reason=$(deadline_get "$f" reason)
     notified=$(deadline_get "$f" notified); [[ "$notified" =~ ^[0-9]+$ ]] || notified=0
     salvaged=$(deadline_get "$f" salvaged)
+    salvaged_at=$(deadline_get "$f" salvaged_at); [[ "$salvaged_at" =~ ^[0-9]+$ ]] || salvaged_at=0
 
     if [ $((now - notified)) -ge "$DEADLINE_RENOTIFY_SECONDS" ]; then
       batch+=("$project $kind #$num, $((age / 3600))h: $reason $(_deadline_url "$project" "$kind" "$num")")
@@ -194,6 +200,10 @@ deadline_escalate() {
       failed-run|needs-author) ;;
       *) continue ;;
     esac
+    if [ $((now - salvaged_at)) -lt "$DEADLINE_SALVAGE_SECONDS" ]; then
+      log "deadline: $kind $project #$num — salvaged $(( (now - salvaged_at) / 3600 ))h ago, next one no sooner than 24h after it"
+      continue
+    fi
     if _deadline_protected "$project"; then
       continue
     fi
@@ -225,7 +235,7 @@ deadline_escalate() {
       log "deadline: $kind $project #$num due for salvage — comments untrusted or unreadable, ntfy only"
       continue
     fi
-    if ! _deadline_set "$f" salvaged "$sha"; then
+    if ! _deadline_set "$f" salvaged "$sha" || ! _deadline_set "$f" salvaged_at "$now"; then
       log "deadline: $kind $project #$num — could not record the salvage, not launching"
       continue
     fi

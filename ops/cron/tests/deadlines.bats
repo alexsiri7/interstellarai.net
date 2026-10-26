@@ -149,9 +149,14 @@ keep() {
     grep -q 'Never write to, migrate or delete production data' "$ARCHON_ARGV"
     at $((25 * H)); deadline_mark failed-run proj 7 s1 archon/task-a r; deadline_escalate
     [ "$(salvages)" -eq 1 ]
-    # The salvage pushed: a new head may be salvaged once more, on the same clock.
+    # The salvage pushed: the new head waits 24h from the last salvage (the
+    # first may still be running), on the same clock.
     at $((26 * H)); deadline_mark failed-run proj 7 s2 archon/task-a r; deadline_escalate
+    [ "$(salvages)" -eq 1 ]
+    grep -q 'salvaged 2h ago, next one no sooner than 24h after it' "$T/log"
+    at $((48 * H)); deadline_mark failed-run proj 7 s2 archon/task-a r; deadline_escalate
     [ "$(salvages)" -eq 2 ]
+    [ "$(field failed-run--proj--7 salvaged)" = s2 ]
     [ "$(field failed-run--proj--7 first_seen)" = "$T0" ]
 }
 
