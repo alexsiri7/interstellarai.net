@@ -158,7 +158,7 @@ declare -A DEPLOY_URLS=(
 # Staging deploy URLs — subset of projects that have verified staging environments.
 # Health checks here detect staging regressions before they block prod gates.
 declare -A STAGING_DEPLOY_URLS=(
-  ["filmduel"]="https://filmduel-staging.up.railway.app"
+  ["filmduel"]="https://web-staging-68e8.up.railway.app"
   ["reli"]="https://reli-staging.up.railway.app/healthz"
   ["word-coach-annie"]="https://word-coach-annie-staging.up.railway.app/api/health"
 )
