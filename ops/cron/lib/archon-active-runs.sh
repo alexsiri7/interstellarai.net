@@ -27,6 +27,8 @@
 #   run_id=$(archon_branch_running_run "$head") # a running run is working in this branch's worktree
 #   archon_failed_runs_snapshot         # once per tick: failed runs nothing adopted
 #   run_id=$(archon_branch_failed_run "$head") # such a run left this branch
+#   class=$(archon_failed_run_class "$run_id") # review | other — why it failed
+#   wt=$(archon_failed_run_path "$run_id")     # its worktree
 #   archon_failed_runs_known || ...     # false when that listing failed
 #
 # Requires: archon >= 0.10 (workflow runs --json), python3, awk.
@@ -325,7 +327,20 @@ archon_branch_running_run() {
     END { exit found ? 0 : 1 }' "$ARCHON_RUNS_SNAPSHOT"
 }
 
-# Failed runs nothing has adopted, as "<run_id>\t<working_path>" lines.
+# Failed runs nothing has adopted, as "<run_id>\t<working_path>\t<class>"
+# lines. The class reads the run's metadata.error, failing closed:
+#   review  an archon-ship-block run whose ONLY failed top-level node is the
+#           deliver__rounds loop group, and every failed node inside it is a
+#           review__* node: the AI review stage broke (unparseable structured
+#           output, a node that touched the checkout), not the change. The
+#           error must read exactly
+#             DAG workflow '<wf>' completed with failures: 'deliver__rounds':
+#             Loop-group node 'deliver__rounds' failed at iteration <n>: <body>
+#           and every "'<id>': " that opens <body> or follows "; " in it must
+#           name a review__ node. A second top-level failure is joined the same
+#           way ("; '<id>': ", archon dag-executor.ts), and no top-level node of
+#           the sdlc pack is named review__*, so it makes the run `other`.
+#   other   anything else, including an error that is missing or unreadable.
 ARCHON_FAILED_RUNS_SNAPSHOT="${ARCHON_FAILED_RUNS_SNAPSHOT:-$ARCHON_RUNS_SNAPSHOT.failed}"
 # The open-work inbox is never paged and only grows (346 rows on 2026-10-09),
 # so ask for far more than it holds and treat a full page as unreadable.
@@ -344,7 +359,7 @@ archon_failed_runs_snapshot() {
   raw=$(CLAUDECODE=0 ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING=1 \
     archon workflow runs --all --open --limit "$ARCHON_FAILED_RUNS_LIMIT" --json --cwd "$ARCHON_RUNS_CWD" 2>/dev/null) || true
   if problem=$(printf '%s' "$raw" | python3 -c '
-import json, sys
+import json, re, sys
 limit = int(sys.argv[1])
 raw = sys.stdin.read()
 try:
@@ -360,10 +375,28 @@ if not isinstance(runs, list):
 if len(runs) >= limit:
     sys.stderr.write(f"listing may be truncated: {len(runs)} runs at --limit {limit}")
     sys.exit(3)
+# \x27 is a single quote: this program sits inside a single-quoted shell word.
+ROUNDS = re.compile(r"DAG workflow \x27[^\x27]*\x27 completed with failures: \x27deliver__rounds\x27: "
+                    r"Loop-group node \x27deliver__rounds\x27 failed at iteration [0-9]+: ")
+NODE = re.compile(r"(?:^|; )\x27([^\x27]*)\x27: ")
+
+def failure_class(meta):
+    err = meta.get("error") if isinstance(meta, dict) else None
+    if not isinstance(err, str):
+        return "other"
+    m = ROUNDS.match(err)
+    if not m:
+        return "other"
+    ids = NODE.findall(err[m.end():])
+    if ids and all(i.startswith("review__") for i in ids):
+        return "review"
+    return "other"
+
 for r in runs:
     run_id = r.get("id") or ""
     wpath = (r.get("working_path") or "").replace("\t", " ").replace("\n", " ")
-    print(f"{run_id}\t{wpath}")
+    cls = failure_class(r.get("metadata"))
+    print(f"{run_id}\t{wpath}\t{cls}")
 ' "$ARCHON_FAILED_RUNS_LIMIT" 2>&1 > "$ARCHON_FAILED_RUNS_SNAPSHOT"); then
     ARCHON_FAILED_RUNS_OK=1
     return 0
@@ -386,4 +419,21 @@ archon_branch_failed_run() {
   awk -F'\t' -v tail="/$1" '
     substr($2, length($2) - length(tail) + 1) == tail { print $1; found = 1; exit }
     END { exit found ? 0 : 1 }' "$ARCHON_FAILED_RUNS_SNAPSHOT"
+}
+
+# archon_failed_run_class <run_id> — print the failure class this tick's
+# failed-run snapshot recorded for the run (review | other; see above). A run
+# the snapshot does not hold prints `other`. Always exits 0.
+archon_failed_run_class() {
+  local c=""
+  [ -n "$1" ] && [ -s "$ARCHON_FAILED_RUNS_SNAPSHOT" ] \
+    && c=$(awk -F'\t' -v id="$1" '$1 == id { print $3; exit }' "$ARCHON_FAILED_RUNS_SNAPSHOT")
+  [ "$c" = review ] && echo review || echo other
+}
+
+# archon_failed_run_path <run_id> — print the failed run's worktree ("" when
+# unknown).
+archon_failed_run_path() {
+  [ -n "$1" ] && [ -s "$ARCHON_FAILED_RUNS_SNAPSHOT" ] || return 0
+  awk -F'\t' -v id="$1" '$1 == id { print $2; exit }' "$ARCHON_FAILED_RUNS_SNAPSHOT"
 }

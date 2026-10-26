@@ -54,11 +54,14 @@ mkdir -p "$LOG_DIR"
 # unmerged — e.g. an asset-upload PR whose head another workflow fetches from.
 HOLD_LABEL="hold"
 # One marker per project and PR holding the "<headRefOid> <mergeStateStatus>"
-# Phase 2 last launched archon-pr-maintenance for, and one
+# Phase 2 last launched archon-pr-maintenance for, one
 # (<project>-<PR>.rebase-requested) holding the head SHA Phase 1b last asked
-# dependabot to rebase.
+# dependabot to rebase, and one (<project>-<PR>.review-retries) counting the
+# review-stage retries of the failed run that left the PR.
 MAINTENANCE_STATE_DIR="$HOME/.archon/state/pr-maintenance"
 mkdir -p "$MAINTENANCE_STATE_DIR"
+# Review-stage retries: per PR in all, and per project per tick.
+REVIEW_RETRY_MAX="${REVIEW_RETRY_MAX:-2}"
 
 # Use arguments if provided, otherwise all projects
 if [ $# -gt 0 ]; then
@@ -163,6 +166,45 @@ pr_left_by_failed_run() {
   fi
   run=$(archon_branch_failed_run "$head") || return 1
   log "$PROJECT: PR #$pr ($head) was left by failed archon run $run — not promoting or merging it; adopt the run or merge by hand"
+}
+
+# review_retries <number> — how many review-stage retries this PR has had.
+review_retries() {
+  local n
+  n=$(cat "$MAINTENANCE_STATE_DIR/${PROJECT}-$1.review-retries" 2>/dev/null || echo 0)
+  [[ "$n" =~ ^[0-9]+$ ]] || n="$REVIEW_RETRY_MAX"   # unreadable: spent
+  echo "$n"
+}
+
+# review_retry_blocked <number> <headRefName> <run_id> — print why the failed
+# run that left this PR may not be resumed for another review pass, or nothing
+# (exit 1) when it may. Every check fails closed. The caller has already
+# required a readable failed-run listing and run snapshot.
+review_retry_blocked() {
+  local pr="$1" head="$2" run="$3" wt n rc=0
+  if [ "$(archon_failed_run_class "$run")" != review ]; then
+    echo "its failure is not review-stage only"; return 0
+  fi
+  n=$(review_retries "$pr")
+  if [ "$n" -ge "$REVIEW_RETRY_MAX" ]; then
+    echo "out of review retries ($n/$REVIEW_RETRY_MAX)"; return 0
+  fi
+  wt=$(archon_failed_run_path "$run")
+  if [ -z "$wt" ] || [ ! -d "$wt" ]; then
+    echo "its worktree ${wt:-(unknown)} is gone"; return 0
+  fi
+  # Belt and braces: the run snapshot and the failed listing are two reads.
+  if archon_branch_running_run "$head" >/dev/null || archon_worktree_active "$wt"; then
+    echo "a live archon run holds its worktree"; return 0
+  fi
+  if ! pr_checks_green "$pr"; then
+    echo "its checks are not all green"; return 0
+  fi
+  # The resumed review reads the PR thread.
+  trust_comments_ok "$PROJECT" pr "$pr" || rc=$?
+  if [ "$rc" = 1 ]; then echo "it has untrusted comments or reviews"; return 0; fi
+  if [ "$rc" != 0 ]; then echo "its comments could not be read"; return 0; fi
+  return 1
 }
 
 # abandon_reviews <number> — cancel every running or paused archon-review /
@@ -318,6 +360,45 @@ for PROJECT in "${PROJECTS[@]}"; do
       fi
       log "$PROJECT: resume $RUN — $ACK"
     done <<< "$ARCHON_PRS"
+  fi
+
+  # --- Retry runs that failed in the review stage, once CI is green ---
+  # An archon-ship-block run whose only failure is its AI review stage (the
+  # review model replied with prose instead of its JSON verdict, a review node
+  # touched the checkout) left a finished, CI-green PR that the failed-run guard
+  # below then keeps from merging forever (2026-10-26: 15 PRs parked 3-6 days).
+  # Resume the run, so it re-runs its own review and either flips the PR ready
+  # itself or fails again. Never --adopt (an adopted run leaves the open-work
+  # inbox and unparks the PR whatever the new verdict), and never merge here:
+  # the guard stays in front of Phase 0/1. At most one resume per project per
+  # tick and REVIEW_RETRY_MAX per PR, counted before the launch. The resume
+  # re-runs AI nodes, which the shim does not quota-gate, so QUOTA_HELD holds
+  # it. Full trust only: the review reads the PR.
+  if archon_failed_runs_known && archon_runs_known; then
+    RETRY_PRS=$(list_prs full '.headRefName | startswith("archon/task-")')
+    while IFS=$'\t' read -r PR HEAD HOLD _; do
+      [ -n "$PR" ] || continue
+      RUN=$(archon_branch_failed_run "$HEAD") || continue
+      pr_on_hold "$PR" "$HOLD" && continue
+      if WHY=$(review_retry_blocked "$PR" "$HEAD" "$RUN"); then
+        log "$PROJECT: PR #$PR — not retrying failed run $RUN: $WHY"
+        continue
+      fi
+      if [ "$QUOTA_HELD" = 1 ]; then
+        log "$PROJECT: PR #$PR — failed run $RUN may retry its review, held: Claude rate limit in effect"
+        break
+      fi
+      N=$(( $(review_retries "$PR") + 1 ))
+      if ! echo "$N" > "$MAINTENANCE_STATE_DIR/${PROJECT}-${PR}.review-retries"; then
+        log "$PROJECT: PR #$PR — could not record the review retry, not resuming run $RUN"
+        break
+      fi
+      log "$PROJECT: PR #$PR is green and run $RUN failed only in review — resuming it (review retry $N/$REVIEW_RETRY_MAX)"
+      ACK=$(CLAUDECODE=0 ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING=1 \
+          archon workflow resume "$RUN" --detach --json --cwd "$ARCHON_RUNS_CWD" 2>&1 | tail -1) || true
+      log "$PROJECT: resume $RUN — $ACK"
+      break
+    done <<< "$RETRY_PRS"
   fi
 
   # --- Phase 0: Promote CLEAN draft PRs to ready-for-review ---
