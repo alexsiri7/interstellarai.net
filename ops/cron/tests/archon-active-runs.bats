@@ -277,6 +277,20 @@ no_running() { export STUB_PAYLOAD='{"runs": []}'; }
     done
 }
 
+@test "archon_branch_running_run names only a running run whose worktree is the branch" {
+    export STUB_PAYLOAD='{"runs": [{"id": "run-live", "workflow_name": "archon-ship-block", "status": "running", "user_message": "fix #9",
+      "working_path": "/w/proj/worktrees/archon/task-archon-ship-block-17",
+      "metadata": {"workflow_source": {"origin": "/mnt/ext-fast/proj"}}}]}'
+    export STUB_PAYLOAD_PAUSED='{"runs": [{"id": "run-paused", "workflow_name": "archon-ship", "status": "paused", "user_message": "fix #8",
+      "working_path": "/w/proj/worktrees/archon/task-archon-ship-18",
+      "metadata": {"workflow_source": {"origin": "/mnt/ext-fast/proj"}}}]}'
+    archon_runs_snapshot
+    [ "$(archon_branch_running_run archon/task-archon-ship-block-17)" = "run-live" ]
+    run ! archon_branch_running_run archon/task-archon-ship-18
+    run ! archon_branch_running_run archon/task-archon-ship-block-1
+    run ! archon_branch_running_run ""
+}
+
 @test "a resolved gate is reported: the machine owed the resume and did not make it" {
     no_running
     export STUB_PAYLOAD_PAUSED="$(paused_run 500946af-eeee \
