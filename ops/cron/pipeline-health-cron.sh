@@ -2461,7 +2461,7 @@ check_published_prs() {
   list=$(printf '%s, ' "${gone[@]}"); list="${list%, }"
   log "published-prs: $project: $list now answer 404"
   if notify_checked "Published PR gone: $project" \
-      "$list opened by factory ship runs now answer 404 to this account: hidden (a flagged account, see the gh-factory alert) or deleted. Issues settled behind them are released by settle-ship-outcome (#211); their branches may still be on origin. https://github.com/alexsiri7/$project/pulls" \
+      "$list opened by factory ship runs now answer 404 to this account: hidden (a flagged account, see the gh-factory alert) or deleted. A run that settles behind one from now on is released by settle-ship-outcome (#211), but an issue already parked behind one stays parked until released by hand; their branches may still be on origin. https://github.com/alexsiri7/$project/pulls" \
       high warning; then
     mkdir -p "$dir"
     for n in "${gone_nums[@]}"; do touch "$dir/$project-$n"; done
