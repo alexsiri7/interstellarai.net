@@ -1072,6 +1072,104 @@ setup_prod_deploy_env() {
     [ -f "$STATE_DIR/prod-deploy-stale-test-project-zzz" ]
 }
 
+# ── check_prod_deploy: Railway watchPatterns ────────────────────────────────
+# punland#47: the API deploys on Railway with watchPatterns ["/backend/**"] and
+# the frontend ships via Cloudflare Pages, so a frontend-only main never gets a
+# GitHub Deployment. That is not lag; a backend change nobody deployed is.
+
+# Layers the Railway endpoints over stub_gh_for_prod_deploy. The tree, contents
+# and compare calls keep an inline --jq, so their fixtures are post-jq answers.
+stub_gh_for_railway_watch() {
+    stub_gh_for_prod_deploy
+    eval "_prod_deploy_gh() $(declare -f gh | tail -n +2)"
+    gh() {
+        case "$1 $2" in
+            "api repos/alexsiri7/test-project/git/trees/main?recursive=1") printf '%s\n' "$RAILWAY_CONFIGS" ;;
+            "api repos/alexsiri7/test-project/contents/"*) printf '%s' "$RAILWAY_TOML" | base64 -w0 ;;
+            "api repos/alexsiri7/test-project/compare/"*) echo "$COMPARE_FIXTURE" ;;
+            *) _prod_deploy_gh "$@" ;;
+        esac
+    }
+}
+
+setup_railway_watch_env() {
+    setup_prod_deploy_env
+    RUNS_FIXTURE='[]'
+    DEPLOYMENTS_FIXTURE='[{"id":9,"sha":"dep","environment":"punland / production","created_at":"2025-12-31T00:00:00Z"}]'
+    RAILWAY_CONFIGS='backend/railway.toml'
+    RAILWAY_TOML=$'[build]\nwatchPatterns = ["/backend/**"]\n'
+    load_fn railway_watch_patterns
+    load_fn paths_match_watch_patterns
+    load_fn deploy_relevant_change
+}
+
+@test "check_prod_deploy does not call a frontend-only main lag behind a watchPatterns deploy" {
+    setup_railway_watch_env
+    COMPARE_FIXTURE='{"status":"ahead","n":2,"files":["frontend/src/main.ts","docs/ARCHITECTURE.md"]}'
+    stub_gh_for_railway_watch
+    touch "$STATE_DIR/prod-deploy-stale-test-project-aaa"
+
+    check_prod_deploy "test-project"
+
+    [ ! -f "$ISSUE_SENTINEL" ]
+    [ ! -f "$STATE_DIR/prod-deploy-stale-test-project-aaa" ]
+}
+
+@test "check_prod_deploy still files lag when a watched path changed since the deploy" {
+    setup_railway_watch_env
+    COMPARE_FIXTURE='{"status":"ahead","n":2,"files":["frontend/src/main.ts","backend/app/main.py"]}'
+    stub_gh_for_railway_watch
+
+    check_prod_deploy "test-project"
+
+    [ -f "$ISSUE_SENTINEL" ]
+    grep -q "Prod deploy lagging main" "$ISSUE_SENTINEL"
+}
+
+@test "check_prod_deploy still files lag when a Railway config sets no watchPatterns" {
+    setup_railway_watch_env
+    RAILWAY_TOML=$'[build]\nbuilder = "DOCKERFILE"\n'
+    COMPARE_FIXTURE='{"status":"ahead","n":1,"files":["frontend/src/main.ts"]}'
+    stub_gh_for_railway_watch
+
+    check_prod_deploy "test-project"
+
+    [ -f "$ISSUE_SENTINEL" ]
+    grep -q "Prod deploy lagging main" "$ISSUE_SENTINEL"
+}
+
+@test "check_prod_deploy still files lag when the compare is not a clean fast-forward" {
+    setup_railway_watch_env
+    COMPARE_FIXTURE='{"status":"diverged","n":1,"files":["frontend/src/main.ts"]}'
+    stub_gh_for_railway_watch
+
+    check_prod_deploy "test-project"
+
+    [ -f "$ISSUE_SENTINEL" ]
+}
+
+@test "check_prod_deploy reports a failed watchPatterns deploy that main has not moved past" {
+    setup_railway_watch_env
+    COMPARE_FIXTURE='{"status":"ahead","n":1,"files":["frontend/src/main.ts"]}'
+    DEPLOY_STATUS_FIXTURE='failure'
+    stub_gh_for_railway_watch
+
+    check_prod_deploy "test-project"
+
+    [ -f "$ISSUE_SENTINEL" ]
+    grep -q "Prod deploy failed on main" "$ISSUE_SENTINEL"
+    [ -f "$STATE_DIR/prod-deploy-failed-test-project-dep" ]
+}
+
+@test "paths_match_watch_patterns follows gitignore-style rules from the repo root" {
+    load_fn paths_match_watch_patterns
+    echo "backend/app/main.py" | paths_match_watch_patterns "/backend/**"
+    ! echo "frontend/src/a.ts" | paths_match_watch_patterns "/backend/**"
+    ! echo "docs/backend/x.md" | paths_match_watch_patterns "/backend/**"
+    echo "a/b/c.py" | paths_match_watch_patterns "*.py"
+    ! echo "backend/README.md" | paths_match_watch_patterns $'/backend/**\n!/backend/**/*.md'
+}
+
 # ── check_progress: only work that had a window counts as pending ───────────
 
 stub_gh_for_progress() {

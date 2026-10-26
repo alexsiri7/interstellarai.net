@@ -879,6 +879,119 @@ No archon run fired: fix the workflow or its config." \
 }
 
 # ----------------------------------------------------------------------------
+# Railway watchPatterns: a Railway service whose config sets build.watchPatterns
+# only deploys commits that touch those paths. A commit that changes nothing
+# watched (say frontend/ on a Pages-hosted UI, or docs) never gets a GitHub
+# Deployment, so "nothing deployed HEAD" is not lag for such a repo (punland
+# #16..#47). These helpers let check_prod_deploy tell the two apart.
+# ----------------------------------------------------------------------------
+
+# Prints the union of watchPatterns across every railway.toml / railway.json
+# on main, one per line. Fails (prints nothing useful) when there is no Railway
+# config, when any config sets no watchPatterns (that service deploys every
+# commit, so every commit is deploy-relevant), or on any API/parse error —
+# callers then fall back to judging main HEAD as before.
+railway_watch_patterns() {
+  local project="$1" configs cfg content patterns all=""
+  configs=$(gh api "repos/alexsiri7/$project/git/trees/main?recursive=1" \
+    --jq '.tree[] | select(.type == "blob") | .path | select(test("(^|/)railway\\.(toml|json)$"))' \
+    2>/dev/null) || return 1
+  [ -n "$configs" ] || return 1
+  while IFS= read -r cfg; do
+    [ -n "$cfg" ] || continue
+    content=$(gh api "repos/alexsiri7/$project/contents/$cfg?ref=main" --jq '.content' 2>/dev/null \
+      | base64 -d 2>/dev/null) || return 1
+    [ -n "$content" ] || return 1
+    patterns=$(printf '%s' "$content" | python3 -c '
+import json, sys
+raw = sys.stdin.read()
+try:
+    if sys.argv[1].endswith(".json"):
+        data = json.loads(raw)
+    else:
+        import tomllib
+        data = tomllib.loads(raw)
+except Exception:
+    sys.exit(1)
+pats = (data.get("build") or {}).get("watchPatterns") or []
+pats = [p for p in pats if isinstance(p, str) and p.strip()]
+if not pats:
+    sys.exit(1)
+print("\n".join(pats))
+' "$cfg") || return 1
+    all+="$patterns"$'\n'
+  done <<< "$configs"
+  [ -n "$all" ] || return 1
+  printf '%s' "$all"
+}
+
+# Exit 0 when any changed path read on stdin (one per line) matches the
+# gitignore-style watch patterns in $1 (newline-separated; evaluated from the
+# repo root, as Railway does; "!" negates, last match wins).
+paths_match_watch_patterns() {
+  python3 -c '
+import re, sys
+
+def to_regex(pat):
+    anchored = pat.startswith("/") or "/" in pat.rstrip("/")
+    pat = pat.strip("/")
+    out, i = [], 0
+    while i < len(pat):
+        if pat.startswith("**/", i):
+            out.append("(?:.*/)?"); i += 3
+        elif pat.startswith("**", i):
+            out.append(".*"); i += 2
+        elif pat[i] == "*":
+            out.append("[^/]*"); i += 1
+        elif pat[i] == "?":
+            out.append("[^/]"); i += 1
+        else:
+            out.append(re.escape(pat[i])); i += 1
+    body = "".join(out)
+    prefix = "" if anchored else "(?:.*/)?"
+    # A pattern naming a directory also covers everything beneath it.
+    return re.compile("^" + prefix + body + "(?:/.*)?$")
+
+rules = []
+for line in sys.argv[1].splitlines():
+    line = line.strip()
+    if not line or line.startswith("#"):
+        continue
+    neg = line.startswith("!")
+    rules.append((neg, to_regex(line[1:] if neg else line)))
+
+for path in sys.stdin.read().splitlines():
+    path = path.strip()
+    if not path:
+        continue
+    hit = False
+    for neg, rx in rules:
+        if rx.match(path):
+            hit = not neg
+    if hit:
+        sys.exit(0)
+sys.exit(1)
+' "$1"
+}
+
+# Exit 0 when main moved deploy-relevant paths between base and head (or when
+# that cannot be proven otherwise); exit 1 only when the compare is complete
+# and no changed file matches the watch patterns in $4.
+deploy_relevant_change() {
+  local project="$1" base="$2" head="$3" patterns="$4" cmp status nfiles
+  cmp=$(gh api "repos/alexsiri7/$project/compare/$base...$head" \
+    --jq '{status: .status, n: (.files | length), files: [.files[] | .filename, (.previous_filename // empty)]}' \
+    2>/dev/null) || return 0
+  status=$(echo "$cmp" | jq -r '.status // empty' 2>/dev/null)
+  nfiles=$(echo "$cmp" | jq -r '.n // 0' 2>/dev/null)
+  # Only a fast-forward with an untruncated file list (the API caps at 300)
+  # can prove nothing watched changed.
+  [ "$status" = "ahead" ] || return 0
+  [ "${nfiles:-0}" -lt 300 ] 2>/dev/null || return 0
+  echo "$cmp" | jq -r '.files[]' 2>/dev/null | paths_match_watch_patterns "$patterns"
+}
+
+# ----------------------------------------------------------------------------
 # Check 2: Prod deploy health — failed or lagging main HEAD.
 #   Signal sources (try in order, use whichever exists):
 #     (a) GH Actions workflow matching "Production" (Reli, WCA use "Staging → Production Pipeline")
@@ -886,7 +999,9 @@ No archon run fired: fix the workflow or its config." \
 #   The listings only prove a signal exists; state is judged on the run or
 #   deployment at main HEAD, never on whichever entry a listing puts first.
 #   If the deploy at HEAD FAILED → file issue + fire archon (dedup by SHA).
-#   If nothing deployed HEAD AND HEAD older than 15 min → file lag issue.
+#   If nothing deployed HEAD AND HEAD older than 15 min → file lag issue —
+#   unless the signal is a Railway deployment whose watchPatterns no commit
+#   since the latest deploy touched; then that deploy is judged instead.
 #   Projects with no deploy signal are skipped silently.
 # ----------------------------------------------------------------------------
 check_prod_deploy() {
@@ -915,7 +1030,7 @@ check_prod_deploy() {
   # with an August run for reli while the September HEAD was already live,
   # and comparing HEAD against it filed reli#1512 and tripped the stall
   # diagnostic. State is judged below on the deploy at HEAD itself.
-  local latest_sha="" latest_ts="" latest_url=""
+  local latest_sha="" latest_ts="" latest_url="" latest_dep_id=""
   local wf_run
   wf_run=$(gh run list --repo "alexsiri7/$project" --branch main --limit 10 \
     --json name,headSha,updatedAt,url 2>/dev/null \
@@ -933,6 +1048,7 @@ check_prod_deploy() {
       latest_sha=$(echo "$dep" | jq -r '.sha')
       latest_ts=$(echo "$dep" | jq -r '.created_at')
       latest_url="https://github.com/alexsiri7/$project/deployments"
+      latest_dep_id=$(echo "$dep" | jq -r '.id // empty')
     fi
   fi
   [ -n "$latest_sha" ] || return  # No deploy signal — skip silently
@@ -959,6 +1075,26 @@ check_prod_deploy() {
         --jq '.[0].state // "pending"' 2>/dev/null || echo "pending")
       deploy_ts=$(echo "$head_dep" | jq -r '.created_at')
       deploy_url="https://github.com/alexsiri7/$project/deployments"
+    fi
+  fi
+
+  # --- Nothing deployed HEAD, but maybe nothing needed to: a Railway service
+  # with watchPatterns skips commits that touch none of them (punland's API
+  # watches /backend/** while its frontend ships via Cloudflare Pages). When
+  # every change since the latest production deployment is outside the watched
+  # paths, that deployment is the one prod should be on — judge it instead.
+  # No Railway config, a config without watchPatterns, a run-based signal, or
+  # any doubt in the compare all keep the HEAD judgement unchanged.
+  if [ -z "$deploy_state" ] && [ -n "$latest_dep_id" ] && [ "$latest_sha" != "$head_sha" ]; then
+    local watch
+    if watch=$(railway_watch_patterns "$project") && \
+       ! deploy_relevant_change "$project" "$latest_sha" "$head_sha" "$watch"; then
+      log "$project: main ${head_sha:0:10} touches no Railway watchPatterns since deploy ${latest_sha:0:10} — judging that deploy"
+      deploy_sha="$latest_sha"
+      deploy_state=$(gh api "repos/alexsiri7/$project/deployments/$latest_dep_id/statuses?per_page=1" \
+        --jq '.[0].state // "pending"' 2>/dev/null || echo "pending")
+      deploy_ts="$latest_ts"
+      deploy_url="$latest_url"
     fi
   fi
 
@@ -1090,7 +1226,7 @@ EOF
   # deploy still settling or one that never ran to a verdict. Leave the
   # markers alone; the next tick judges it again.
   if [ "$deploy_state" != "success" ]; then
-    log "$project: prod deploy at HEAD ${head_sha:0:10} is $deploy_state — waiting"
+    log "$project: prod deploy at ${deploy_sha:0:10} is $deploy_state — waiting"
     return
   fi
 
