@@ -18,7 +18,8 @@ source "$SCRIPT_DIR/../cron/lib/gh-factory.sh"
 # issue-pickup's record of its reads of Lachesis next_issue.
 # shellcheck source=../cron/lib/lachesis.sh
 source "$SCRIPT_DIR/../cron/lib/lachesis.sh"
-# pipeline-health's per-repo stall markers (stall_note).
+# pipeline-health's per-repo stall markers (stall_note), and parked drafts
+# whose review said not ready (deadline_kind_note).
 # shellcheck source=../cron/lib/deadlines.sh
 source "$SCRIPT_DIR/../cron/lib/deadlines.sh"
 OWNER="alexsiri7"
@@ -147,6 +148,8 @@ for REPO in "${PROJECTS[@]}"; do
     [ "$factory_gap"  -gt 0 ] 2>/dev/null && notes+="factory-gap:${factory_gap} "
     [ "$archon_wip"   -gt 0 ] 2>/dev/null && notes+="wip:${archon_wip} "
     [ "$pr_count" -gt 3 ]     2>/dev/null && notes+="${YELLOW}${pr_count} PRs${RESET} "
+    not_ready=$(deadline_kind_note "$REPO" review-not-ready)
+    [ -n "$not_ready" ] && notes+="${YELLOW}review-not-ready: ${not_ready}${RESET} "
     stall=$(stall_note "$REPO")
     if [ -n "$stall" ]; then
         notes+="${RED}${stall}${RESET} "

@@ -12,6 +12,7 @@
 #   deadline_escalate          # pipeline-health: ntfy after 12h, salvage after 24h
 #   stall_check <project>      # pipeline-health: 0 merged PRs in 24h with open work
 #   stall_note <project>       # pipeline-status: "" or the repo's stall line
+#   deadline_kind_note <project> <kind>  # pipeline-status: "" or "#51 (needs_human) ..."
 #
 # Kinds (who marks them):
 #   failed-run    pr-maintenance: a PR left by a failed archon run that is out
@@ -21,6 +22,13 @@
 #                 ops/ or .github/, so it needs a human merge.
 #   untrusted     pr-maintenance: a PR with a stranger's comment or review.
 #   needs-author  pipeline-health: a trusted issue labelled needs-author.
+#   review-not-ready  pr-maintenance: a draft PR on an archon branch whose run
+#                 finished (none running, paused or failed holds the branch),
+#                 whose latest trusted review report says not ready, and whose
+#                 head has not moved for REVIEW_NOT_READY_SECONDS (6h). The
+#                 run completed, so nothing corrects it, and its issue keeps
+#                 archon:in-progress, which holds issue pickup on the repo.
+#                 The reason carries the review's "action: <value>".
 #
 # One file per item in DEADLINE_STATE_DIR, "<kind>--<project>--<number>", of
 # key=value lines: first_seen, last_seen (epochs), sha, branch, reason,
@@ -35,8 +43,8 @@
 # Escalation (deadline_escalate, needs notify_checked and log from the caller):
 #   >= DEADLINE_NOTIFY_SECONDS (12h): one batched ntfy for every such item,
 #     at most once per item per day.
-#   >= DEADLINE_SALVAGE_SECONDS (24h): failed-run PRs and needs-author issues
-#     get one archon-assist salvage per item per head sha (issues: once),
+#   >= DEADLINE_SALVAGE_SECONDS (24h): failed-run and review-not-ready PRs
+#     and needs-author issues get one archon-assist salvage per item per head sha (issues: once),
 #     and never two within DEADLINE_SALVAGE_SECONDS of each other: the
 #     salvage runs in its own worktree, so a run snapshot cannot see it, and
 #     one that pushes would otherwise be followed by another every tick,
@@ -90,7 +98,7 @@ _deadline_write() {
 deadline_mark() {
   local kind="$1" project="$2" num="$3" sha="${4:--}" branch="${5:-}" reason
   reason=$(_deadline_clean "${6:-}")
-  case "$kind" in failed-run|ops-merge|untrusted|needs-author) ;; *) return 0 ;; esac
+  case "$kind" in failed-run|ops-merge|untrusted|needs-author|review-not-ready) ;; *) return 0 ;; esac
   [[ "$num" =~ ^[0-9]+$ && "$project" =~ ^[A-Za-z0-9._-]+$ ]] || return 0
   mkdir -p "$DEADLINE_STATE_DIR" 2>/dev/null || return 0
   local f="$DEADLINE_STATE_DIR/$kind--$project--$num" now first notified salvaged salvaged_at
@@ -132,7 +140,14 @@ _deadline_protected() { # <project> — a repo whose PRs need a human merge
 # deadline_prompt <kind> <project> <number> <reason> — the salvage prompt.
 deadline_prompt() {
   local kind="$1" project="$2" num="$3" reason="$4" what
-  if [ "$kind" = needs-author ]; then
+  if [ "$kind" = review-not-ready ]; then
+    printf '%s' "PR #$num on $DEADLINE_OWNER/$project is a draft whose archon review left it not ready ($reason), and no run has touched it since. \
+Read its latest review report: the newest PR comment containing <!-- archon-review-report -->. Check out the PR's branch and fix every finding that report leaves open. \
+A finding or a needs_human action that only reflects a limit of the factory itself, not a decision a human must make (for example \"attach screenshots to the PR\": no workflow node can upload an image), you resolve yourself: commit the artifacts (screenshots, logs, reports) to the branch and link them from the PR body or a comment. Never resolve a finding by weakening, skipping or deleting tests or assertions. \
+Push, then review the result yourself against the PR's linked issue and the review report. If your own review passes and every check is green, mark the PR ready, squash-merge it, and close the issue it refers to (Refs #N or Closes #N in the PR body; Refs does not close it on merge). If it does not pass, leave one clear comment on the PR saying what is still wrong and the exact decision a human must make, and do not merge. \
+Either way, then remove the archon:in-progress label from that issue, so issue pickup can start other work on this repo. Never write to, migrate or delete production data. Do not touch ops/ or .github/."
+    return 0
+  elif [ "$kind" = needs-author ]; then
     what="Issue #$num on $DEADLINE_OWNER/$project has waited over 24 hours for an answer from its author (label needs-author). Review the issue, its open question and any linked PR. If you can settle it from the repo, the issue and its specs, do the work, open a PR, and merge it only if your own review of it passes and every check is green."
   else
     what="PR #$num on $DEADLINE_OWNER/$project has been parked for over 24 hours: $reason. Review the PR: its diff, its linked issue and its CI. If it is sound, fix what it needs, push, and merge it only if your own review of it passes and every check is green."
@@ -197,7 +212,7 @@ deadline_escalate() {
           log "deadline: $project PR #$num — could not comment, retrying next tick"
         fi
         continue ;;
-      failed-run|needs-author) ;;
+      failed-run|needs-author|review-not-ready) ;;
       *) continue ;;
     esac
     if [ $((now - salvaged_at)) -lt "$DEADLINE_SALVAGE_SECONDS" ]; then
@@ -318,4 +333,27 @@ stall_note() {
   [[ "$since" =~ ^[0-9]+$ ]] || since=""
   printf 'STALLED: %s open PR(s), 0 merged in 24h%s' "${open:-?}" \
     "${since:+ (since $(date -d "@$since" '+%F %H:%M' 2>/dev/null || echo "?"))}"
+}
+
+# deadline_kind_note <project> <kind> — "" when the repo has no current item of
+# that kind, else "#51 (needs_human, 30h) #52 (replan, 7h)" for pipeline-status:
+# the PR, the review's action when the reason names one, and how long it has
+# been parked.
+deadline_kind_note() {
+  local project="$1" kind="$2" f now num first last reason action out=""
+  [ -d "$DEADLINE_STATE_DIR" ] || return 0
+  now=$(deadline_now)
+  for f in "$DEADLINE_STATE_DIR/$kind--$project--"*; do
+    [ -f "$f" ] || continue
+    [[ "${f##*/}" =~ ^[a-z-]+--[A-Za-z0-9._-]+--[0-9]+$ ]] || continue
+    num=$(deadline_get "$f" number)
+    first=$(deadline_get "$f" first_seen); last=$(deadline_get "$f" last_seen)
+    [[ "$num" =~ ^[0-9]+$ && "$first" =~ ^[0-9]+$ && "$last" =~ ^[0-9]+$ ]] || continue
+    [ $((now - last)) -le "$DEADLINE_FRESH_SECONDS" ] || continue
+    reason=$(deadline_get "$f" reason)
+    action=""
+    [[ "$reason" =~ action:\ ([a-z_]+) ]] && action="${BASH_REMATCH[1]}, "
+    out+="#$num (${action}$(( (now - first) / 3600 ))h) "
+  done
+  printf '%s' "${out% }"
 }

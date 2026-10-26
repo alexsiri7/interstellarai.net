@@ -25,6 +25,7 @@
 #   archon_parked_runs 1800             # rows for paused runs nothing will resume
 #   run_id=$(archon_branch_ci_attention_run "$head") # paused at the CI attention step on this branch
 #   run_id=$(archon_branch_running_run "$head") # a running run is working in this branch's worktree
+#   run_id=$(archon_branch_active_run "$head")  # a running or paused run holds this branch's worktree
 #   archon_failed_runs_snapshot         # once per tick: failed runs nothing adopted
 #   run_id=$(archon_branch_failed_run "$head") # such a run left this branch
 #   class=$(archon_failed_run_class "$run_id") # review | other — why it failed
@@ -323,6 +324,19 @@ archon_branch_running_run() {
   [ -n "$1" ] && [ -s "$ARCHON_RUNS_SNAPSHOT" ] || return 1
   awk -F'\t' -v tail="/$1" '
     $2 == "running" && substr($9, length($9) - length(tail) + 1) == tail {
+      print $5; found = 1; exit }
+    END { exit found ? 0 : 1 }' "$ARCHON_RUNS_SNAPSHOT"
+}
+
+# archon_branch_active_run <branch> — print the id of a RUNNING or PAUSED run
+# whose worktree is <branch>: anything in the snapshot, which holds only those
+# two statuses. A paused run (a CI wait, a gate) still owns its PR; the
+# review-not-ready deadline must not call such a PR abandoned. Exit 0 on
+# match, 1 otherwise.
+archon_branch_active_run() {
+  [ -n "$1" ] && [ -s "$ARCHON_RUNS_SNAPSHOT" ] || return 1
+  awk -F'\t' -v tail="/$1" '
+    substr($9, length($9) - length(tail) + 1) == tail {
       print $5; found = 1; exit }
     END { exit found ? 0 : 1 }' "$ARCHON_RUNS_SNAPSHOT"
 }
