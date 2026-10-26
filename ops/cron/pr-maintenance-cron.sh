@@ -43,6 +43,9 @@ archon_runs_snapshot
 archon_failed_runs_snapshot
 # shellcheck source=lib/trust.sh
 source "$SCRIPT_DIR/lib/trust.sh"
+# Parked items get a clock; pipeline-health escalates them (lib/deadlines.sh).
+# shellcheck source=lib/deadlines.sh
+source "$SCRIPT_DIR/lib/deadlines.sh"
 BASE_DIR="${BASE_DIR:-/mnt/ext-fast}"
 LOG_PREFIX="[pr-maintenance]"
 # Same directory the crontab sends this script's own log to; survives a reboot
@@ -179,19 +182,21 @@ review_retries() {
 # review_retry_blocked <number> <headRefName> <run_id> — print why the failed
 # run that left this PR may not be resumed for another review pass, or nothing
 # (exit 1) when it may. Every check fails closed. The caller has already
-# required a readable failed-run listing and run snapshot.
+# required a readable failed-run listing and run snapshot. A reason that will
+# not clear on its own starts "parked:", one that is the PR's untrusted thread
+# "untrusted:"; lib/deadlines.sh puts a clock on both.
 review_retry_blocked() {
   local pr="$1" head="$2" run="$3" wt n rc=0
   if [ "$(archon_failed_run_class "$run")" != review ]; then
-    echo "its failure is not review-stage only"; return 0
+    echo "parked: its failure is not review-stage only"; return 0
   fi
   n=$(review_retries "$pr")
   if [ "$n" -ge "$REVIEW_RETRY_MAX" ]; then
-    echo "out of review retries ($n/$REVIEW_RETRY_MAX)"; return 0
+    echo "parked: out of review retries ($n/$REVIEW_RETRY_MAX)"; return 0
   fi
   wt=$(archon_failed_run_path "$run")
   if [ -z "$wt" ] || [ ! -d "$wt" ]; then
-    echo "its worktree ${wt:-(unknown)} is gone"; return 0
+    echo "parked: its worktree ${wt:-(unknown)} is gone"; return 0
   fi
   # Belt and braces: the run snapshot and the failed listing are two reads.
   if archon_branch_running_run "$head" >/dev/null || archon_worktree_active "$wt"; then
@@ -202,7 +207,7 @@ review_retry_blocked() {
   fi
   # The resumed review reads the PR thread.
   trust_comments_ok "$PROJECT" pr "$pr" || rc=$?
-  if [ "$rc" = 1 ]; then echo "it has untrusted comments or reviews"; return 0; fi
+  if [ "$rc" = 1 ]; then echo "untrusted: it has untrusted comments or reviews"; return 0; fi
   if [ "$rc" != 0 ]; then echo "its comments could not be read"; return 0; fi
   return 1
 }
@@ -374,30 +379,39 @@ for PROJECT in "${PROJECTS[@]}"; do
   # tick and REVIEW_RETRY_MAX per PR, counted before the launch. The resume
   # re-runs AI nodes, which the shim does not quota-gate, so QUOTA_HELD holds
   # it. Full trust only: the review reads the PR.
+  # Every PR still parked here is marked for lib/deadlines.sh, so the loop
+  # visits them all even after this tick's one retry.
   if archon_failed_runs_known && archon_runs_known; then
     RETRY_PRS=$(list_prs full '.headRefName | startswith("archon/task-")')
-    while IFS=$'\t' read -r PR HEAD HOLD _; do
+    RETRIED=0
+    while IFS=$'\t' read -r PR HEAD HOLD SHA _; do
       [ -n "$PR" ] || continue
       RUN=$(archon_branch_failed_run "$HEAD") || continue
       pr_on_hold "$PR" "$HOLD" && continue
       if WHY=$(review_retry_blocked "$PR" "$HEAD" "$RUN"); then
-        log "$PROJECT: PR #$PR — not retrying failed run $RUN: $WHY"
+        log "$PROJECT: PR #$PR — not retrying failed run $RUN: ${WHY#*: }"
+        case "$WHY" in
+          parked:*) deadline_mark failed-run "$PROJECT" "$PR" "$SHA" "$HEAD" "left by failed archon run $RUN, ${WHY#parked: }" ;;
+          untrusted:*) deadline_mark untrusted "$PROJECT" "$PR" "$SHA" "$HEAD" "left by failed archon run $RUN; untrusted comments or reviews" ;;
+        esac
         continue
       fi
+      [ "$RETRIED" = 0 ] || continue
       if [ "$QUOTA_HELD" = 1 ]; then
         log "$PROJECT: PR #$PR — failed run $RUN may retry its review, held: Claude rate limit in effect"
-        break
+        RETRIED=1
+        continue
       fi
+      RETRIED=1
       N=$(( $(review_retries "$PR") + 1 ))
       if ! echo "$N" > "$MAINTENANCE_STATE_DIR/${PROJECT}-${PR}.review-retries"; then
         log "$PROJECT: PR #$PR — could not record the review retry, not resuming run $RUN"
-        break
+        continue
       fi
       log "$PROJECT: PR #$PR is green and run $RUN failed only in review — resuming it (review retry $N/$REVIEW_RETRY_MAX)"
       ACK=$(CLAUDECODE=0 ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING=1 \
           archon workflow resume "$RUN" --detach --json --cwd "$ARCHON_RUNS_CWD" 2>&1 | tail -1) || true
       log "$PROJECT: resume $RUN — $ACK"
-      break
     done <<< "$RETRY_PRS"
   fi
 
@@ -425,7 +439,7 @@ for PROJECT in "${PROJECTS[@]}"; do
   # --- Phase 1: Merge CLEAN PRs directly (bash only, zero AI cost) ---
   CLEAN_PRS=$(list_prs merge '.isDraft == false and .mergeStateStatus == "CLEAN"')
 
-  while IFS=$'\t' read -r PR HEAD HOLD _ _ _ BODY; do
+  while IFS=$'\t' read -r PR HEAD HOLD SHA _ _ BODY; do
     [ -n "$PR" ] || continue
     pr_on_hold "$PR" "$HOLD" && continue
     if pr_owned_by_live_run "$PR" "$HEAD" "$BODY"; then
@@ -435,6 +449,7 @@ for PROJECT in "${PROJECTS[@]}"; do
     pr_left_by_failed_run "$PR" "$HEAD" && continue
     if MERGE_HOLD=$(runas_merge_blocked "$PROJECT" "$PR"); then
       log "$PROJECT: PR #$PR is CLEAN but not auto-merged: $MERGE_HOLD"
+      deadline_mark ops-merge "$PROJECT" "$PR" "$SHA" "$HEAD" "$MERGE_HOLD"
       continue
     fi
     log "$PROJECT: PR #$PR is CLEAN — merging directly"
@@ -532,8 +547,12 @@ for PROJECT in "${PROJECTS[@]}"; do
       log "$PROJECT: PR #$PR ($HEAD) needs maintenance but is owned by a live archon run — leaving it to the run"
       continue
     fi
-    if ! trust_comments_ok "$PROJECT" pr "$PR"; then
+    TRUST_RC=0
+    trust_comments_ok "$PROJECT" pr "$PR" || TRUST_RC=$?
+    if [ "$TRUST_RC" != 0 ]; then
       log "$PROJECT: PR #$PR has untrusted comments or reviews — not handing it to archon"
+      # 2 is a listing that could not be read this tick, not a stranger.
+      [ "$TRUST_RC" = 1 ] && deadline_mark untrusted "$PROJECT" "$PR" "$SHA" "$HEAD" "untrusted comments or reviews"
       continue
     fi
     ACTIONABLE="$PR"

@@ -261,3 +261,37 @@ classify() { # classify <error or "null"> — print the class of one failed run
     run "$CRON_DIR/pr-maintenance-cron.sh"
     [ "$(resumed run-361)" -eq 0 ]
 }
+
+# ── deadline marks (lib/deadlines.sh) ────────────────────────────────────────
+
+@test "a PR the retry cannot help is marked failed-run; a transient hold is not" {
+    export GH_PR_LIST="[$(pr 361 archon/task-a), $(pr 362 archon/task-b)]"
+    ARCHON_OPEN_RUNS=$(runs "$(run_obj run-361 archon/task-a "DAG workflow 'archon-ship-block' completed with failures: 'outcome': x")" "$(run_obj run-362 archon/task-b "$ROUTE_ERR")")
+    GH_CHECKS='{"statusCheckRollup":[{"name":"ci","conclusion":"FAILURE"}]}' run "$CRON_DIR/pr-maintenance-cron.sh"
+    local d="$HOME/.archon/state/deadlines"
+    grep -q '^reason=left by failed archon run run-361, its failure is not review-stage only$' "$d/failed-run--proj--361"
+    grep -q '^sha=sha361$' "$d/failed-run--proj--361"
+    grep -q '^branch=archon/task-a$' "$d/failed-run--proj--361"
+    # Red checks clear on their own: no clock.
+    [ ! -e "$d/failed-run--proj--362" ]
+}
+
+@test "after this tick's retry the loop still marks the PRs behind it" {
+    export GH_PR_LIST="[$(pr 361 archon/task-a), $(pr 362 archon/task-b)]"
+    ARCHON_OPEN_RUNS=$(runs "$(run_obj run-361 archon/task-a "$ROUTE_ERR")" "$(run_obj run-362 archon/task-b "Process terminated (SIGTERM)")")
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    [ "$(resumed run-361)" -eq 1 ]
+    [ -f "$HOME/.archon/state/deadlines/failed-run--proj--362" ]
+}
+
+@test "a failed-run PR with a stranger's comment is marked untrusted" {
+    export GH_PR_LIST="[$(pr 361 archon/task-a)]"
+    ARCHON_OPEN_RUNS=$(runs "$(run_obj run-361 archon/task-a "$ROUTE_ERR")")
+    echo stranger > "$GH_COMMENTS_DIR/issues-361-comments"
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    [ -f "$HOME/.archon/state/deadlines/untrusted--proj--361" ]
+    # Unreadable comments are no stranger.
+    rm -rf "$HOME/.archon/state/deadlines"
+    GH_COMMENTS_FAIL=1 run "$CRON_DIR/pr-maintenance-cron.sh"
+    [ ! -e "$HOME/.archon/state/deadlines/untrusted--proj--361" ]
+}
