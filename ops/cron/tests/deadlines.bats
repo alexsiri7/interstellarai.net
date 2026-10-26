@@ -290,3 +290,69 @@ open_pr() { # open_pr <number> <createdAt> [label]
     grep -q 'source "$SCRIPT_DIR/../cron/lib/deadlines.sh"' "$CRON_DIR/../bin/pipeline-status"
     grep -q 'stall=$(stall_note "$REPO")' "$CRON_DIR/../bin/pipeline-status"
 }
+
+# ── review-not-ready (marked by pr-maintenance) ──────────────────────────────
+
+RNR="draft left not ready by its review (action: needs_human), head b446757 unchanged 7h"
+
+@test "review-not-ready: the 12h ntfy carries the review's action" {
+    keep review-not-ready proj 51 s1 archon/task-a "$RNR" 12
+    deadline_escalate
+    grep -q "proj review-not-ready #51, 12h: draft left not ready by its review (action: needs_human), head b446757 unchanged 7h https://github.com/alexsiri7/proj/pull/51" "$T/notified"
+    [ "$(salvages)" -eq 0 ]
+}
+
+@test "review-not-ready: one salvage at 24h per head sha and per 24h, with its own prompt" {
+    keep review-not-ready proj 51 s1 archon/task-a "$RNR" 24
+    deadline_escalate
+    [ "$(salvages)" -eq 1 ]
+    [ "$(field review-not-ready--proj--51 salvaged)" = s1 ]
+    grep -q 'PR #51 on alexsiri7/proj is a draft whose archon review left it not ready (draft left not ready by its review (action: needs_human)' "$ARCHON_ARGV"
+    grep -q 'Read its latest review report: the newest PR comment containing <!-- archon-review-report -->' "$ARCHON_ARGV"
+    grep -q 'fix every finding that report leaves open' "$ARCHON_ARGV"
+    grep -q 'only reflects a limit of the factory itself' "$ARCHON_ARGV"
+    grep -q 'commit the artifacts (screenshots, logs, reports) to the branch and link them' "$ARCHON_ARGV"
+    grep -q 'Never resolve a finding by weakening, skipping or deleting tests or assertions' "$ARCHON_ARGV"
+    grep -q 'If your own review passes and every check is green, mark the PR ready, squash-merge it' "$ARCHON_ARGV"
+    grep -q 'remove the archon:in-progress label from that issue' "$ARCHON_ARGV"
+    grep -q 'Never write to, migrate or delete production data. Do not touch ops/ or .github/.' "$ARCHON_ARGV"
+    # Not the shared tail, whose "change nothing else" would forbid the relabel.
+    ! grep -q 'change nothing else' "$ARCHON_ARGV"
+    at $((30 * H)); deadline_mark review-not-ready proj 51 s1 archon/task-a "$RNR"; deadline_escalate
+    [ "$(salvages)" -eq 1 ]
+    at $((40 * H)); deadline_mark review-not-ready proj 51 s2 archon/task-a "$RNR"; deadline_escalate
+    [ "$(salvages)" -eq 1 ]
+    at $((48 * H)); deadline_mark review-not-ready proj 51 s2 archon/task-a "$RNR"; deadline_escalate
+    [ "$(salvages)" -eq 2 ]
+}
+
+@test "review-not-ready: the salvage is held by quota, factory identity, untrusted comments and protected repos" {
+    keep review-not-ready proj 51 s1 archon/task-a "$RNR" 24
+    keep review-not-ready interstellarai.net 9 s1 archon/task-b "$RNR" 24
+    QUOTA_RC=1 deadline_escalate
+    FACTORY_RC=1 deadline_escalate
+    TRUST_RC=1 deadline_escalate
+    RUNNING_BRANCH=archon/task-a deadline_escalate
+    [ "$(salvages)" -eq 0 ]
+    grep -q 'review-not-ready proj #51 due for salvage — held: Claude rate limit in effect' "$T/log"
+    grep -q 'review-not-ready proj #51 due for salvage — held: factory GitHub identity blocked' "$T/log"
+    grep -q 'review-not-ready proj #51 due for salvage — comments untrusted or unreadable, ntfy only' "$T/log"
+    grep -q 'review-not-ready proj #51 due for salvage — a running archon run holds archon/task-a' "$T/log"
+    deadline_escalate
+    [ "$(salvages)" -eq 1 ]
+    ! grep -q 'interstellarai.net' "$ARCHON_ARGV"
+}
+
+@test "deadline_kind_note lists a repo's current review-not-ready PRs with action and age" {
+    keep review-not-ready proj 51 s1 b "$RNR" 13
+    at $((13 * H)); deadline_mark review-not-ready proj 50 s1 b "draft left not ready by its review (action: replan), head x unchanged 6h"
+    [ "$(deadline_kind_note proj review-not-ready)" = "#50 (replan, 0h) #51 (needs_human, 13h)" ]
+    [ -z "$(deadline_kind_note other review-not-ready)" ]
+    # Not seen this past hour: not shown.
+    at $((15 * H))
+    [ -z "$(deadline_kind_note proj review-not-ready)" ]
+}
+
+@test "pipeline-status shows review-not-ready PRs" {
+    grep -q 'not_ready=$(deadline_kind_note "$REPO" review-not-ready)' "$CRON_DIR/../bin/pipeline-status"
+}

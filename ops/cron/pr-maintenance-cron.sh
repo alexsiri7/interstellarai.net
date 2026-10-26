@@ -65,6 +65,12 @@ MAINTENANCE_STATE_DIR="$HOME/.archon/state/pr-maintenance"
 mkdir -p "$MAINTENANCE_STATE_DIR"
 # Review-stage retries: per PR in all, and per project per tick.
 REVIEW_RETRY_MAX="${REVIEW_RETRY_MAX:-2}"
+# A finished run's draft whose review said not ready is marked review-not-ready
+# (lib/deadlines.sh) once its head has not moved for this long. The head's age
+# is this cron's own record (<project>-<PR>.head-seen: "<sha> <epoch>"): a
+# commit's dates say when it was made, not when it was pushed.
+REVIEW_NOT_READY_SECONDS="${REVIEW_NOT_READY_SECONDS:-21600}"
+REVIEW_REPORT_MARKER='<!-- archon-review-report -->'
 
 # Use arguments if provided, otherwise all projects
 if [ $# -gt 0 ]; then
@@ -209,6 +215,53 @@ review_retry_blocked() {
   trust_comments_ok "$PROJECT" pr "$pr" || rc=$?
   if [ "$rc" = 1 ]; then echo "untrusted: it has untrusted comments or reviews"; return 0; fi
   if [ "$rc" != 0 ]; then echo "its comments could not be read"; return 0; fi
+  return 1
+}
+
+# head_unchanged_for <number> <headRefOid> — seconds since this cron first saw
+# the PR at this head. A new head restarts the count from now.
+head_unchanged_for() {
+  local f="$MAINTENANCE_STATE_DIR/${PROJECT}-$1.head-seen" now sha since
+  now=$(deadline_now)
+  read -r sha since 2>/dev/null < "$f" || true
+  if [ "${sha:-}" != "$2" ] || ! [[ "${since:-}" =~ ^[0-9]+$ ]]; then
+    since="$now"
+    echo "$2 $since" > "$f" 2>/dev/null || true
+  fi
+  echo $((now - since))
+}
+
+# review_not_ready_action <number> — print the action (correct, replan or
+# needs_human) of the PR's latest review report, the newest trusted comment
+# (by updated_at: the run rewrites one comment each round) carrying
+# $REVIEW_REPORT_MARKER, when that report says not ready. Exit 1, printing
+# nothing, when it says ready, there is none, it names no such action, or the
+# comments cannot be read.
+review_not_ready_action() {
+  local rows login type b64 body action verdict
+  rows=$(gh api --paginate "repos/alexsiri7/$PROJECT/issues/$1/comments" \
+    --jq ".[] | select((.body // \"\") | contains(\"$REVIEW_REPORT_MARKER\")) | [(.updated_at // .created_at // \"\"), (.user.login // \"\"), (.user.type // \"\"), (.body | @base64)] | @tsv" \
+    2>/dev/null) || return 1
+  [ -n "$rows" ] || return 1
+  while IFS=$'\t' read -r _ login type b64; do
+    [ -n "$b64" ] || continue
+    trust_comment_author_ok "$login" "$type" || continue
+    body=$(printf '%s' "$b64" | base64 -d 2>/dev/null | tr -d '*`') || return 1
+    # The report's own "Verdict:" line decides; only a report without one
+    # falls back to its "ready: false".
+    verdict=$(printf '%s\n' "$body" | grep -iE -m1 '^verdict:' || true)
+    if [ -n "$verdict" ]; then
+      printf '%s' "$verdict" | grep -qiE '^verdict: *not ready' || return 1
+    else
+      printf '%s\n' "$body" | grep -qiE 'ready: *false' || return 1
+    fi
+    action=$(printf '%s\n' "$body" | grep -oiE 'action: *[a-z_]+' | head -1 \
+      | sed -E 's/^[Aa][Cc][Tt][Ii][Oo][Nn]: *//' | tr '[:upper:]' '[:lower:]' || true)
+    case "$action" in
+      correct|replan|needs_human) echo "$action"; return 0 ;;
+    esac
+    return 1
+  done < <(printf '%s\n' "$rows" | sort -r)
   return 1
 }
 
@@ -413,6 +466,38 @@ for PROJECT in "${PROJECTS[@]}"; do
           archon workflow resume "$RUN" --detach --json --cwd "$ARCHON_RUNS_CWD" 2>&1 | tail -1) || true
       log "$PROJECT: resume $RUN — $ACK"
     done <<< "$RETRY_PRS"
+  fi
+
+  # --- Mark finished drafts their review left not ready ---
+  # An archon-ship-block run can complete (not fail) with its last review
+  # saying ready: false (action correct, replan or needs_human). The PR stays
+  # a draft nothing will correct, and its issue keeps archon:in-progress, so
+  # issue pickup starts nothing else on the repo (2026-10-26: punland #50,
+  # #51). Mark it review-not-ready for lib/deadlines.sh: ntfy after 12h, an
+  # archon-assist salvage after 24h. Marking only, so it runs under QUOTA_HELD
+  # too. Every check fails closed: no snapshot, no mark.
+  if archon_runs_known && archon_failed_runs_known; then
+    DRAFT_PRS=$(list_prs full '.isDraft == true and (.headRefName | startswith("archon/task-"))')
+    while IFS=$'\t' read -r PR HEAD HOLD SHA _; do
+      [ -n "$PR" ] || continue
+      AGE=$(head_unchanged_for "$PR" "$SHA")
+      pr_on_hold "$PR" "$HOLD" && continue
+      # A failed run's PR is the failed-run kind's.
+      archon_branch_failed_run "$HEAD" >/dev/null && continue
+      archon_branch_active_run "$HEAD" >/dev/null && continue
+      [ "$AGE" -ge "$REVIEW_NOT_READY_SECONDS" ] || continue
+      ACTION=$(review_not_ready_action "$PR") || continue
+      TRUST_RC=0
+      trust_comments_ok "$PROJECT" pr "$PR" || TRUST_RC=$?
+      if [ "$TRUST_RC" = 1 ]; then
+        deadline_mark untrusted "$PROJECT" "$PR" "$SHA" "$HEAD" "draft left not ready by its review; untrusted comments or reviews"
+        continue
+      fi
+      [ "$TRUST_RC" = 0 ] || continue
+      log "$PROJECT: draft PR #$PR — its run finished, its review says not ready (action: $ACTION), head ${SHA:0:7} unchanged $((AGE / 3600))h"
+      deadline_mark review-not-ready "$PROJECT" "$PR" "$SHA" "$HEAD" \
+        "draft left not ready by its review (action: $ACTION), head ${SHA:0:7} unchanged $((AGE / 3600))h"
+    done <<< "$DRAFT_PRS"
   fi
 
   # --- Phase 0: Promote CLEAN draft PRs to ready-for-review ---
