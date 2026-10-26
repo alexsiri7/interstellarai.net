@@ -350,6 +350,8 @@ load_trust() {
     STATE_DIR="$T/state"; mkdir -p "$STATE_DIR/prciretry" "$STATE_DIR/escalated"
     MAX_ATTEMPTS=3
     log() { echo "$*"; }
+    archon_runs_known() { :; }
+    archon_branch_running_run() { return 1; }
     ASSIST="$T/assist"; : > "$ASSIST"
     nohup() { printf '%s\n' "$*" >> "$ASSIST"; }
     disown() { :; }
@@ -364,6 +366,35 @@ load_trust() {
     # Held-back PRs spend no remediation attempt.
     [ ! -f "$STATE_DIR/prciretry/proj-pr600" ]
     [ ! -f "$STATE_DIR/prciretry/proj-pr601" ]
+}
+
+@test "health: a PR whose worktree a running archon run holds gets no archon-assist" {
+    SCRIPT_FILE="$CRON_DIR/pipeline-health-cron.sh"
+    # shellcheck disable=SC1090
+    source <(awk '/^(check_pr_ci_retry|sha_attempt_decide)\(\)/{p=1} p{print} p && /^}$/{p=0}' "$SCRIPT_FILE")
+    load_trust
+    STATE_DIR="$T/state"; mkdir -p "$STATE_DIR/prciretry" "$STATE_DIR/escalated"
+    MAX_ATTEMPTS=3
+    log() { echo "$*"; }
+    ASSIST="$T/assist"; : > "$ASSIST"
+    nohup() { printf '%s\n' "$*" >> "$ASSIST"; }
+    disown() { :; }
+    archon_runs_known() { :; }
+    archon_branch_running_run() { [ "$1" = archon/task-z ] && echo run-z; }
+    red='"statusCheckRollup":[{"conclusion":"FAILURE"}]'
+    export GH_PR_LIST="[$(pr 602 false BLOCKED alexsiri7 false archon/task-z | sed "s/}\$/,$red}/"), $(pr 603 false BLOCKED alexsiri7 false archon/task-w | sed "s/}\$/,$red}/")]"
+
+    check_pr_ci_retry proj
+
+    ! grep -q 'PR #602' "$ASSIST"
+    grep -q 'PR #603 has failing CI' "$ASSIST"
+    [ ! -f "$STATE_DIR/prciretry/proj-pr602" ]
+
+    # No run snapshot this tick: nothing fires.
+    : > "$ASSIST"; rm -f "$STATE_DIR"/prciretry/*
+    archon_runs_known() { return 1; }
+    check_pr_ci_retry proj
+    [ ! -s "$ASSIST" ]
 }
 
 # ── pr-maintenance: the unsafe-change scope gate ───────────────────────────────

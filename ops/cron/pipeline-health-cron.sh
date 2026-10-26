@@ -2044,7 +2044,7 @@ check_pr_ci_retry() {
         | select((.labels // []) | map(.name) | (index("hold") or index($held)) | not)
         | select(.statusCheckRollup | length > 0)
         | select(.statusCheckRollup | map(select((.name // .context) | IN("unsafe-change", "safe-change") | not) | .conclusion // "PENDING") | any(. == "FAILURE"))
-        | [(.number|tostring), .headRefOid, .title] | @tsv' \
+        | [(.number|tostring), .headRefOid, .headRefName, .title] | @tsv' \
     2>/dev/null || echo "")
 
   # Clear markers for PRs no longer failing (merged, closed, or recovered).
@@ -2079,9 +2079,25 @@ check_pr_ci_retry() {
 
   [ -n "$failed_prs" ] || return
 
-  while IFS=$'\t' read -r pr_num pr_sha pr_title; do
+  while IFS=$'\t' read -r pr_num pr_sha pr_head pr_title; do
     [ -n "$pr_num" ] || continue
     [ -n "$pr_sha" ] || continue
+
+    # A running archon run owns the PR's worktree: its own rounds judge and fix
+    # CI. archon-assist cannot check out a branch another worktree holds, so it
+    # cd's into that worktree and commits under the run — three archon-ship-block
+    # runs died in review on 2026-10-22/23 when the checkout or PR head moved
+    # mid-review. Unknown run state defers too (fail closed). Before
+    # sha_attempt_decide, so a deferred PR spends no attempt.
+    if ! archon_runs_known; then
+      log "$project: PR #$pr_num CI red but this tick has no archon run snapshot — not firing archon-assist"
+      continue
+    fi
+    local owner_run
+    if owner_run=$(archon_branch_running_run "$pr_head"); then
+      log "$project: PR #$pr_num CI red but archon run $owner_run is working on $pr_head — not firing archon-assist"
+      continue
+    fi
 
     # Before sha_attempt_decide, so a PR held back here spends no attempt.
     if ! trust_comments_ok "$project" pr "$pr_num"; then

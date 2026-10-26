@@ -24,6 +24,7 @@
 #   archon_runs_known || ...            # false when this tick's snapshot failed
 #   archon_parked_runs 1800             # rows for paused runs nothing will resume
 #   run_id=$(archon_branch_ci_attention_run "$head") # paused at the CI attention step on this branch
+#   run_id=$(archon_branch_running_run "$head") # a running run is working in this branch's worktree
 #   archon_failed_runs_snapshot         # once per tick: failed runs nothing adopted
 #   run_id=$(archon_branch_failed_run "$head") # such a run left this branch
 #   archon_failed_runs_known || ...     # false when that listing failed
@@ -308,6 +309,18 @@ archon_branch_ci_attention_run() {
   [ -n "$1" ] && [ -s "$ARCHON_RUNS_SNAPSHOT" ] || return 1
   awk -F'\t' -v tail="/$1" -v cire="$ARCHON_CI_ATTENTION_STEP_RE" '
     $6 == "attention" && $10 ~ cire && substr($9, length($9) - length(tail) + 1) == tail {
+      print $5; found = 1; exit }
+    END { exit found ? 0 : 1 }' "$ARCHON_RUNS_SNAPSHOT"
+}
+
+# archon_branch_running_run <branch> — print the id of a RUNNING run whose
+# worktree is <branch> (archon names each run's worktree after its branch).
+# Such a run is editing that checkout right now; anything else that commits
+# there changes the tree under it. Exit 0 on match, 1 otherwise.
+archon_branch_running_run() {
+  [ -n "$1" ] && [ -s "$ARCHON_RUNS_SNAPSHOT" ] || return 1
+  awk -F'\t' -v tail="/$1" '
+    $2 == "running" && substr($9, length($9) - length(tail) + 1) == tail {
       print $5; found = 1; exit }
     END { exit found ? 0 : 1 }' "$ARCHON_RUNS_SNAPSHOT"
 }
