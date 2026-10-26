@@ -23,6 +23,9 @@
 #   TRUSTED_MERGE_ONLY_AUTHORS PRs merged by pr-maintenance when CLEAN, but no
 #                              archon run ever reads them (their bodies embed
 #                              third-party text, e.g. upstream release notes).
+#   TRUSTED_COMMENT_BOTS       comments only, and only when GitHub reports the
+#                              commenter's user type as "Bot" (deploy-preview
+#                              and CI apps that comment on every PR).
 # An empty list trusts nobody. Logins compare case-insensitively; gh's `--json
 # author` form `app/<slug>` is the same identity as REST's `<slug>[bot]`.
 #
@@ -41,6 +44,7 @@ _ARCHON_TRUST_SH=1
 : "${TRUSTED_AUTHORS=alexsiri7 alexsiri7-factory}"
 : "${TRUSTED_ISSUE_BOTS=sentry[bot] github-actions[bot]}"
 : "${TRUSTED_MERGE_ONLY_AUTHORS=dependabot[bot] github-actions[bot]}"
+: "${TRUSTED_COMMENT_BOTS=cloudflare-workers-and-pages[bot] vercel[bot] railway-app[bot] dependabot[bot] github-actions[bot] netlify[bot] sentry-io[bot]}"
 TRUST_FILE="${ARCHON_CRON_TRUST_FILE:-$HOME/.config/archon-cron/trust.env}"
 if [ -r "$TRUST_FILE" ]; then
   # shellcheck source=/dev/null
@@ -89,6 +93,15 @@ _trust_in_list() {
 
 trust_issue_ok() { _trust_in_list "${1:-}" "$TRUSTED_AUTHORS" "$TRUSTED_ISSUE_BOTS"; }
 trust_commenter_ok() { trust_issue_ok "$@"; }
+
+# trust_comment_author_ok <login> <user type> — a comment's author is trusted:
+# on the issue lists (whatever its type), or a GitHub App on
+# TRUSTED_COMMENT_BOTS that GitHub itself reports as type "Bot". A human
+# account cannot be type Bot, and the type is never read from the login.
+trust_comment_author_ok() {
+  trust_commenter_ok "$1" && return 0
+  [ "${2:-}" = "Bot" ] && _trust_in_list "$1" "$TRUSTED_COMMENT_BOTS"
+}
 
 # trust_pr_level <author> <isCrossRepository> — prints full, merge or none.
 # A PR whose head lives in another repository (a fork) is never trusted,
@@ -290,19 +303,21 @@ trust_filter_prs() {
 }
 
 # trust_comments_ok <project> issue|pr <number> — true when every comment (and
-# for a PR every review and review comment) is by a trusted author. Call right
+# for a PR every review and review comment) is by a trusted author
+# (trust_comment_author_ok: the listing carries each author's login and user
+# type, as "<login>|<type>"; logins cannot contain "|"). Call right
 # before an archon run that reads the thread. Fails closed: a listing that
 # cannot be read counts as untrusted for this tick (returns 2, so a caller can
 # tell it from a stranger's comment, 1). A stranger's comment blocks
 # the item until the owner deletes it (hiding it does not: the API still
 # returns it).
 trust_comments_ok() {
-  local project="$1" kind="$2" num="$3" repo="$TRUST_OWNER/$1" logins l bad=""
+  local project="$1" kind="$2" num="$3" repo="$TRUST_OWNER/$1" logins l t bad=""
   local -a eps=("repos/$repo/issues/$num/comments")
   [ "$kind" = "pr" ] && eps+=("repos/$repo/pulls/$num/reviews" "repos/$repo/pulls/$num/comments")
   local ep
   for ep in "${eps[@]}"; do
-    if ! logins=$(gh api --paginate "$ep" --jq '.[].user.login // ""' 2>/dev/null); then
+    if ! logins=$(gh api --paginate "$ep" --jq '.[] | "\(.user.login // "")|\(.user.type // "")"' 2>/dev/null); then
       _trust_log "$project: $kind #$num — could not list $ep, not starting archon this tick"
       return 2
     fi
@@ -313,8 +328,11 @@ trust_comments_ok() {
     want=$(printf '%s\n' "$logins" | grep -c '')
     while IFS= read -r l; do
       got=$((got + 1))
+      # "<login>|<type>"; a bare login (no "|") has no known type.
+      t=""
+      case "$l" in *"|"*) t="${l##*|}"; l="${l%|*}" ;; esac
       [ -n "$l" ] || { bad="$bad unknown"; continue; }
-      trust_commenter_ok "$l" || bad="$bad $l"
+      trust_comment_author_ok "$l" "$t" || bad="$bad $l"
     done < <(printf '%s\n' "$logins")
     if [ "$got" != "$want" ] || [ "$want" = 0 ]; then
       _trust_log "$project: $kind #$num — comment check incomplete, not starting archon this tick"
