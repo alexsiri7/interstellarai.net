@@ -254,6 +254,24 @@ Do not delete the stamp to force a run. The script rewrites it, so a nudge loop 
 
 The stamp doubles as the script's heartbeat (`lib/heartbeat.sh`): it is rewritten on every real tick, whether or not the tick found work, so a stale one means the script stopped ticking, not that the factory is idle. A forced tick does not count as a heartbeat. A cron firing every `P` minutes under `TICK_INTERVAL_MINUTES=T` really ticks every `E = max(P, ceil(T/P)·P)` minutes, and the watch alerts once the stamp is older than `2E+P` (two missed ticks plus one slot of grace) — 135 minutes at `T=59`, seen at the watcher's next tick. `pipeline-health-cron.sh` watches `issue-pickup` and `pr-maintenance`, `issue-pickup-cron.sh` watches `pipeline-health`. Each watch is passed the watched script's crontab period, so changing a `*/N` in `crontab` means changing its `heartbeat_watch` call too; `tests/heartbeat.bats` fails until they agree. A cron daemon or host that stops runs none of them and is not detected from here.
 
+## Deadlines on parked work, and the stall detector
+
+On 2026-10-26, 15 finished, CI-green PRs had sat for 3–6 days. `pr-maintenance` logged "needs a human" about 130 times for each, nobody read the log, and `pipeline-status` showed green. So parked work now has a clock (`lib/deadlines.sh`, state in `~/.archon/state/deadlines/`, one file per item):
+
+| Kind | Marked by | When |
+|---|---|---|
+| `failed-run` | `pr-maintenance` | a PR left by a failed archon run that the review-stage retry cannot help: not a review-stage failure, out of retries, or its worktree is gone |
+| `ops-merge` | `pr-maintenance` | a CLEAN PR on a protected repo that touches `ops/` or `.github/`, so it needs a human merge |
+| `untrusted` | `pr-maintenance` | a PR with a stranger's comment or review (not a listing that merely failed) |
+| `needs-author` | `pipeline-health` | a trusted open issue labelled `needs-author` |
+
+Each tick re-marks what is still parked. `first_seen` survives a new head SHA, so a salvage that pushes does not restart the clock. Only items marked within the last hour are escalated, so a PR that merged is never chased, and an item unseen for 6h is dropped. `pipeline-health`'s `check_deadlines` escalates:
+
+- **After 12h:** one batched ntfy (`notify_checked`) listing every such item, at most once per item per day. A failed send is retried next tick.
+- **After 24h:** `failed-run` PRs and `needs-author` issues get one `archon-assist` salvage per item per head SHA (issues once), and never two within 24h of each other: a salvage runs in its own worktree, which the run snapshot cannot tie to the PR, so one that pushes would otherwise be followed by another every tick. The prompt says to review the item, fix it and merge only if its own review passes and every check is green, otherwise leave one clear comment, and never to write production data. It is gated on `quota_may_launch`, `gh_factory_may_launch` and a readable run snapshot, skipped while a running run holds the branch, re-checks `trust_comments_ok` just before the launch, runs at most `DEADLINE_SALVAGE_MAX` (2) per tick, and never runs on a protected repo (`ARCHON_RUNAS_PROTECTED_REPOS`). `ops-merge` PRs get one comment per head SHA instead. `untrusted` items get the ntfy only: a salvage would hand a stranger's text to an agent.
+
+**Stall detector** (`stall_check`, every `pipeline-health` tick): a repo with open trusted PRs older than 24h that carry neither `hold` nor `needs-owner-review`, and **0 PRs merged** in the last 24h (`merged:>=`; merged PRs, not commits, because release and requirement bumps land on `main` directly), gets one ntfy per episode and a marker in `~/.archon/state/stalled/<repo>`. `ops/bin/pipeline-status` shows it in red on the repo's line and in the footer. The marker clears once a PR merges or the open work goes. A GitHub read that fails changes nothing.
+
 ## Reading a paused run
 
 `archon workflow resume` and the run's own log print `Workflow paused — waiting for approval.` for **every** pause, including the designed 5-minute CI wait in `archon-ship`'s deliver tail (`deliver__await-checks` / `ci-pause`). It does not mean a human gate is open — the sdlc workflow pack declares no approval node at all, and its header says so: the human gate is PR review and merge on GitHub, outside the run.

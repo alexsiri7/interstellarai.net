@@ -18,6 +18,9 @@ source "$SCRIPT_DIR/../cron/lib/gh-factory.sh"
 # issue-pickup's record of its reads of Lachesis next_issue.
 # shellcheck source=../cron/lib/lachesis.sh
 source "$SCRIPT_DIR/../cron/lib/lachesis.sh"
+# pipeline-health's per-repo stall markers (stall_note).
+# shellcheck source=../cron/lib/deadlines.sh
+source "$SCRIPT_DIR/../cron/lib/deadlines.sh"
 OWNER="alexsiri7"
 
 # Colours
@@ -112,6 +115,7 @@ printf "${BOLD}%-22s  %4s  %6s  %5s  %s${RESET}\n" "REPO" "PRs" "ISSUES" "CI" "N
 printf '%s\n' "──────────────────────────────────────────────────────────────"
 
 any_stuck=0
+any_stalled=0
 
 for REPO in "${PROJECTS[@]}"; do
     # Open PRs
@@ -143,6 +147,11 @@ for REPO in "${PROJECTS[@]}"; do
     [ "$factory_gap"  -gt 0 ] 2>/dev/null && notes+="factory-gap:${factory_gap} "
     [ "$archon_wip"   -gt 0 ] 2>/dev/null && notes+="wip:${archon_wip} "
     [ "$pr_count" -gt 3 ]     2>/dev/null && notes+="${YELLOW}${pr_count} PRs${RESET} "
+    stall=$(stall_note "$REPO")
+    if [ -n "$stall" ]; then
+        notes+="${RED}${stall}${RESET} "
+        any_stalled=1
+    fi
 
     printf "%-22s  %4s  %6s  " "$REPO" "$pr_count" "$issue_count"
     printf "${ci_str}  ${notes}\n"
@@ -154,6 +163,9 @@ printf "factory GitHub: %s\n" "$(gh_factory_status)"
 printf "issue pickup: %s\n\n" "$(issue_pickup_status)"
 if lachesis_next_failing; then
     printf "${RED}Issue pickup is failing: %s.${RESET}\n\n" "$LACHESIS_NEXT_PROBLEM"
+fi
+if [ "$any_stalled" -eq 1 ]; then
+    printf '%bAt least one repo has open work and merged nothing in 24h — check above.%b\n\n' "$RED" "$RESET"
 fi
 if [ "$any_stuck" -eq 1 ]; then
     printf "${RED}CI red on main in at least one project — check above.${RESET}\n\n"

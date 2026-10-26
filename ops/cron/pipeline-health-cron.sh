@@ -58,6 +58,15 @@
 #      mode) → ntfy once per episode; issue-pickup holds launches meanwhile
 #  9h. Doppler token (lib/secrets.sh) missing, loose-moded or rejected → ntfy
 #      once per episode
+#  10. Parked work gets a clock (lib/deadlines.sh): pr-maintenance marks
+#      failed-run, ops-merge and untrusted-comment PRs, this script marks
+#      trusted needs-author issues. After 12h one batched ntfy (once per item
+#      per day); after 24h one archon-assist salvage per item per head SHA for
+#      failed-run PRs and needs-author issues (quota and factory-identity
+#      gated), a comment on ops PRs, nothing more for untrusted items.
+#  11. Stall detector: a repo with open PRs older than 24h (not hold or
+#      needs-owner-review) and 0 PRs merged in 24h → ntfy once per episode and
+#      a marker pipeline-status shows in red
 #
 # Crontab (logs live under ~/.local/state/archon-cron/logs, which survives a
 # reboot; /tmp does not):
@@ -130,6 +139,13 @@ source "$SCRIPT_DIR/lib/build-drift.sh"
 source "$SCRIPT_DIR/lib/gh-factory.sh"
 # shellcheck source=lib/lachesis.sh
 source "$SCRIPT_DIR/lib/lachesis.sh"
+# The deadline salvage launches archon-assist through the quota gate.
+# shellcheck source=lib/ship-breaker.sh
+source "$SCRIPT_DIR/lib/ship-breaker.sh"
+# shellcheck source=lib/quota-pause.sh
+source "$SCRIPT_DIR/lib/quota-pause.sh"
+# shellcheck source=lib/deadlines.sh
+source "$SCRIPT_DIR/lib/deadlines.sh"
 BASE_DIR="${BASE_DIR:-/mnt/ext-fast}"
 STATE_DIR="$HOME/.archon/pipeline-health-state"
 # Where the crontab sends every script's stdout/stderr (see ops/cron/crontab).
@@ -2023,6 +2039,32 @@ check_progress() {
 }
 
 # ----------------------------------------------------------------------------
+# Check 10/11: deadlines on parked work, and the per-repo stall detector.
+#   Marks every trusted open issue labelled needs-author (Lachesis waits on its
+#   author), runs stall_check per repo, then deadline_escalate over everything
+#   marked here and by pr-maintenance (lib/deadlines.sh). A listing that fails
+#   marks nothing: the item stays current from its earlier marks for
+#   DEADLINE_FRESH_SECONDS.
+# ----------------------------------------------------------------------------
+check_deadlines() {
+  local project json num title
+  for project in "${REPOS[@]}"; do
+    if json=$(gh issue list --repo "alexsiri7/$project" --state open --label needs-author --limit 100 \
+          --json number,labels,createdAt,author,title,body 2>/dev/null); then
+      while IFS=$'\t' read -r num title; do
+        [ -n "$num" ] || continue
+        deadline_mark needs-author "$project" "$num" - "" "waiting on its author: $title"
+      done < <(printf '%s' "$json" | TRUST_QUIET=1 trust_filter_issues "$project" 2>/dev/null \
+                 | jq -r '.[] | [(.number | tostring), ((.title // "") | gsub("[\t\r\n]"; " "))] | @tsv' 2>/dev/null)
+    else
+      log "$project: could not list needs-author issues"
+    fi
+    stall_check "$project"
+  done
+  deadline_escalate
+}
+
+# ----------------------------------------------------------------------------
 # Check 5: Retry CI on open archon PRs with failed checks.
 #   Ported from archon/scripts/poll-health.sh (check 1). For each open PR on
 #   an `archon/` branch whose statusCheckRollup contains a FAILURE, fire
@@ -3031,4 +3073,5 @@ check_gh_factory
 check_lachesis_next_issue
 check_doppler_token
 check_progress
+check_deadlines
 log "=== done ==="
