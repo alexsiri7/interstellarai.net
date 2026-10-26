@@ -45,6 +45,8 @@
 #   8. Shipped-PR ntfy → emit "Shipped: repo #issue" for PRs that closed issues
 #      in the last 24h, when the deploy URL is currently healthy
 #      (dedup per-PR)
+#  8b. A PR a factory ship run published now answers 404 (hidden or deleted)
+#      → ntfy once per PR per episode, marker cleared when it resolves again
 #  9e. Claude accounts: once a day, a real request against every config dir in
 #      CLAUDE_ACCOUNTS (lib/claude-auth.sh) → ntfy once per day per failing
 #      account + one `human-needed` tracking issue, closed on recovery
@@ -203,6 +205,10 @@ MAX_ATTEMPTS=3
 # check_parked_runs nudges it. 6x the longest `wait:` the sdlc pack declares
 # (ci-pause, duration_ms 300000).
 PARKED_WAIT_MAX_SECONDS="${PARKED_WAIT_MAX_SECONDS:-1800}"
+# check_published_prs: how far back the ship run logs are read, and how many
+# of their PRs (newest first) are resolved per project per tick.
+PUBLISHED_PR_WINDOW_DAYS="${PUBLISHED_PR_WINDOW_DAYS:-14}"
+PUBLISHED_PR_MAX="${PUBLISHED_PR_MAX:-40}"
 # A run paused at the CI attention step is pr-maintenance's to resume and is
 # reported here only after ARCHON_CI_ATTENTION_MAX_SECONDS (a day by default,
 # set in lib/archon-active-runs.sh).
@@ -2395,6 +2401,76 @@ check_shipped_prs() {
 }
 
 # ----------------------------------------------------------------------------
+# Check 7b: Published PRs that stopped resolving (#211).
+#   From 2026-10-13 GitHub hid every PR the flagged factory account had
+#   opened: `gh pr view N` said "Could not resolve to a PullRequest", and the
+#   issues parked behind those PRs sat for a week before anyone noticed. This
+#   resolves each PR a factory ship run published in the last
+#   PUBLISHED_PR_WINDOW_DAYS and ntfys once per PR per episode when it answers
+#   404; the marker is cleared when it resolves again. Any other gh failure
+#   proves nothing and is only logged.
+#   Source: the delivered:true outcome line in the ship run logs under
+#   .archon-logs, the owner-readable copy of the same deliver node's PR. The
+#   deliver__pr__publish artifacts sit in the archon user's 0750 home, which
+#   this cron cannot read in ARCHON_RUN_AS=archon mode. Ship runs started by
+#   hand outside the crons leave no such log and are not watched.
+# ----------------------------------------------------------------------------
+check_published_prs() {
+  local project="$1"
+  local logdir="$BASE_DIR/$project/.archon-logs" dir="$STATE_DIR/published-prs-gone"
+  [ -d "$logdir" ] || return 0
+
+  local f issue url pairs=""
+  while IFS= read -r f; do
+    [[ "$f" =~ -issue-([0-9]+)-[^/]*$ ]] || continue
+    issue="${BASH_REMATCH[1]}"
+    while IFS= read -r url; do
+      [[ "$url" =~ ^https://github\.com/alexsiri7/"$project"/pull/([0-9]+)$ ]] \
+        && pairs+="${BASH_REMATCH[1]} $issue"$'\n'
+    done < <(grep -hE '^\{.*"delivered" *: *true' "$f" \
+      | jq -rR 'fromjson? | select(type == "object" and .delivered == true) | .pr_url // empty' 2>/dev/null)
+  done < <(find "$logdir" -maxdepth 1 -type f \
+    \( -name 'cron-issue-*.log' -o -name 'health-*-issue-*.log' \) -mtime -"$PUBLISHED_PR_WINDOW_DAYS")
+  [ -n "$pairs" ] || return 0
+
+  local -a prs
+  mapfile -t prs < <(printf '%s' "$pairs" | sort -k1,1nr | awk '!seen[$1]++')
+  if [ "${#prs[@]}" -gt "$PUBLISHED_PR_MAX" ]; then
+    log "published-prs: $project: $(( ${#prs[@]} - PUBLISHED_PR_MAX )) more published PRs not checked this tick"
+    prs=("${prs[@]:0:$PUBLISHED_PR_MAX}")
+  fi
+
+  local pair n err
+  local -a gone=() gone_nums=()
+  for pair in "${prs[@]}"; do
+    read -r n issue <<<"$pair"
+    if err=$(gh api "repos/alexsiri7/$project/pulls/$n" --jq .number 2>&1 >/dev/null); then
+      if [ -f "$dir/$project-$n" ]; then
+        rm -f "$dir/$project-$n"
+        log "published-prs: $project #$n resolves again"
+      fi
+    elif [[ "$err" == *"HTTP 404"* ]]; then
+      [ -f "$dir/$project-$n" ] || { gone+=("#$n (issue #$issue)"); gone_nums+=("$n"); }
+    else
+      log "published-prs: $project #$n lookup failed, proves nothing: ${err:0:160}"
+    fi
+  done
+  [ "${#gone[@]}" -gt 0 ] || return 0
+
+  local list
+  list=$(printf '%s, ' "${gone[@]}"); list="${list%, }"
+  log "published-prs: $project: $list now answer 404"
+  if notify_checked "Published PR gone: $project" \
+      "$list opened by factory ship runs now answer 404 to this account: hidden (a flagged account, see the gh-factory alert) or deleted. A run that settles behind one from now on is released by settle-ship-outcome (#211), but an issue already parked behind one stays parked until released by hand; their branches may still be on origin. https://github.com/alexsiri7/$project/pulls" \
+      high warning; then
+    mkdir -p "$dir"
+    for n in "${gone_nums[@]}"; do touch "$dir/$project-$n"; done
+  else
+    log "published-prs: $project: ntfy not delivered — retrying next tick"
+  fi
+}
+
+# ----------------------------------------------------------------------------
 # Check 8: Sweep stale `archon:in-progress` labels off closed issues.
 #   archon's fix workflow closes issues via "Fixes #N" on a merged PR, but
 #   GitHub doesn't auto-update the label, and the workflow doesn't always
@@ -2919,6 +2995,7 @@ for project in "${REPOS[@]}"; do
   check_deploy_http "$project"
   check_staging_deploy_http "$project"
   check_shipped_prs "$project"
+  check_published_prs "$project"
   sweep_stale_labels "$project"
 done
 reconcile_zombies
