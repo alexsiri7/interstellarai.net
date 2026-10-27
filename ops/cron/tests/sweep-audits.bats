@@ -329,6 +329,15 @@ pulls_fixture() {
     [ "$(report | jq -c '[.outcome, .issues]')" = '["findings",[41]]' ]
 }
 
+@test "a requirements audit's findings are the requirements-gap issues it files" {
+    offer '{"repo":"alexsiri7/reli","kind":"requirements","capability":null,"model":"claude"}'
+    issues_fixture
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    grep -q '^api repos/alexsiri7/reli/issues?creator=factory-bot&labels=requirements-gap&state=all&since=' "$GH_CALLS"
+    [ "$(report | jq -c '[.kind, .outcome, .issues]')" = '["requirements","findings",[41]]' ]
+}
+
 @test "the run's own PR makes it findings; another run's PR in the repo does not" {
     pulls_fixture archon/task-archon-security-audit-9999999999999
     run "$SCRIPT"
