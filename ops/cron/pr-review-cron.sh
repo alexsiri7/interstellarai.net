@@ -56,6 +56,8 @@ source "$SCRIPT_DIR/lib/trust.sh"
 
 BASE_DIR="${BASE_DIR:-/mnt/ext-fast}"
 STATE_DIR="$HOME/.archon/state/pr-review"
+# pr-maintenance-cron.sh's per-PR markers (read only: <project>-<pr>.corrected).
+MAINTENANCE_STATE_DIR="$HOME/.archon/state/pr-maintenance"
 LOG_PREFIX="[pr-review]"
 mkdir -p "$STATE_DIR"
 
@@ -97,6 +99,15 @@ reap_finished() {
   shopt -u nullglob
 }
 
+# corrected_since <project> <pr> <headRefOid> — true when pr-maintenance-cron
+# launched a review correction for this PR at an earlier head: the current head
+# may be that correction's push, which no ship run reviewed.
+corrected_since() {
+  local marker="$MAINTENANCE_STATE_DIR/$1-$2.corrected" corrected
+  corrected=$(cat "$marker" 2>/dev/null) || return 1
+  [ -n "$corrected" ] && [ "$corrected" != "$3" ]
+}
+
 # process_project: list open PRs, filter to non-draft, and for each decide
 # whether to skip (already-reviewed / in-flight / running-archon) or fire.
 process_project() {
@@ -129,7 +140,8 @@ process_project() {
   # — a held PR gets no automated review either.
   # Fourth column: "true" for a CLEAN archon-ship PR. The ship run reviewed it
   # itself before flipping it ready, and pr-maintenance merges it on its next
-  # tick: a review fired now only races that merge.
+  # tick: a review fired now only races that merge. A head pushed after a
+  # review correction (corrected_since) is reviewed like any other.
   local rows
   rows=$(echo "$prs_json" | jq -r --arg held "$TRUST_HELD_LABEL" '.[] | select(.isDraft == false) | "\(.number) \(.headRefOid) \((.labels // []) | map(.name) | (index("hold") or index($held))) \(.mergeStateStatus == "CLEAN" and ((.headRefName // "") | startswith("archon/task-archon-ship-")))"' 2>/dev/null || true)
 
@@ -142,7 +154,7 @@ process_project() {
       continue
     fi
 
-    if [ "${ship_clean:-false}" = "true" ]; then
+    if [ "${ship_clean:-false}" = "true" ] && ! corrected_since "$project" "$pr_num" "$sha"; then
       ship_merging=$((ship_merging + 1))
       log "$project: PR #$pr_num is a CLEAN archon-ship PR, reviewed by its run and about to merge — skipping"
       continue
