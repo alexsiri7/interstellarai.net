@@ -237,7 +237,7 @@ cluster_dirs() { find "$T" -maxdepth 1 -name 'restore-test.*' 2>/dev/null; }
     printf 'CREATE TABLE reli.things (\n' | gzip > "$T/backups/reli/reli-20260919-091701.sql.gz"
     run "$SCRIPT"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"below the 1024B minimum"* ]]
+    [[ "$output" == *"below the 256B minimum"* ]]
     [ ! -f "$T/restored-restore_reli.sql" ]
 }
 
