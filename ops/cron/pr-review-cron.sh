@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # pr-review-cron.sh — run every 5 minutes from cron.
-# Fires archon-smart-pr-review against non-draft open PRs in managed repos,
-# once per (repo, pr_number, head_sha). Uses the user's Claude.ai subscription
-# auth (same as issue-pickup-cron.sh / pr-maintenance-cron.sh); no Anthropic
-# API key required.
+# Fires archon-review against non-draft open PRs in managed repos, once per
+# (repo, pr_number, head_sha), in a worktree cut from the PR's head branch.
+# Each tick it also closes running or paused reviews whose PR has merged.
+# Uses the user's Claude.ai subscription auth (same as issue-pickup-cron.sh /
+# pr-maintenance-cron.sh); no Anthropic API key required.
 #
 # Crontab:
 #   */5 * * * * <repo>/ops/cron/pr-review-cron.sh >> ~/.local/state/archon-cron/logs/pr-review.log 2>&1
@@ -51,6 +52,8 @@ quota_may_launch "pr-review" || exit 0
 # shellcheck source=lib/archon-active-runs.sh
 source "$SCRIPT_DIR/lib/archon-active-runs.sh"
 archon_runs_snapshot
+# shellcheck source=lib/merged-reviews.sh
+source "$SCRIPT_DIR/lib/merged-reviews.sh"
 # shellcheck source=lib/trust.sh
 source "$SCRIPT_DIR/lib/trust.sh"
 
@@ -142,10 +145,12 @@ process_project() {
   # itself before flipping it ready, and pr-maintenance merges it on its next
   # tick: a review fired now only races that merge. A head pushed after a
   # review correction (corrected_since) is reviewed like any other.
+  # Fifth column: the PR's head branch, which the review's worktree is cut
+  # from. Git branch names cannot contain spaces.
   local rows
-  rows=$(echo "$prs_json" | jq -r --arg held "$TRUST_HELD_LABEL" '.[] | select(.isDraft == false) | "\(.number) \(.headRefOid) \((.labels // []) | map(.name) | (index("hold") or index($held))) \(.mergeStateStatus == "CLEAN" and ((.headRefName // "") | startswith("archon/task-archon-ship-")))"' 2>/dev/null || true)
+  rows=$(echo "$prs_json" | jq -r --arg held "$TRUST_HELD_LABEL" '.[] | select(.isDraft == false) | "\(.number) \(.headRefOid) \((.labels // []) | map(.name) | (index("hold") or index($held))) \(.mergeStateStatus == "CLEAN" and ((.headRefName // "") | startswith("archon/task-archon-ship-"))) \(.headRefName)"' 2>/dev/null || true)
 
-  while IFS=' ' read -r pr_num sha on_hold ship_clean; do
+  while IFS=' ' read -r pr_num sha on_hold ship_clean head_ref; do
     [ -z "${pr_num:-}" ] && continue
 
     if [ "${on_hold:-false}" = "true" ]; then
@@ -197,12 +202,16 @@ process_project() {
       continue
     fi
 
-    # Fire archon.
+    # Fire archon. --base makes archon fetch the PR's branch and cut the
+    # review's fresh worktree from origin/<head>, so the review sees the PR's
+    # head rather than main (#227). --branch <head> would collide with the
+    # ship run's registered worktree for that branch, and --from <sha> needs a
+    # commit archon's clone may not have fetched.
     (
       cd "$repo_dir" || exit 1
       mkdir -p .archon-logs
       local logf=".archon-logs/pr-review-${pr_num}-$(date +%Y%m%d-%H%M%S).log"
-      CLAUDECODE=0 nohup archon workflow run archon-review --input "scope=${pr_num}" "review PR #${pr_num}" \
+      CLAUDECODE=0 nohup archon workflow run archon-review --base "$head_ref" --input "scope=${pr_num}" "review PR #${pr_num}" \
         >"$logf" 2>&1 &
       disown
       echo "$!:$sha" > "$STATE_DIR/${project}-${pr_num}.pid"
@@ -214,7 +223,7 @@ process_project() {
     rm -f /tmp/.pr-review-fire.$$
     if [ "$fire_rc" -eq 0 ] && echo "$fire_out" | grep -q '^LAUNCHED '; then
       fired=$((fired + 1))
-      log "$project: PR #$pr_num — fired archon-review at SHA ${sha:0:10} (${fire_out#LAUNCHED })"
+      log "$project: PR #$pr_num — fired archon-review at SHA ${sha:0:10} from ${head_ref} (${fire_out#LAUNCHED })"
     else
       log "$project: PR #$pr_num — failed to launch archon: $fire_out"
     fi
@@ -223,7 +232,10 @@ process_project() {
   log "$project: $n_open open, $n_nondraft non-draft, $((n_nondraft - n_trusted)) not-for-archon (untrusted or merge-only author), $untrusted_comments untrusted-comments, $reviewed reviewed-at-this-SHA, $in_flight in-flight, $skipped_running skipped-running, $held on-hold, $ship_merging ship-merging, $fired fired"
 }
 
+# close_merged_reviews runs first: a PR merged by any route since the last tick
+# leaves its review spending budget or parked waiting to page the owner.
 for PROJECT in "${PROJECTS[@]}"; do
+  close_merged_reviews "$BASE_DIR/$PROJECT" "$PROJECT"
   reap_finished "$PROJECT"
   process_project "$PROJECT"
 done

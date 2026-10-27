@@ -118,6 +118,8 @@ if [ "$MODE" = tick ]; then
 fi
 # shellcheck source=lib/archon-active-runs.sh
 source "$SCRIPT_DIR/lib/archon-active-runs.sh"
+# shellcheck source=lib/merged-reviews.sh
+source "$SCRIPT_DIR/lib/merged-reviews.sh"
 # --trim touches no run, so it needs no snapshot (and no archon CLI call).
 [ "$MODE" = tick ] && archon_runs_snapshot
 # shellcheck source=lib/ci-skip.sh
@@ -2988,10 +2990,12 @@ check_lachesis_next_issue() {
 # it has waited a day without that happening. When it was green but the resume
 # failed, pr-maintenance's ci-resume-failed-<run_id> marker says so, and the
 # alert carries that instead of archon's stale "re-run the failing check".
+# A parked review whose PR has merged is abandoned instead: nothing is left to
+# decide, and pr-review-cron.sh's own sweep may not have reached it yet (#227).
 # ----------------------------------------------------------------------------
 check_parked_runs() {
   local marker_dir="$ARCHON_PARKED_MARKER_DIR"
-  local run_id class wf origin msg deadline step need seen="" ack marker id overdue
+  local run_id class wf origin msg deadline step need seen="" ack marker id overdue pr
   # A failed listing has no paused rows and would read as a quiet pipeline —
   # never let that delete markers or look like a recovery.
   if ! archon_runs_known; then
@@ -3001,6 +3005,11 @@ check_parked_runs() {
   while IFS=$'\t' read -r run_id class wf origin msg deadline step need; do
     [ -n "$run_id" ] || continue
     seen="$seen $run_id"
+    if [[ "$wf" =~ $ARCHON_REVIEW_WORKFLOWS_RE ]] && pr=$(review_pr_merged "${origin##*/}" "$msg"); then
+      log "parked-runs: $wf $run_id reviews PR #$pr, which has merged — closing it instead of alerting"
+      abandon_reviews "$origin" "${origin##*/}" "$pr"
+      continue
+    fi
     # `wait` and `resolved` are both the engine's own to resume, so a nudge is
     # the recovery; a `gate` is owed an answer cron must never give, and an
     # `attention` pause an action (a CI attention pause here has stayed red a

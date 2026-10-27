@@ -19,6 +19,7 @@
 #   if archon_run_active "$repo_dir" "$project" '^archon-ship$' "#42\\b"; then ...
 #   msg=$(archon_run_active_msg "$repo_dir" "$project" '^archon-ship$') # first match's user_message
 #   ids=$(archon_run_active_ids "$repo_dir" "$project" '^archon-review$' "#42\\b") # every match's run_id
+#   msgs=$(archon_run_active_msgs "$repo_dir" "$project" '^archon-review$') # every match's user_message
 #   if archon_worktree_active "$wt" "$(readlink -f "$wt")"; then ...   # a run owns this worktree
 #   archon_worktrees_known || ...       # false when some active run's worktree is unknown
 #   archon_runs_known || ...            # false when this tick's snapshot failed
@@ -266,6 +267,12 @@ archon_run_active_msg() {
 # Prints the run_id of every matching run, one per line.
 archon_run_active_ids() {
   _archon_runs_match 5 0 "$@"
+}
+
+# archon_run_active_msgs <repo_dir> <project> <name_regex> [msg_regex]
+# Prints the user_message of every matching run, one per line.
+archon_run_active_msgs() {
+  _archon_runs_match 4 0 "$@"
 }
 
 # archon_run_active — same match, no output.
