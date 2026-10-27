@@ -74,6 +74,7 @@ if [ "$1 $2" = "pr view" ]; then
     *"--json state"*)
       state=OPEN
       case " $GH_MERGED_PRS " in *" $3 "*) state=MERGED ;; esac
+      case " $GH_CLOSED_PRS " in *" $3 "*) state=CLOSED ;; esac
       jqf="" prev=""
       for a in "$@"; do [ "$prev" = "--jq" ] && jqf="$a"; prev="$a"; done
       printf '{"state":"%s"}' "$state" | jq -r "${jqf:-.}" ;;
@@ -87,6 +88,7 @@ STUB
     cat > "$STUB_BIN/archon" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$STUB_ARCHON_ARGV"
+[ -n "$ARCHON_ABANDON_FAILS" ] && [ "$1 $2" = "workflow abandon" ] && exit 1
 if [ "$1 $2" = "workflow runs" ]; then
   case "$*" in
     *"--status paused"*) [ -n "$ARCHON_PAUSED_FAILS" ] && { printf '{"ok": false, "error": "db locked"}'; exit 1; }
@@ -308,16 +310,18 @@ review_fired() { # review_fired <pr-number>
     [[ "$output" == *"PR #300 — fired archon-review at SHA abc300 from feat/x-300"* ]]
 }
 
-@test "review: a review whose PR has merged is abandoned, one on an open PR is left" {
+@test "review: a review whose PR has merged is abandoned, one on an open or unmerged closed PR is left" {
     export GH_PR_LIST="[]"
     export GH_MERGED_PRS="1756"
-    export ARCHON_RUNNING_RUNS="[$(run_json rev-1756 archon-review 'review PR #1756'), $(run_json rev-300 archon-review 'review PR #300'), $(run_json ship-1756 archon-ship 'fix #1756')]"
+    export GH_CLOSED_PRS="400"
+    export ARCHON_RUNNING_RUNS="[$(run_json rev-1756 archon-review 'review PR #1756'), $(run_json rev-300 archon-review 'review PR #300'), $(run_json rev-400 archon-review 'review PR #400'), $(run_json ship-1756 archon-ship 'fix #1756')]"
     run "$CRON_DIR/pr-review-cron.sh"
     [ "$status" -eq 0 ]
     [[ "$output" == *"proj: PR #1756 has merged while a review of it is running or parked — closing the review"* ]]
     [[ "$output" == *"proj: PR #1756 — abandoned review run rev-1756 on the merged PR"* ]]
     grep -qE '^workflow abandon rev-1756 --cwd ' "$STUB_ARCHON_ARGV"
-    ! grep -qE '^workflow abandon (rev-300|ship-1756)( |$)' "$STUB_ARCHON_ARGV"
+    ! grep -qE '^workflow abandon (rev-300|rev-400|ship-1756)( |$)' "$STUB_ARCHON_ARGV"
+    [ "$(grep -c '^pr view 400 ' "$STUB_GH_ARGV")" -eq 1 ]
     # GitHub is asked about review runs only.
     [ "$(grep -c '^pr view 1756 ' "$STUB_GH_ARGV")" -eq 1 ]
 }
@@ -344,6 +348,16 @@ review_fired() { # review_fired <pr-number>
     merge_argv 300 | grep -v -- '--auto' | grep -q .
     [[ "$output" == *"proj: PR #300 — abandoned review run rev-300 on the merged PR"* ]]
     grep -qE '^workflow abandon rev-300 --cwd ' "$STUB_ARCHON_ARGV"
+}
+
+@test "maintenance: a review that cannot be abandoned is logged and the next PR still merges" {
+    export GH_PR_LIST="[$(pr 300 false CLEAN '[]'), $(pr 301 false CLEAN '[]')]"
+    export ARCHON_ABANDON_FAILS=1
+    export ARCHON_RUNNING_RUNS="[$(run_json rev-300 archon-review 'review PR #300')]"
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"proj: PR #300 — could not abandon review run rev-300 on the merged PR"* ]]
+    gh_called '^pr merge 301 '
 }
 
 @test "maintenance: a merge on an incomplete run snapshot abandons what it sees and says so" {

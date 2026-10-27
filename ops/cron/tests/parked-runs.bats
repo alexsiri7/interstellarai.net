@@ -35,7 +35,7 @@ setup() {
     source "$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/lib/merged-reviews.sh"
     export ABANDONED="$STATE_DIR/abandoned"
     review_pr_merged() { [ -n "${MERGED_PR:-}" ] && [[ "$2" == *"#$MERGED_PR"* ]] && echo "$MERGED_PR"; }
-    abandon_reviews() { printf '%s\n' "$*" >> "$ABANDONED"; }
+    abandon_reviews() { printf '%s\n' "$*" >> "$ABANDONED"; [ -z "${ABANDON_FAILS:-}" ]; }
 
     SCRIPT_FILE="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/pipeline-health-cron.sh"
     # shellcheck disable=SC1090
@@ -70,6 +70,17 @@ review_row() { # review_row <run_id> <class> <user_message> — a parked archon-
     [ ! -e "$NOTIFIED" ]
     [ ! -e "$ARCHON_ARGV" ]
     [ ! -e "$PARKED_DIR/alerted-2d79085e-aaaa" ]
+}
+
+@test "a parked review of a merged PR that cannot be closed is alerted once" {
+    MERGED_PR=1756 ABANDON_FAILS=1
+    review_row 2d79085e-aaaa attention "review PR #1756"
+    check_parked_runs
+    check_parked_runs
+
+    [ "$(wc -l < "$ABANDONED")" -eq 2 ]
+    [ "$(wc -l < "$NOTIFIED")" -eq 1 ]
+    grep -q 'archon-review (attention at cycle.attend__ask) — review PR #1756' "$NOTIFIED"
 }
 
 @test "a parked review of an open PR is alerted as before" {

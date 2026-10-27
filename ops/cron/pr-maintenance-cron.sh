@@ -583,7 +583,7 @@ for PROJECT in "${PROJECTS[@]}"; do
          --subject "$MERGE_SUBJECT" --body "$MERGE_BODY" 2>&1 \
        || gh pr merge "$PR" --squash --delete-branch \
             --subject "$MERGE_SUBJECT" --body "$MERGE_BODY" 2>&1; then
-      abandon_reviews "$REPO_DIR" "$PROJECT" "$PR"
+      abandon_reviews "$REPO_DIR" "$PROJECT" "$PR" || :
     else
       log "$PROJECT: PR #$PR — could not merge, skipping"
     fi

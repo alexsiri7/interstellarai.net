@@ -2992,6 +2992,7 @@ check_lachesis_next_issue() {
 # alert carries that instead of archon's stale "re-run the failing check".
 # A parked review whose PR has merged is abandoned instead: nothing is left to
 # decide, and pr-review-cron.sh's own sweep may not have reached it yet (#227).
+# When that abandon fails, the run is resumed or alerted like any other.
 # ----------------------------------------------------------------------------
 check_parked_runs() {
   local marker_dir="$ARCHON_PARKED_MARKER_DIR"
@@ -3007,8 +3008,8 @@ check_parked_runs() {
     seen="$seen $run_id"
     if [[ "$wf" =~ $ARCHON_REVIEW_WORKFLOWS_RE ]] && pr=$(review_pr_merged "${origin##*/}" "$msg"); then
       log "parked-runs: $wf $run_id reviews PR #$pr, which has merged — closing it instead of alerting"
-      abandon_reviews "$origin" "${origin##*/}" "$pr"
-      continue
+      abandon_reviews "$origin" "${origin##*/}" "$pr" && continue
+      log "parked-runs: could not close $wf $run_id — handling it as any other parked run"
     fi
     # `wait` and `resolved` are both the engine's own to resume, so a nudge is
     # the recovery; a `gate` is owed an answer cron must never give, and an

@@ -64,6 +64,10 @@ MAINTENANCE_STATE_DIR="$HOME/.archon/state/pr-maintenance"
 LOG_PREFIX="[pr-review]"
 mkdir -p "$STATE_DIR"
 
+# The review workflow set unanchored, for matching inside a command line.
+review_workflows=${ARCHON_REVIEW_WORKFLOWS_RE#^}
+review_workflows=${review_workflows%$}
+
 PROJECTS=("${DEFAULT_PROJECTS[@]}")
 [ $# -gt 0 ] && PROJECTS=("$@")
 
@@ -183,14 +187,14 @@ process_project() {
     # Dedupe against a live archon process for THIS repo + PR. Anchor on the
     # project name inside the command line (cd "$repo_dir" puts the project
     # slug in the process's cwd/command) and on "#$pr_num" to be precise.
-    if pgrep -fa "archon workflow run archon-(review|smart-pr-review)" 2>/dev/null \
+    if pgrep -fa "archon workflow run $review_workflows" 2>/dev/null \
          | grep -E "(^|[[:space:]=/])$project([[:space:]/]|\$)" \
          | grep -qE "#${pr_num}\\b"; then
       skipped_running=$((skipped_running + 1))
       continue
     fi
     # Parked-run guard: DB-active run (running or paused) for this repo + PR.
-    if archon_run_active "$repo_dir" "$project" '^archon-(review|smart-pr-review)$' "#${pr_num}([^0-9]|$)"; then
+    if archon_run_active "$repo_dir" "$project" "$ARCHON_REVIEW_WORKFLOWS_RE" "#${pr_num}([^0-9]|$)"; then
       skipped_running=$((skipped_running + 1))
       continue
     fi

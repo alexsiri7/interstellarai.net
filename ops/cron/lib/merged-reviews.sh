@@ -26,9 +26,10 @@ ARCHON_REVIEW_WORKFLOWS_RE='^archon-(review|smart-pr-review)$'
 # 5-10 minutes of model budget reviewing a merged PR (2026-09-10: reli #1438,
 # un-reminder #307, each killed by hand). The merge has already happened, so a
 # partial snapshot still abandons every review it can see, and says so: an
-# empty match then does not mean no review is running.
+# empty match then does not mean no review is running. Returns 1 when any
+# matched run could not be abandoned.
 abandon_reviews() {
-  local repo_dir="$1" project="$2" pr="$3" id
+  local repo_dir="$1" project="$2" pr="$3" id rc=0
   if ! archon_runs_known; then
     log "$project: PR #$pr — no complete archon run snapshot this tick, a review run on the merged PR may be left running"
   fi
@@ -39,8 +40,10 @@ abandon_reviews() {
       log "$project: PR #$pr — abandoned review run $id on the merged PR"
     else
       log "$project: PR #$pr — could not abandon review run $id on the merged PR"
+      rc=1
     fi
   done < <(archon_run_active_ids "$repo_dir" "$project" "$ARCHON_REVIEW_WORKFLOWS_RE" "#${pr}([^0-9]|$)")
+  return "$rc"
 }
 
 # review_pr_merged <project> <user_message> — print the PR number the review's
@@ -66,7 +69,7 @@ close_merged_reviews() {
     case "$done_prs" in *" $pr "*) continue ;; esac
     done_prs="$done_prs$pr "
     log "$project: PR #$pr has merged while a review of it is running or parked — closing the review"
-    abandon_reviews "$repo_dir" "$project" "$pr"
+    abandon_reviews "$repo_dir" "$project" "$pr" || :
   done < <(archon_run_active_msgs "$repo_dir" "$project" "$ARCHON_REVIEW_WORKFLOWS_RE" | sort -u)
   return 0
 }
