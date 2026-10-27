@@ -310,6 +310,21 @@ review_fired() { # review_fired <pr-number>
     [[ "$output" == *"PR #300 — fired archon-review at SHA abc300 from feat/x-300"* ]]
 }
 
+@test "review: a review already running as a process for the PR is not fired again" {
+    export GH_PR_LIST="[$(pr 300 false CLEAN '[]'), $(pr 301 false CLEAN '[]')]"
+    # A review launched moments ago: a live process, not yet a DB row.
+    bash -c 'exec -a "archon workflow run archon-review --base feat/x-300 --cwd $0 review PR #300" sleep 30' \
+        "$BASE_DIR/proj" &
+    local review_pid=$!
+    for _ in $(seq 1 100); do pgrep -f 'review PR #300' >/dev/null && break; sleep 0.05; done
+    run "$CRON_DIR/pr-review-cron.sh"
+    kill "$review_pid"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"1 skipped-running, 0 on-hold, 0 ship-merging, 1 fired"* ]]
+    review_fired 301
+    run ! grep -q 'review PR #300' "$STUB_ARCHON_ARGV"
+}
+
 @test "review: a review whose PR has merged is abandoned, one on an open or unmerged closed PR is left" {
     export GH_PR_LIST="[]"
     export GH_MERGED_PRS="1756"

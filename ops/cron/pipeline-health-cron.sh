@@ -3008,7 +3008,7 @@ check_parked_runs() {
     seen="$seen $run_id"
     if [[ "$wf" =~ $ARCHON_REVIEW_WORKFLOWS_RE ]] && pr=$(review_pr_merged "${origin##*/}" "$msg"); then
       log "parked-runs: $wf $run_id reviews PR #$pr, which has merged — closing it instead of alerting"
-      abandon_reviews "$origin" "${origin##*/}" "$pr" && continue
+      abandon_review "${origin##*/}" "$pr" "$run_id" && continue
       log "parked-runs: could not close $wf $run_id — handling it as any other parked run"
     fi
     # `wait` and `resolved` are both the engine's own to resume, so a nudge is

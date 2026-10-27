@@ -30,12 +30,13 @@ setup() {
     archon_parked_runs() { cat "$PARKED_ROWS"; }
 
     # The real workflow-name regex; GitHub and the abandon are stubbed. A PR
-    # number in $MERGED_PR reads as merged.
+    # number in $MERGED_PR reads as merged; the run id in $ABANDON_FAILS cannot
+    # be abandoned.
     # shellcheck disable=SC1091
     source "$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/lib/merged-reviews.sh"
     export ABANDONED="$STATE_DIR/abandoned"
     review_pr_merged() { [ -n "${MERGED_PR:-}" ] && [[ "$2" == *"#$MERGED_PR"* ]] && echo "$MERGED_PR"; }
-    abandon_reviews() { printf '%s\n' "$*" >> "$ABANDONED"; [ -z "${ABANDON_FAILS:-}" ]; }
+    abandon_review() { printf '%s\n' "$*" >> "$ABANDONED"; [ "$3" != "${ABANDON_FAILS:-}" ]; }
 
     SCRIPT_FILE="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/pipeline-health-cron.sh"
     # shellcheck disable=SC1090
@@ -66,14 +67,15 @@ review_row() { # review_row <run_id> <class> <user_message> — a parked archon-
     review_row 2d79085e-bbbb wait "review PR #1756"
     check_parked_runs
 
-    grep -qx '/mnt/ext-fast/reli reli 1756' "$ABANDONED"
+    grep -qx 'reli 1756 2d79085e-aaaa' "$ABANDONED"
+    grep -qx 'reli 1756 2d79085e-bbbb' "$ABANDONED"
     [ ! -e "$NOTIFIED" ]
     [ ! -e "$ARCHON_ARGV" ]
     [ ! -e "$PARKED_DIR/alerted-2d79085e-aaaa" ]
 }
 
 @test "a parked review of a merged PR that cannot be closed is alerted once" {
-    MERGED_PR=1756 ABANDON_FAILS=1
+    MERGED_PR=1756 ABANDON_FAILS=2d79085e-aaaa
     review_row 2d79085e-aaaa attention "review PR #1756"
     check_parked_runs
     check_parked_runs
@@ -81,6 +83,18 @@ review_row() { # review_row <run_id> <class> <user_message> — a parked archon-
     [ "$(wc -l < "$ABANDONED")" -eq 2 ]
     [ "$(wc -l < "$NOTIFIED")" -eq 1 ]
     grep -q 'archon-review (attention at cycle.attend__ask) — review PR #1756' "$NOTIFIED"
+}
+
+@test "of two parked reviews of one merged PR, only the one that cannot be closed is alerted" {
+    MERGED_PR=1756 ABANDON_FAILS=2d79085e-bbbb
+    review_row 2d79085e-aaaa attention "review PR #1756"
+    review_row 2d79085e-bbbb attention "review PR #1756"
+    check_parked_runs
+
+    [ ! -e "$PARKED_DIR/alerted-2d79085e-aaaa" ]
+    [ -e "$PARKED_DIR/alerted-2d79085e-bbbb" ]
+    [ "$(wc -l < "$NOTIFIED")" -eq 1 ]
+    grep -q 'run 2d79085e-bbbb' "$NOTIFIED"
 }
 
 @test "a parked review of an open PR is alerted as before" {

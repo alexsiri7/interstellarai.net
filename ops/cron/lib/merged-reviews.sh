@@ -12,6 +12,7 @@
 #   source "$SCRIPT_DIR/lib/archon-active-runs.sh"; archon_runs_snapshot
 #   source "$SCRIPT_DIR/lib/merged-reviews.sh"   # the caller defines log()
 #   abandon_reviews "$repo_dir" "$project" 42      # after merging PR #42
+#   abandon_review "$project" 42 "$run_id"         # one run of merged PR #42
 #   pr=$(review_pr_merged "$project" "$user_message") && ...
 #   close_merged_reviews "$repo_dir" "$project"    # sweep this tick's snapshot
 
@@ -35,15 +36,22 @@ abandon_reviews() {
   fi
   while read -r id; do
     [ -n "$id" ] || continue
-    if CLAUDECODE=0 ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING=1 \
-        archon workflow abandon "$id" --cwd "$ARCHON_RUNS_CWD" >/dev/null 2>&1; then
-      log "$project: PR #$pr — abandoned review run $id on the merged PR"
-    else
-      log "$project: PR #$pr — could not abandon review run $id on the merged PR"
-      rc=1
-    fi
+    abandon_review "$project" "$pr" "$id" || rc=1
   done < <(archon_run_active_ids "$repo_dir" "$project" "$ARCHON_REVIEW_WORKFLOWS_RE" "#${pr}([^0-9]|$)")
   return "$rc"
+}
+
+# abandon_review <project> <pr> <run_id> — cancel the one review run <run_id>
+# of merged PR <pr>. Returns 1 when it could not be abandoned.
+abandon_review() {
+  local project="$1" pr="$2" id="$3"
+  if CLAUDECODE=0 ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING=1 \
+      archon workflow abandon "$id" --cwd "$ARCHON_RUNS_CWD" >/dev/null 2>&1; then
+    log "$project: PR #$pr — abandoned review run $id on the merged PR"
+  else
+    log "$project: PR #$pr — could not abandon review run $id on the merged PR"
+    return 1
+  fi
 }
 
 # review_pr_merged <project> <user_message> — print the PR number the review's
