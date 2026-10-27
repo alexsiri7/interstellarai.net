@@ -124,7 +124,7 @@ correction_launched_for() {
 correction_prompt() {
   printf '%s' "PR #$1 on alexsiri7/$PROJECT is green, but its latest archon review report says ready: false, action: correct. \
 Read that report: the newest PR comment containing $REVIEW_REPORT_MARKER. Check out the PR's branch and fix every blocking finding it leaves open, or answer it in a PR comment with the evidence that it is not a finding. Never resolve a finding by weakening, skipping or deleting tests or assertions. \
-Run the checks that cover what you changed, commit, and push to the PR's branch. Never merge the PR, enable auto-merge, or mark it ready: pr-review-cron re-reviews the new head, and pr-maintenance-cron merges the PR once it is CLEAN. Never write to, migrate or delete production data."
+Run the checks that cover what you changed, commit, and push to the PR's branch. Never merge the PR, enable auto-merge, or mark it ready: pr-review-cron re-reviews the new head. Never write to, migrate or delete production data."
 }
 
 # rebase_requested_for <number> <headRefOid> — true (with a log line) when
