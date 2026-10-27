@@ -31,7 +31,8 @@
 #
 # Issues filed by a bridge (a service that files issues under the owner's
 # token with a caller's text: Sentry, the feedback workers, Muse & Mingle's
-# public forms) need the owner's `archon:approved` label; see bridge_source.
+# public forms) need lib/screen.sh's restatement (`archon:auto-approved`) or the
+# owner's `archon:approved` label; see bridge_source.
 #
 # Untrusted items get one log line and one ntfy per (project, kind, number),
 # marker in $TRUST_STATE_DIR (default ~/.archon/state/untrusted). Everything
@@ -147,7 +148,8 @@ trust_notify_once() {
 
 # Bridges: services that file issues under the owner's token (so an author
 # check passes them) with text chosen by whoever called them. An issue from one
-# is untrusted until the owner adds $TRUST_APPROVED_LABEL. One jq expression,
+# is untrusted until lib/screen.sh restates it ($TRUST_SCREENED_LABEL) or the
+# owner adds $TRUST_APPROVED_LABEL. One jq expression,
 # evaluated per issue, names the bridge or yields "". Detection keys on what the
 # bridge itself sets and the caller cannot remove: its labels, its title
 # prefix, its body marker, the Sentry App as author.
@@ -170,7 +172,9 @@ trust_notify_once() {
 # venue-request (musenmingle contact form) and content-report (annie) are
 # human-only (lib/human-labels.sh): operational requests, never built.
 TRUST_APPROVED_LABEL="${TRUST_APPROVED_LABEL:-archon:approved}"
-# Set by lib/screen.sh: passed automated screening / held for the owner.
+# archon:auto-approved: set by lib/screen.sh on an issue it restated.
+# needs-owner-review: the unsafe-change gate's PR hold (pr-maintenance); on an
+# issue only a legacy hold from before screening stopped holding.
 TRUST_SCREENED_LABEL="${TRUST_SCREENED_LABEL:-archon:auto-approved}"
 TRUST_HELD_LABEL="${TRUST_HELD_LABEL:-needs-owner-review}"
 # shellcheck disable=SC2016  # jq program, not shell
@@ -234,8 +238,8 @@ trust_filter_issues() {
       trust_notify_once "$project" issue "$num" \
         "External issue #$num on $project by ${author:-unknown} — not touched by the factory. https://github.com/$TRUST_OWNER/$project/issues/$num"
     fi
-    # A bridge issue not yet screened (or held by screening) is silent here:
-    # lib/screen.sh screens it and tells the owner when it holds one.
+    # A bridge issue not yet screened is silent here: lib/screen.sh screens
+    # it (restates or closes it; it never holds one for the owner).
   done < <(_trust_rows "$json")
   _trust_keep "$keep" "$json"
 }

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # screen-bridge-issues.sh — dry run of the bridge-issue screening (lib/screen.sh)
 # over past issues. Writes nothing to GitHub: prints one line per bridge-filed
-# issue with what screening would decide today, then a summary.
+# issue with what screening would decide today (restate, close-no-action,
+# close-injection, error), then a summary.
 #
 # Usage:
 #   ops/cron/screen-bridge-issues.sh [--days N] [project ...]   # default 30 days, all projects
@@ -39,7 +40,7 @@ for project in "${PROJECTS[@]}"; do
       decision="human-only (never built)"
     else
       issue=$(gh issue view "$num" --repo "$TRUST_OWNER/$project" --json number,title,body 2>/dev/null) || continue
-      decision=$(screen_issue_text "$project" "$source" "$(_screen_text "$issue")")
+      decision=$(screen_issue_text "$project" "$source" "$(_screen_text "$issue")" | head -1)
     fi
     title=$(jq -r --argjson n "$num" '.[] | select(.number == $n) | .title[0:70]' <<<"$list")
     printf '%s #%s [%s] %s — %s\n' "$project" "$num" "$source" "$decision" "$title"

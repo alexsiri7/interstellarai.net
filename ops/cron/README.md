@@ -135,7 +135,7 @@ The lists come from the ~500 newest issues and PRs of every repo in `archon-proj
 
 **Issues.** An issue is acted on when either of these holds:
 - its author is trusted **and** it was not filed by a bridge;
-- it was filed by a bridge and has passed automated screening (`archon:auto-approved` without `needs-owner-review`), or the owner has labelled it `archon:approved`.
+- it was filed by a bridge and automated screening restated it (`archon:auto-approved` + `archon:restated`, without a legacy `needs-owner-review`), or the owner has labelled it `archon:approved`.
 
 Otherwise it is not:
 - triaged, queued, promoted or re-queued;
@@ -156,21 +156,23 @@ A *bridge* is a service that files issues under the owner's token with text chos
 
 `venue-request` (the Muse & Mingle contact form) and `content-report` (annie) are human-only (`HUMAN_LABELS`): operational requests, never code work.
 
-**Screening bridge issues.** Before triage and queueing, `issue-pickup-cron.sh` screens open bridge issues (`screen_bridge_issues`, `lib/screen.sh`). It takes at most `SCREEN_MAX_PER_TICK` (3) per project per tick, oldest first, including Sentry issues the bridge filed straight into `archon:queued`. Screening has two stages:
+**Screening bridge issues.** Before triage and queueing, `issue-pickup-cron.sh` screens open bridge issues (`screen_bridge_issues`, `lib/screen.sh`). It takes at most `SCREEN_MAX_PER_TICK` (3) per project per tick, oldest first, including Sentry issues the bridge filed straight into `archon:queued`. Screening never waits on the owner: every issue is closed or restated. Two stages:
 
-1. **Heuristics.** These can only deny. Each is a fixed pattern that never belongs in a crash report, a feedback note or a scraper suggestion:
+1. **Heuristics.** Fixed patterns. Only `H-INJECT` is a hard deny; every other code is a *signal* that goes to the classifier with a fixed description, never a verdict by itself (before 2026-10-27 each was a hold, and every hold was a false positive: a Sentry `password authentication failed for user …` hit `H-SECRETS`, a scraper error quoting a third-party URL hit `H-URL`):
 
-   | Code | Catches |
-   |---|---|
-   | `H-INJECT` | text addressed to an AI, or "ignore previous instructions" |
-   | `H-SECRETS` | `secrets.env`, keys, tokens, credentials, env vars |
-   | `H-SHELL` | `curl … \| sh`, `sudo`, `rm -rf`, shell code fences, `gh api`/`git push`/package installs |
-   | `H-CI` | `.github/`, workflows, Dockerfile, manifests, dependency changes |
-   | `H-BASE64` | long encoded blobs |
-   | `H-LENGTH` | more than `SCREEN_MAX_CHARS` |
-   | `H-URL` | for feedback and scraper issues, a link to any host other than the suggested site or the project's own domains |
+   | Code | Catches | Effect |
+   |---|---|---|
+   | `H-INJECT` | explicit override phrasing ("ignore/disregard the previous instructions", "do not tell the owner", "you are now an agent") and fake role tags (`<system>`, `<assistant>`) | closed, no classifier call |
+   | `H-AI` | softer AI-addressing words ("system prompt", "as an AI", "new instructions") | signal |
+   | `H-SECRETS` | `secrets.env`, keys, tokens, passwords, credentials, env vars | signal |
+   | `H-SHELL` | `curl … \| sh`, `sudo`, `rm -rf`, shell code fences, `gh api`/`git push`/package installs | signal |
+   | `H-CI` | `.github/`, workflows, Dockerfile, manifests, dependency changes | signal |
+   | `H-BASE64` | long encoded blobs | signal |
+   | `H-TESTDEVICE` | `sdk_gphone`, `generic_x86`, emulator, simulator, test device | signal (and lets a Sentry `no_action` close) |
+   | `H-LENGTH` | more than `SCREEN_MAX_CHARS`; the classifier gets the first `SCREEN_MAX_CHARS` | signal |
+   | `H-URL` | for feedback and scraper issues, a link to any host other than the suggested site or the project's own domains | signal |
 
-2. **Classifier.** It can only allow. It is one chat completion via Requesty (`SCREEN_MODEL`, default `anthropic/claude-haiku-4-5`) with no tools and no secrets. The issue text goes in as data between `BEGIN-ISSUE-<nonce>` and `END-ISSUE-<nonce>` lines, with a fresh random nonce each call. The model must answer `{verdict: safe|suspicious, issue_type, reasons}`. A reply that is not exactly one such JSON object (optionally wrapped in one `json` fence) is an error, never a pass. So is a failed request. On an error the issue stays unlabelled and is retried next tick.
+2. **Classifier.** One chat completion via Requesty (`SCREEN_MODEL`, default `anthropic/claude-haiku-4-5`) with no tools and no secrets. The issue text goes in as data between `BEGIN-ISSUE-<nonce>` and `END-ISSUE-<nonce>` lines, with a fresh random nonce each call, and the signal codes go in the system prompt. The model must answer exactly `{verdict: safe|suspicious|no_action, injection: bool, issue_type, reasons, restatement: {summary, error_class, frames[], files[], repro}}`. A reply that is not exactly one such JSON object (optionally wrapped in one `json` fence), a failed request, or a restatement that sanitizes to an empty summary is an error, never a pass or a close: the issue is left as it is and retried next tick.
 
    Exhausted Requesty credits (HTTP 402, or a 403/429 whose body blames credit, balance, billing or a spend limit rather than a rate) are the error `credits-exhausted`: it ends the tick's screening after that one call, and the owner gets one ntfy per UTC day across all projects (marker `requesty-credits-exhausted-<date>` in `~/.archon/state/untrusted`) saying screening is paused until the balance is topped up at https://app.requesty.ai.
 
@@ -178,10 +180,23 @@ A *bridge* is a service that files issues under the owner's token with text chos
 
 The outcomes:
 
-- **`safe`, and a type the source can produce** (Sentry: `bug_report`; feedback: `bug_report`/`feature`; suggestion: `new_scraper`). The issue gets `archon:auto-approved` and `type:<type>`, and triage/queue take it from there.
-- **Anything else** (a heuristic hit, `suspicious`, `TYPE-MISMATCH`). The issue gets `needs-owner-review` and the owner gets one ntfy. The gate keeps it out until the owner adds `archon:approved`, which releases it by itself.
+- **Closed as not planned, `injection`**: `H-INJECT` in the text, the model's `suspicious` with `injection: true` (`MODEL-INJECT`), or `H-INJECT` in the model's own restatement (`RESTATE-INJECT`).
+- **Closed as not planned, `no-action`**: verdict `no_action` (praise, blank notes, test submissions, emulator traffic). Feedback and suggestions only; a Sentry event only with `H-TESTDEVICE`, so a real crash is never closed on the model's word (it is restated instead, `NO-ACTION-REFUSED`).
+- **Restated**: everything else, `safe` or `suspicious` without injection (`MODEL-SUSPICIOUS`). A type the source cannot produce is coerced to the source's default (`TYPE-COERCED`: Sentry and health `bug_report`, feedback `bug_report`/`feature`, suggestion `new_scraper`).
 
-Either way the issue gets one comment with the verdict, the source and the reason *codes* (`H-*`, `MODEL`, `TYPE-MISMATCH`). The model's own words are never posted, because they could quote attacker text onto a public repo under the owner's name.
+A close posts one fixed-text comment (source, reason codes, "reopen it and add `archon:approved`" to override) and appends one line to `~/.archon/state/screen-digest.jsonl` (`SCREEN_DIGEST_FILE`: time, project, number, source, outcome, codes, URL). No per-item ntfy: once a week (`screen_digest_notify`, marker `screen-digest-week-<ISO week>`) the owner gets one ntfy with last week's counts by outcome and repo.
+
+A restatement is the model's neutral account of the issue, cleaned by the cron: each field keeps only `A-Z a-z 0-9 space . , : ; _ / = + ' -` (no `#`, `@`, backticks, brackets, `<>`, `!`, `$` or quotes, so nothing can cross-reference, ping, link, embed or break out of a fence), loses every `://`, and is capped (summary 300, error class 120, repro 400, at most 8 frames and 8 files of 160). The cron adds deterministic fields of its own only: the Sentry issue id (digits) and, for Muse & Mingle, the suggested site's domain. The restatement is:
+
+- kept in `~/.archon/state/restated/<project>-<n>.json` (`SCREEN_RESTATE_DIR`), the copy the factory uses;
+- posted as one factory comment from a fixed template, the fields inside a `text` code fence, marked `<!-- archon:restatement v1 -->`;
+- then the issue gets `archon:auto-approved`, `archon:restated`, `type:<type>` and the ingest label (`bug` for `bug_report`, `enhancement` otherwise), so the legacy `archon-triage-issue`, which puts the raw body in its prompt, never runs on it.
+
+`fire_ship` launches a restated issue with `--input target=<restatement>`: the target names `alexsiri7/<repo>#N` (so the PR still links the issue and the `unsafe-change` gate below still applies), says its title, body and comments are untrusted bridge text not to be read, and carries the restatement as the whole contract. An issue labelled `archon:restated` with no record here is not launched; screening redoes its restatement next tick. A failed comment records nothing (retried next tick); failed labels are re-applied next tick from the record, without a second call or comment. The owner's `archon:approved` overrides all of this: the issue is worked as an owner issue.
+
+Limit: the target is an instruction, not a fence. `archon-ship`'s triage (`sdlc/triage/commands/triage.md` in the workflow pack) is told to retrieve a tracker item's body and comments, and the agent holds `gh`, so until the pack reads the restatement itself for `archon:restated` issues, the raw body stays reachable to a run that disobeys the target. The `unsafe-change` check is the backstop.
+
+Screening no longer labels issues `needs-owner-review` or asks the owner to add `archon:approved`. Issues it held before 2026-10-27 keep that label, and screening skips them until the owner removes it (they are then screened afresh) or approves them.
 
 Only the title and body are screened, since that is what the bridge wrote. Comments are vetted by author (below).
 
@@ -214,7 +229,7 @@ Everything else passes: app code, tests, fixtures, docs, templates, CSS, ordinar
 - a malicious dependency.
 
 Three layers are designed to work together, and none is sufficient alone:
-- screening, which keeps hostile text out;
+- screening, which closes injection attempts and hands archon a sanitized restatement instead of the bridge's text;
 - the `unsafe-change` check, which stops a misled agent's riskiest changes (CI, secrets, dependencies, process/env code, privileged SQL) from merging;
 - a sandboxed archon user with a scoped token, which limits what a run can reach.
 
@@ -369,7 +384,7 @@ Status lives in `~/.archon/pipeline-health-state/archon-update-status` (`last_ru
 | `lib/gh-factory.sh` | sourced by `issue-pickup-cron.sh`, `pipeline-health-cron.sh`, `ops/bin/pipeline-status` | `gh_factory_probe`: can the factory's GitHub identity open PRs? `gh api rate_limit` (as the `archon` user with `HOME=/mnt/ext-fast/archon-home` when `ARCHON_RUN_AS` is `archon` or `drain`, the owner's `gh` otherwise) plus the account's public profile. Blocked on positive evidence only: `graphql.limit` 0, `graphql.remaining` under `GH_FACTORY_GRAPHQL_MIN` (200), `core.limit` under `GH_FACTORY_CORE_MIN_LIMIT` (1000; a flagged or unauthenticated token gets 60), or `github.com/<login>` answering 404 (a flagged account). A probe that fails is `unknown` and holds nothing. Callers: `check_gh_factory` (pipeline-health, every tick) ntfys `urgent` once per episode and logs the recovery (marker `~/.archon/pipeline-health-state/gh-factory-alerted`); `issue-pickup-cron.sh` launches nothing (`action=skip-gh-identity`, triage included) while it is blocked; `pipeline-status` prints `factory GitHub: OK / BLOCKED / unknown`. Why: 2026-10-13..16, GitHub flagged `alexsiri7-factory` and ~90% of runs failed on `GraphQL: API rate limit already exceeded` with every dashboard green. While the flag is `drain` the crons do not tick, so only `pipeline-status` shows when the account is back |
 | `lib/heartbeat.sh` | sourced by `issue-pickup-cron.sh`, `pipeline-health-cron.sh` | `heartbeat_watch <name> <cron minutes>`: one ntfy per stale episode when `<name>`'s throttle stamp is older than `2E+P` minutes (see "Throttle and manual nudges"), `recovered` logged when it ticks again. Markers in `~/.archon/pipeline-health-state/heartbeat/` (`HEARTBEAT_STATE_DIR`) |
 | `lib/human-labels.sh` | sourced by `issue-pickup-cron.sh`, `lib/claude-auth.sh` | `HUMAN_LABELS`, the human-intent labels issue-pickup never triages or ingests, and `HUMAN_NEEDED_LABEL`, the one of them the cron scripts file their own human-only issues under |
-| `lib/screen.sh` | sourced by `issue-pickup-cron.sh`, `screen-bridge-issues.sh` | screening of bridge-filed issues: heuristics + classifier → `archon:auto-approved` / `needs-owner-review` (see "Trust model") |
+| `lib/screen.sh` | sourced by `issue-pickup-cron.sh`, `screen-bridge-issues.sh` | screening of bridge-filed issues: heuristics + classifier → closed (no-action, injection; weekly digest) or restated (`archon:auto-approved` + `archon:restated`, the run's target) (see "Trust model") |
 | `screen-bridge-issues.sh` | manual | dry run of the screening over past issues (`--days N`), no GitHub writes |
 | `lib/trust.sh` | sourced by `issue-pickup-cron.sh`, `pr-maintenance-cron.sh`, `pr-review-cron.sh`, `pipeline-health-cron.sh` | the trust gate: trusted authors, fork PRs, bridge-filed issues, untrusted comments, the dependabot merge policy, one ntfy per untrusted item (see "Trust model") |
 | `lib/build-drift.sh` | sourced by `pipeline-health-cron.sh` | `check_build_drift <project>`: the daily build-drift re-run, its allow/deny and side-effect rules, and the judge that files and closes `Main CI drift: <workflow>` (see the file header). State in `~/.archon/pipeline-health-state/build-drift/` |
