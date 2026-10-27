@@ -58,8 +58,9 @@ mkdir -p "$LOG_DIR"
 HOLD_LABEL="hold"
 # One marker per project and PR holding the "<headRefOid> <mergeStateStatus>"
 # Phase 2 last launched archon-pr-maintenance for, one
-# (<project>-<PR>.rebase-requested) holding the head SHA Phase 1b last asked
-# dependabot to rebase, and one (<project>-<PR>.review-retries) counting the
+# (<project>-<PR>.corrected) holding the head SHA it last launched a review
+# correction for, one (<project>-<PR>.rebase-requested) holding the head SHA
+# Phase 1b last asked dependabot to rebase, and one (<project>-<PR>.review-retries) counting the
 # review-stage retries of the failed run that left the PR.
 MAINTENANCE_STATE_DIR="$HOME/.archon/state/pr-maintenance"
 mkdir -p "$MAINTENANCE_STATE_DIR"
@@ -107,6 +108,23 @@ maintenance_launched_for() {
   local marker="$MAINTENANCE_STATE_DIR/${PROJECT}-$1.launched"
   [ "$(cat "$marker" 2>/dev/null)" = "$2 $3" ] || return 1
   log "$PROJECT: PR #$1 already had maintenance launched at ${2:0:7} ($3) — waiting for a new head or merge state"
+}
+
+# correction_launched_for <number> <headRefOid> — true (with a log line) when
+# Phase 2 already launched a review correction for this PR at this head. Kept
+# apart from the .launched marker, which a merge-state change re-arms: a
+# correction is due once per head, whatever the base does meanwhile.
+correction_launched_for() {
+  local marker="$MAINTENANCE_STATE_DIR/${PROJECT}-$1.corrected"
+  [ "$(cat "$marker" 2>/dev/null)" = "$2" ] || return 1
+  log "$PROJECT: PR #$1 already had a review correction launched at ${2:0:7} — waiting for a new head and its review"
+}
+
+# correction_prompt <number> — the archon-assist prompt for a review correction.
+correction_prompt() {
+  printf '%s' "PR #$1 on alexsiri7/$PROJECT is green, but its latest archon review report says ready: false, action: correct. \
+Read that report: the newest PR comment containing $REVIEW_REPORT_MARKER. Check out the PR's branch and fix every blocking finding it leaves open, or answer it in a PR comment with the evidence that it is not a finding. Never resolve a finding by weakening, skipping or deleting tests or assertions. \
+Run the checks that cover what you changed, commit, and push to the PR's branch. Never merge the PR, enable auto-merge, or mark it ready: pr-review-cron re-reviews the new head, and pr-maintenance-cron merges the PR once it is CLEAN. Never write to, migrate or delete production data."
 }
 
 # rebase_requested_for <number> <headRefOid> — true (with a log line) when
@@ -231,14 +249,15 @@ head_unchanged_for() {
   echo $((now - since))
 }
 
-# review_not_ready_action <number> — print the action (correct, replan or
-# needs_human) of the PR's latest review report, the newest trusted comment
-# (by updated_at: the run rewrites one comment each round) carrying
+# review_not_ready_action <number> [<headRefOid>] — print the action (correct,
+# replan or needs_human) of the PR's latest review report, the newest trusted
+# comment (by updated_at: the run rewrites one comment each round) carrying
 # $REVIEW_REPORT_MARKER, when that report says not ready. Exit 1, printing
 # nothing, when it says ready, there is none, it names no such action, or the
-# comments cannot be read.
+# comments cannot be read. Given a head, also exit 1 unless the report's
+# "Reviewed commit:" is that head: a report on an earlier head is stale.
 review_not_ready_action() {
-  local rows login type b64 body action verdict
+  local rows login type b64 body action verdict reviewed
   rows=$(gh api --paginate "repos/alexsiri7/$PROJECT/issues/$1/comments" \
     --jq ".[] | select((.body // \"\") | contains(\"$REVIEW_REPORT_MARKER\")) | [(.updated_at // .created_at // \"\"), (.user.login // \"\"), (.user.type // \"\"), (.body | @base64)] | @tsv" \
     2>/dev/null) || return 1
@@ -247,6 +266,11 @@ review_not_ready_action() {
     [ -n "$b64" ] || continue
     trust_comment_author_ok "$login" "$type" || continue
     body=$(printf '%s' "$b64" | base64 -d 2>/dev/null | tr -d '*`') || return 1
+    if [ -n "${2:-}" ]; then
+      reviewed=$(printf '%s\n' "$body" | grep -iE -m1 '^reviewed commit:' \
+        | sed -E 's/^[^:]*: *//; s/[[:space:]].*$//' || true)
+      [ "$reviewed" = "$2" ] || return 1
+    fi
     # The report's own "Verdict:" line decides; only a report without one
     # falls back to its "ready: false".
     verdict=$(printf '%s\n' "$body" | grep -iE -m1 '^verdict:' || true)
@@ -621,16 +645,31 @@ for PROJECT in "${PROJECTS[@]}"; do
   # Only `full` trust: archon-pr-maintenance reads the PR, so a merge-only
   # bot's PR (dependabot: upstream release notes in the body) never gets here;
   # Phase 1b asks dependabot to rebase its own instead.
-  CANDIDATES=$(list_prs full '(.isDraft == false and (.mergeStateStatus == "BEHIND" or .mergeStateStatus == "DIRTY" or .mergeStateStatus == "UNSTABLE" or .mergeStateStatus == "UNKNOWN")) or (.isDraft == true and .mergeStateStatus == "DIRTY")')
+  # A CLEAN PR still open here is one Phase 1 would not merge (an ops/ PR
+  # waiting for the owner, a failed run's PR). It counts only when its review
+  # report on this very head says ready: false, action: correct (#173): it gets
+  # one archon-assist correction per head, and the push it makes is
+  # pr-review-cron's to review again. Until that review lands, the latest
+  # report is on the old head and nothing relaunches.
+  CANDIDATES=$(list_prs full '(.isDraft == false and (.mergeStateStatus == "BEHIND" or .mergeStateStatus == "DIRTY" or .mergeStateStatus == "UNSTABLE" or .mergeStateStatus == "UNKNOWN" or .mergeStateStatus == "CLEAN")) or (.isDraft == true and .mergeStateStatus == "DIRTY")')
 
   ACTIONABLE=""
   while IFS=$'\t' read -r PR HEAD HOLD SHA STATE _ BODY; do
     [ -n "$PR" ] || continue
     pr_on_hold "$PR" "$HOLD" && continue
-    maintenance_launched_for "$PR" "$SHA" "$STATE" && continue
+    if [ "$STATE" = CLEAN ]; then
+      correction_launched_for "$PR" "$SHA" && continue
+    else
+      maintenance_launched_for "$PR" "$SHA" "$STATE" && continue
+    fi
     if pr_owned_by_live_run "$PR" "$HEAD" "$BODY"; then
       log "$PROJECT: PR #$PR ($HEAD) needs maintenance but is owned by a live archon run — leaving it to the run"
       continue
+    fi
+    if [ "$STATE" = CLEAN ]; then
+      # A failed run's PR is the review-retry phase's to resume.
+      pr_left_by_failed_run "$PR" "$HEAD" && continue
+      [ "$(review_not_ready_action "$PR" "$SHA")" = correct ] || continue
     fi
     TRUST_RC=0
     trust_comments_ok "$PROJECT" pr "$PR" || TRUST_RC=$?
@@ -641,7 +680,17 @@ for PROJECT in "${PROJECTS[@]}"; do
       continue
     fi
     ACTIONABLE="$PR"
-    ACTIONABLE_KEY="$SHA $STATE"
+    if [ "$STATE" = CLEAN ]; then
+      ACTIONABLE_NEED="a review correction"
+      ACTIONABLE_MARKER="corrected"
+      ACTIONABLE_KEY="$SHA"
+      ACTIONABLE_RUN=(archon-assist "$(correction_prompt "$PR")")
+    else
+      ACTIONABLE_NEED="maintenance"
+      ACTIONABLE_MARKER="launched"
+      ACTIONABLE_KEY="$SHA $STATE"
+      ACTIONABLE_RUN=(archon-pr-maintenance "PR #$PR")
+    fi
     break
   done <<< "$CANDIDATES"
 
@@ -651,12 +700,12 @@ for PROJECT in "${PROJECTS[@]}"; do
   fi
 
   if [ "$QUOTA_HELD" = 1 ]; then
-    log "$PROJECT: PR #$ACTIONABLE needs maintenance — held, Claude rate limit in effect"
+    log "$PROJECT: PR #$ACTIONABLE needs $ACTIONABLE_NEED — held, Claude rate limit in effect"
     continue
   fi
-  log "$PROJECT: PR #$ACTIONABLE needs maintenance — launching archon"
-  echo "$ACTIONABLE_KEY" > "$MAINTENANCE_STATE_DIR/${PROJECT}-${ACTIONABLE}.launched"
-  archon workflow run archon-pr-maintenance --cwd "$REPO_DIR" "PR #$ACTIONABLE" &
+  log "$PROJECT: PR #$ACTIONABLE needs $ACTIONABLE_NEED — launching ${ACTIONABLE_RUN[0]}"
+  echo "$ACTIONABLE_KEY" > "$MAINTENANCE_STATE_DIR/${PROJECT}-${ACTIONABLE}.${ACTIONABLE_MARKER}"
+  archon workflow run "${ACTIONABLE_RUN[0]}" --cwd "$REPO_DIR" "${ACTIONABLE_RUN[1]}" &
 
 done
 
