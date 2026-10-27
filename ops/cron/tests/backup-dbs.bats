@@ -115,7 +115,7 @@ archives() { find "$T/backups/reli" -name '*.sql.gz' 2>/dev/null; }
     run "$SCRIPT"
     [ "$status" -eq 1 ]
     [[ "$output" == *"ERROR: reli backup FAILED"* ]]
-    [[ "$output" == *"below the 1024B minimum"* ]]
+    [[ "$output" == *"below the 256B minimum"* ]]
     [[ "$output" == *"ERROR: backup FAILED for: reli"* ]]
     [ "$(archives | wc -l)" -eq 0 ]
     grep -q '^last_run_status=failed$' "$T/state/db-backup-status"
