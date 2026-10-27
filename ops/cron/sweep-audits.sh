@@ -8,7 +8,7 @@
 # a PR, failed), the issues it filed and its tokens. A failed run is reported
 # too, so Lachesis keeps it due. Nothing offered: nothing runs.
 #
-# Only four kinds have a workflow (audit_workflow_for). When the offer is
+# Only four kinds have a workflow (audit_spec). When the offer is
 # another kind, the sweep runs the oldest due workflow-backed audit from
 # read_audit_history instead, in a repo with no open audit issue, so an
 # unrunnable kind never stalls it. An audit Lachesis names a non-Claude model
@@ -81,56 +81,72 @@ record_sweep() {
   log "summary: outcome=$1${2:+ ($2)} sweep=$sweep_name repo=$repo_name account=${3:-none}"
 }
 
-# audit_workflow_for <kind> — the archon workflow for a Lachesis audit kind,
-# empty for a kind no workflow runs.
-audit_workflow_for() {
+# audit_spec <kind> — sets workflow, prompt and issue_label (the label the
+# workflow files its findings issues under, empty when it files none) for a
+# Lachesis audit kind. Fails for a kind no workflow here runs.
+audit_spec() {
   case "$1" in
-    architecture) echo archon-architect ;;
-    security) echo archon-security-audit ;;
-    tests) echo archon-test-audit ;;
-    requirements) echo archon-requirements-audit ;;
-  esac
-}
-
-audit_prompt_for() {
-  case "$1" in
-    architecture) echo "Analyze the codebase architecture — identify complexity hotspots, unnecessary abstractions, and opportunities for simplification" ;;
-    security) echo "Perform a deep security and privacy audit of the entire codebase — check OWASP top 10, auth, data privacy, dependencies, and business logic" ;;
-    tests) echo "Audit test coverage and stability — fix flaky tests, add tests for critical uncovered code paths, improve test quality" ;;
-    requirements) echo "Audit requirements-to-code traceability — verify each requirement in requirements/requirements.yaml is implemented and tested, regenerate requirements/coverage.yaml, and file requirements-gap issues for uncovered or stale requirements and orphaned behavior" ;;
+    architecture)
+      workflow=archon-architect issue_label=""
+      prompt="Analyze the codebase architecture — identify complexity hotspots, unnecessary abstractions, and opportunities for simplification" ;;
+    security)
+      workflow=archon-security-audit issue_label=security
+      prompt="Perform a deep security and privacy audit of the entire codebase — check OWASP top 10, auth, data privacy, dependencies, and business logic" ;;
+    tests)
+      workflow=archon-test-audit issue_label=""
+      prompt="Audit test coverage and stability — fix flaky tests, add tests for critical uncovered code paths, improve test quality" ;;
+    requirements)
+      workflow=archon-requirements-audit issue_label=requirements-gap
+      prompt="Audit requirements-to-code traceability — verify each requirement in requirements/requirements.yaml is implemented and tested, regenerate requirements/coverage.yaml, and file requirements-gap issues for uncovered or stale requirements and orphaned behavior" ;;
+    *) return 1 ;;
   esac
 }
 
 # choose_audit — the audit to run as one JSON object {repo, kind, capability,
 # model, source: offered|fallback}. Returns 0 with one chosen, 3 when there is
-# nothing to run, 2 when Lachesis could not be read (the reason logged).
+# nothing to run, 2 when Lachesis could not be read or answered something
+# unreadable (the reason logged).
 choose_audit() {
-  local offer kind history
+  local offer offered history candidates candidate
   if ! offer=$(lachesis_call next_issue '{}'); then
     log "Lachesis next_issue could not be read" >&2
     return 2
   fi
-  if ! jq -e '.audit | type == "object"' <<<"$offer" >/dev/null 2>&1; then
-    log "nothing offered ($(jq -r '.reason // "no audit in the offer"' <<<"$offer" 2>/dev/null))" >&2
+  if ! offered=$(jq -r '.audit | if . == null then "none" elif type == "object" then "offer"
+      else error("audit is not an object") end' <<<"$offer" 2>&1); then
+    log "Lachesis next_issue answered something unreadable: $offered" >&2
+    return 2
+  fi
+  if [ "$offered" = none ]; then
+    log "nothing offered ($(jq -r '.reason // "no audit in the offer"' <<<"$offer"))" >&2
     return 3
   fi
-  kind=$(jq -r '.audit.kind // ""' <<<"$offer")
-  if [ -n "$(audit_workflow_for "$kind")" ]; then
+  if audit_spec "$(jq -r '.audit.kind // ""' <<<"$offer")"; then
     jq -c '.audit | {repo, kind, capability, model, source: "offered"}' <<<"$offer"
     return 0
   fi
-  log "Lachesis offers a $kind audit, which no workflow here runs — falling back to the oldest due one that does" >&2
+  log "Lachesis offers a $(jq -r .audit.kind <<<"$offer") audit, which no workflow here runs — falling back to the oldest due one that does" >&2
   if ! history=$(lachesis_call read_audit_history '{}'); then
     log "Lachesis read_audit_history could not be read" >&2
     return 2
   fi
-  jq -ec '
-    def backed: ["architecture", "security", "tests", "requirements"];
-    [ .model as $m | .repos[] | select(.open_audit == null) | .repo as $repo
-      | .audits[] | select(.due and (.kind as $k | backed | index($k)))
-      | {repo: $repo, kind, capability, model: $m, source: "fallback",
-         last: (.last_run.finished_at // "")} ]
-    | sort_by(.last) | first // empty | del(.last)' <<<"$history" && return 0
+  # Every due audit in a repo with no open audit issue, never-run first, then
+  # oldest run first.
+  if ! candidates=$(jq -c '
+      [ .model as $m | .repos[] | select(.open_audit == null) | .repo as $repo
+        | .audits[] | select(.due)
+        | {repo: $repo, kind, capability, model: $m, source: "fallback",
+           last: (.last_run.finished_at // "")} ]
+      | sort_by(.last) | .[] | del(.last)' <<<"$history" 2>&1); then
+    log "Lachesis read_audit_history answered something unreadable: $candidates" >&2
+    return 2
+  fi
+  while IFS= read -r candidate; do
+    if [ -n "$candidate" ] && audit_spec "$(jq -r .kind <<<"$candidate")"; then
+      echo "$candidate"
+      return 0
+    fi
+  done <<<"$candidates"
   log "no due audit has a workflow here — nothing to run" >&2
   return 3
 }
@@ -150,9 +166,8 @@ kind=$(jq -r .kind <<<"$audit")
 capability=$(jq -r '.capability // ""' <<<"$audit")
 model=$(jq -r '.model // ""' <<<"$audit")
 repo_name=$(basename "$repo")
-workflow=$(audit_workflow_for "$kind")
+audit_spec "$kind"
 sweep_name="${workflow#archon-}"
-prompt=$(audit_prompt_for "$kind")
 [ -n "$capability" ] && prompt+=" Focus this audit on the $capability capability (specs/$capability/)."
 
 log "=== nightly sweep: $sweep_name on $repo_name (Lachesis: $kind${capability:+/$capability}, model $model, $(jq -r .source <<<"$audit")) ==="
@@ -162,31 +177,44 @@ if [[ "${model,,}" != *claude* ]]; then
   exit 0
 fi
 
+# read_findings <since-iso> — sets issues (a JSON array of numbers) and prs
+# (a count) to what the run launched at since_epoch filed. Its PR is the one
+# on its own branch, archon/task-<workflow>-<launch ms>; its issues are the
+# ones the factory login opened since then under its workflow's issue_label.
+# Fails when GitHub could not be read.
+read_findings() {
+  local since_iso="$1" pulls login listing
+  pulls=$(gh_factory_gh api "repos/$repo/pulls?state=all&sort=created&direction=desc&per_page=100") || return 1
+  prs=$(jq --arg p "archon/task-$workflow-" --argjson ms "$(( since_epoch * 1000 ))" \
+    '[.[].head.ref | select(startswith($p)) | ltrimstr($p) | select((tonumber? // 0) >= $ms)] | length' \
+    <<<"$pulls") || return 1
+  [ -n "$issue_label" ] || return 0
+  login=$(gh_factory_gh api user --jq .login) && [ -n "$login" ] || return 1
+  listing=$(gh_factory_gh api "repos/$repo/issues?creator=$login&labels=$issue_label&state=all&since=$since_iso&per_page=100") || return 1
+  issues=$(jq -c --arg s "$since_iso" \
+    '[.[] | select((has("pull_request") | not) and .created_at >= $s) | .number]' <<<"$listing") || return 1
+}
+
 # report_audit ok|failed — report the run that just finished with
-# report_audit_run. Sets outcome and issue_list ("#12 #13") for the ntfy.
-# The issues are the ones the factory login opened in the repo since the
-# launch; a PR among them makes the outcome findings but is not listed.
+# report_audit_run. Sets outcome and issue_list ("#12 #13") for the ntfy. A
+# run whose findings GitHub would not show is reported failed, so Lachesis
+# keeps it due instead of recording it clean.
 report_audit() {
-  local since_iso login listing="[]" issues="[]" prs=0 tokens args
-  since_iso=$(date -u -d "@$since_epoch" +%FT%TZ)
+  local issues="[]" prs=0 tokens args
   outcome=failed issue_list=""
   if [ "$1" = ok ]; then
-    login=$(gh_factory_gh api user --jq .login 2>/dev/null) || login=""
-    if [ -z "$login" ]; then
-      log "could not read the factory GitHub login — reporting no issues"
-    elif ! listing=$(gh_factory_gh api "repos/$repo/issues?creator=$login&state=all&since=$since_iso&per_page=100" 2>/dev/null) \
-        || ! listing=$(jq -c --arg s "$since_iso" '[.[] | select(.created_at >= $s)]' <<<"$listing" 2>/dev/null); then
-      log "could not list the issues $login opened in $repo — reporting no issues"
-      listing="[]"
+    if read_findings "$(date -u -d "@$since_epoch" +%FT%TZ)"; then
+      outcome=clean
+      [ "$issues" != "[]" ] || [ "$prs" -gt 0 ] && outcome=findings
+      issue_list=$(jq -r 'map("#\(.)") | join(" ")' <<<"$issues")
+    else
+      issues="[]"
+      log "could not read the issues and PRs $sweep_name filed in $repo — reporting it failed"
+      notify "Sweep unread: $repo_name" "$sweep_name ran, but GitHub would not show what it filed; reported failed so Lachesis keeps it due" default warning
     fi
-    issues=$(jq -c '[.[] | select(has("pull_request") | not) | .number]' <<<"$listing")
-    prs=$(jq '[.[] | select(has("pull_request"))] | length' <<<"$listing")
-    outcome=clean
-    [ "$issues" != "[]" ] || [ "$prs" -gt 0 ] && outcome=findings
-    issue_list=$(jq -r 'map("#\(.)") | join(" ")' <<<"$issues")
   fi
   tokens=$(python3 -B "$SCRIPT_DIR/lib/archon_run_tokens.py" "$workflow" "$repo" \
-    "$(date -u -d "@$since_epoch" '+%F %T')" 2>/dev/null)
+    "$(date -u -d "@$since_epoch" '+%F %T')") || log "the run's tokens could not be read — reporting 0"
   jq -e 'has("tokens_in")' <<<"$tokens" >/dev/null 2>&1 || tokens='{"tokens_in":0,"tokens_out":0}'
   args=$(jq -nc --arg repo "$repo" --arg kind "$kind" --arg outcome "$outcome" \
     --arg at "$(date -u -Iseconds)" --arg model "$model" --arg cap "$capability" \
@@ -256,11 +284,16 @@ export CLAUDE_CONFIG_DIR="$account_dir"
 log "repo: $local_path"
 log "workflow: $workflow"
 log "account: $(basename "$account_dir")"
+if ! cd "$local_path"; then
+  log "ERROR: the clone $local_path is gone"
+  notify "Sweep: $repo_name" "The clone went away before the audit ran" high warning
+  record_sweep failed no-clone "$account_dir"
+  exit 1
+fi
 touch "$lock_file"
 
 logfile="$LOG_DIR/${repo_name}-${sweep_name}-$(date +%Y%m%d).log"
 
-cd "$local_path" || { rm -f "$lock_file"; exit 1; }
 since_epoch=$(date +%s)
 if CLAUDECODE=0 archon workflow run "$workflow" "$prompt" > "$logfile" 2>&1; then
   report_audit ok

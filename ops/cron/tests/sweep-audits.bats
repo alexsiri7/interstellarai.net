@@ -24,7 +24,7 @@ setup() {
     export GH_CALLS="$TEST_TMP/gh-calls"
     export ARCHON_DB="$TEST_TMP/none.db"
     export LACHESIS_CALL_CMD="$TEST_TMP/lachesis"
-    unset LACHESIS_FAIL
+    unset LACHESIS_FAIL GH_FAIL
     offer '{"repo":"alexsiri7/reli","kind":"security","capability":null,"model":"claude"}'
 
     local repo
@@ -55,7 +55,9 @@ echo "\$*" >> "\$GH_CALLS"
 case "\$1 \$2" in
   "issue list") echo '[]' ;;
   "api user") echo factory-bot ;;
+  "api repos/"*) [ -n "\${GH_FAIL:-}" ] && { echo "HTTP 502" >&2; exit 1; } ;;&
   "api repos/"*/issues*) cat "$TEST_TMP/issues.json" 2>/dev/null || echo '[]' ;;
+  "api repos/"*/pulls*) cat "$TEST_TMP/pulls.json" 2>/dev/null || echo '[]' ;;
 esac
 exit 0
 EOF
@@ -166,6 +168,20 @@ EOF
     [ "$(report | jq -r .outcome)" = failed ]
 }
 
+@test "a clone gone by launch time: no workflow, FAILED (no-clone) recorded, no lock left, exit 1" {
+    cat >> "$HOME/.local/bin/claude" <<'EOF'
+rm -rf "$HOME/.archon/workspaces/alexsiri7/reli/source"
+EOF
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ ! -f "$HOME/archon-calls" ]
+    [ "$(summary outcome)" = failed ]
+    [ "$(summary reason)" = no-clone ]
+    [ -z "$(find "$HOME/.archon/sweep-state" -name '*.lock')" ]
+    grep -q '^Sweep: reli' "$HOME/ntfy"
+    ! grep -q '^report_audit_run' "$HOME/lachesis-calls" || false
+}
+
 @test "secrets come from Doppler by name: the archon run sees neither the store nor the token" {
     : > "$ARCHON_CRON_SECRETS"
     doppler_stub "$TEST_TMP/dbin"
@@ -231,6 +247,19 @@ EOF
     [ "$(cat "$HOME/.archon/sweep-state/last-sweep")" = "$(printf 'last_run=1\noutcome=ok')" ]
 }
 
+@test "the fallback runs a never-run due audit before one run long ago" {
+    offer '{"repo":"alexsiri7/reli","kind":"clean-code","capability":null,"model":"claude"}'
+    echo '{"model":"claude","repos":[
+      {"repo":"alexsiri7/filmduel","open_audit":null,"audits":[
+        {"kind":"security","due":true,"capability":null,"last_run":{"finished_at":"2020-01-01T00:00:00+00:00"}}]},
+      {"repo":"alexsiri7/reli","open_audit":null,"audits":[
+        {"kind":"architecture","due":true,"capability":null,"last_run":null}]}]}' > "$TEST_TMP/history.json"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    grep -q ' workflow run archon-architect ' "$HOME/archon-calls"
+    [ "$(report | jq -c '[.repo, .kind]')" = '["alexsiri7/reli","architecture"]' ]
+}
+
 @test "fallback with no due workflow-backed audit runs nothing" {
     offer '{"repo":"alexsiri7/reli","kind":"clean-code","capability":null,"model":"claude"}'
     echo '{"model":"claude","repos":[{"repo":"alexsiri7/reli","open_audit":null,"audits":[
@@ -252,6 +281,23 @@ EOF
     [ "$(summary sweep)" = - ]
 }
 
+@test "an unreadable Lachesis offer or history is a failure, not a quiet night" {
+    local next history
+    for next in 'not json' '{"audit":"security"}' 'unreadable-history'; do
+        rm -f "$HOME/lachesis-calls" "$HOME/.archon/sweep-state/last-sweep"
+        if [ "$next" = unreadable-history ]; then
+            offer '{"repo":"alexsiri7/reli","kind":"clean-code","capability":null,"model":"claude"}'
+            echo '{"model":"claude"}' > "$TEST_TMP/history.json"
+        else
+            echo "$next" > "$TEST_TMP/next.json"
+        fi
+        run "$SCRIPT"
+        [ "$status" -eq 1 ]
+        [ ! -f "$HOME/archon-calls" ]
+        [ "$(summary reason)" = lachesis ]
+    done
+}
+
 @test "a non-Claude model for audits: nothing runs, nothing reported" {
     offer '{"repo":"alexsiri7/reli","kind":"security","capability":null,"model":"glm-5"}'
     run "$SCRIPT"
@@ -261,14 +307,54 @@ EOF
     [[ "$output" == *"Lachesis names glm-5 for audits"* ]]
 }
 
-@test "issues the run filed make it findings; its PR counts but is not listed" {
+# The issues listing as GitHub answers it: the stub ignores the query, so the
+# label and creator filters are asserted on the call itself.
+issues_fixture() {
     echo '[{"number":41,"created_at":"2999-01-01T00:00:00Z"},
            {"number":42,"created_at":"2999-01-01T00:00:00Z","pull_request":{}},
            {"number":7,"created_at":"2020-01-01T00:00:00Z"}]' > "$TEST_TMP/issues.json"
+}
+
+# pulls_fixture <head-ref>... — the repo's PRs, on these branches.
+pulls_fixture() {
+    printf '%s\n' "$@" | jq -Rn '[inputs | {head: {ref: .}}]' > "$TEST_TMP/pulls.json"
+}
+
+@test "the issues its workflow files make the run findings; PRs among them are not listed" {
+    issues_fixture
     run "$SCRIPT"
     [ "$status" -eq 0 ]
-    grep -q '^api repos/alexsiri7/reli/issues?creator=factory-bot&state=all&since=' "$GH_CALLS"
+    grep -q '^api repos/alexsiri7/reli/issues?creator=factory-bot&labels=security&state=all&since=' "$GH_CALLS"
     [ "$(report | jq -c '[.outcome, .issues]')" = '["findings",[41]]' ]
+}
+
+@test "the run's own PR makes it findings; another run's PR in the repo does not" {
+    pulls_fixture archon/task-archon-security-audit-9999999999999
+    run "$SCRIPT"
+    [ "$(report | jq -c '[.outcome, .issues]')" = '["findings",[]]' ]
+
+    rm -f "$HOME/lachesis-calls"
+    pulls_fixture archon/task-archon-ship-block-9999999999999 archon/task-archon-security-audit-1000
+    run "$SCRIPT"
+    [ "$(report | jq -r .outcome)" = clean ]
+}
+
+@test "a kind whose workflow files no issues never counts the factory's other issues" {
+    offer '{"repo":"alexsiri7/reli","kind":"tests","capability":null,"model":"claude"}'
+    issues_fixture
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    ! grep -q '/issues' "$GH_CALLS" || false
+    [ "$(report | jq -c '[.outcome, .issues]')" = '["clean",[]]' ]
+}
+
+@test "GitHub unreadable after the run: reported failed, not clean, and notified" {
+    export GH_FAIL=1
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ "$(report | jq -c '[.outcome, .issues]')" = '["failed",[]]' ]
+    grep -q '^Sweep unread: reli' "$HOME/ntfy"
+    [ "$(summary outcome)" = ok ]
 }
 
 @test "a report Lachesis refuses is logged and notified; the sweep still records OK" {
