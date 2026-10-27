@@ -473,7 +473,7 @@ close_resolved_pr_escalations() {
   while IFS=$'\t' read -r issue_num kind pr_num; do
     case "$kind" in pr-ci|stuck-pr) ;; *) continue ;; esac
     [ -n "$pr_num" ] || continue
-    state=$(gh pr view "$pr_num" --repo "$repo" --json state --jq '.state' 2>/dev/null || echo "")
+    state=$(gh_pr_state "$1" "$pr_num") || state=""
     case "$state" in
       MERGED) close_escalation "$repo" "$issue_num" "PR #$pr_num has been merged." ;;
       CLOSED) close_escalation "$repo" "$issue_num" "PR #$pr_num has been closed without merging." ;;

@@ -13,6 +13,7 @@
 #   source "$SCRIPT_DIR/lib/merged-reviews.sh"   # the caller defines log()
 #   abandon_reviews "$repo_dir" "$project" 42      # after merging PR #42
 #   abandon_review "$project" 42 "$run_id"         # one run of merged PR #42
+#   state=$(gh_pr_state "$project" 42)            # MERGED, CLOSED or OPEN
 #   pr=$(review_pr_merged "$project" "$user_message") && ...
 #   close_merged_reviews "$repo_dir" "$project"    # sweep this tick's snapshot
 
@@ -54,6 +55,12 @@ abandon_review() {
   fi
 }
 
+# gh_pr_state <project> <pr> — print the PR's GitHub state. Exits non-zero
+# when gh cannot read it.
+gh_pr_state() {
+  gh pr view "$2" --repo "alexsiri7/$1" --json state --jq .state 2>/dev/null
+}
+
 # review_pr_merged <project> <user_message> — print the PR number the review's
 # message names and exit 0 only when GitHub reads that PR as MERGED. A message
 # naming no #N, any other state, or a gh failure exits 1: the run is left as it
@@ -62,7 +69,7 @@ review_pr_merged() {
   local project="$1" msg="$2" n state
   [[ "$msg" =~ \#([0-9]+) ]] || return 1
   n="${BASH_REMATCH[1]}"
-  state=$(gh pr view "$n" --repo "alexsiri7/$project" --json state --jq .state 2>/dev/null) || return 1
+  state=$(gh_pr_state "$project" "$n") || return 1
   [ "$state" = MERGED ] || return 1
   echo "$n"
 }
