@@ -214,6 +214,7 @@ EOF
     jq -e '.finished_at | test("^20[0-9-]+T")' "$TEST_TMP/report.json"
     [ "$(summary sweep)" = security-audit ]
     [ "$(summary repo)" = reli ]
+    [[ "$output" == *"tokens could not be read"* ]]
 }
 
 @test "an offered kind no workflow runs falls back to the oldest due one that has one" {

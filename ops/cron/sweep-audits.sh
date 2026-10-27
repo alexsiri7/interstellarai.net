@@ -49,6 +49,8 @@ source "$SCRIPT_DIR/lib/quota-pause.sh"
 quota_may_launch "sweep-audits" || exit 0
 # shellcheck source=lib/claude-auth.sh
 source "$SCRIPT_DIR/lib/claude-auth.sh"
+# shellcheck source=lib/human-labels.sh
+source "$SCRIPT_DIR/lib/human-labels.sh"
 BASE_DIR="/mnt/ext-fast"
 STATE_DIR="$HOME/.archon/sweep-state"
 LOG_DIR="$HOME/.archon/logs/sweep"
@@ -96,7 +98,7 @@ audit_spec() {
       workflow=archon-test-audit issue_label=""
       prompt="Audit test coverage and stability — fix flaky tests, add tests for critical uncovered code paths, improve test quality" ;;
     requirements)
-      workflow=archon-requirements-audit issue_label=requirements-gap
+      workflow=archon-requirements-audit issue_label=$REQUIREMENTS_GAP_LABEL
       prompt="Audit requirements-to-code traceability — verify each requirement in requirements/requirements.yaml is implemented and tested, regenerate requirements/coverage.yaml, and file requirements-gap issues for uncovered or stale requirements and orphaned behavior" ;;
     *) return 1 ;;
   esac
