@@ -12,8 +12,14 @@
 #
 # Tunables (override from the environment before sourcing):
 #   PG_BACKUP_MIN_BYTES  smallest compressed archive accepted as a backup
+#
+# The byte floor only catches the ~20-byte gzip of a dump that produced
+# nothing. Whether a dump is real is decided by its content: a CREATE TABLE,
+# the project's sanity table, and a row count of it. The floor was 1024 until
+# 2026-10-27; a new project's valid but nearly empty dump (punland: three
+# tables, one row, ~955 bytes) failed every run below it (interstellarai.net#226).
 
-: "${PG_BACKUP_MIN_BYTES:=1024}"
+: "${PG_BACKUP_MIN_BYTES:=256}"
 
 # The backed-up projects, shared by backup-dbs.sh (dump + verify) and
 # restore-test.sh (restore the archive somewhere else and re-verify):

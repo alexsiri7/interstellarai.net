@@ -122,7 +122,22 @@ STUB
     [ "$(stat -c %s "$T/empty.sql.gz")" -le 32 ]
     run pg_validate_archive "$T/empty.sql.gz"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"below the 1024B minimum"* ]]
+    [[ "$output" == *"below the 256B minimum"* ]]
+}
+
+@test "pg_validate_archive accepts a small but real dump of a new project (#226)" {
+    { printf -- '--\n-- PostgreSQL database dump\n--\n\n'
+      printf 'SET statement_timeout = 0;\nSET lock_timeout = 0;\nSET client_encoding = %s;\nSET standard_conforming_strings = on;\n' "'UTF8'"
+      printf 'CREATE SCHEMA punland;\n\n'
+      printf 'CREATE TABLE punland.alembic_version (\n    version_num character varying(32) NOT NULL\n);\n\n'
+      printf 'CREATE TABLE punland.conversations (\n    player_id text NOT NULL,\n    "character" text NOT NULL,\n    state jsonb NOT NULL,\n    updated_at timestamp with time zone NOT NULL\n);\n\n'
+      printf 'CREATE TABLE punland.saves (\n    player_id text NOT NULL,\n    game jsonb NOT NULL,\n    updated_at timestamp with time zone NOT NULL\n);\n\n'
+      printf 'COPY punland.alembic_version (version_num) FROM stdin;\n0001_initial\n\\.\n\n'
+      printf -- '--\n-- PostgreSQL database dump complete\n--\n'; } | gzip > "$T/small.sql.gz"
+    [ "$(stat -c %s "$T/small.sql.gz")" -lt 1024 ]
+    run pg_validate_archive "$T/small.sql.gz"
+    [ "$status" -eq 0 ]
+    [ "$(pg_archive_count_tables "$T/small.sql.gz" punland.alembic_version)" -eq 1 ]
 }
 
 @test "pg_validate_archive rejects a gzip'd pg_dump error message" {
