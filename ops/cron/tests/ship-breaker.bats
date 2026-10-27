@@ -140,6 +140,28 @@ outcome_row() {
     [[ "$output" == *"circuit open (workflow-scope)"* ]]
 }
 
+@test "the agent stream quoting the scope patterns is not a refused push (#209)" {
+    run_row failed 10
+    local q="AND (e.data LIKE '%create or update workflow%' OR e.data LIKE '%without workflow scope%')"
+    local t
+    for t in provider_event tool_called tool_completed; do
+        sqlite3 "$ARCHON_DB" "INSERT INTO remote_agent_workflow_events (workflow_run_id, event_type, data)
+          VALUES ('r$N', '$t', '$(printf '%s' "{\"text\":\"$q\"}" | sed "s/'/''/g")');"
+    done
+    run ship_breaker_check testproj 5
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"workflow-scope"* ]]
+}
+
+@test "a refused push reported in a completed node's output parks at once" {
+    run_row failed 10
+    sqlite3 "$ARCHON_DB" "INSERT INTO remote_agent_workflow_events (workflow_run_id, event_type, data)
+      VALUES ('r$N', 'node_completed', '{\"node_output\":\"git push was rejected: refusing to allow a Personal Access Token to create or update workflow .github/workflows/ci.yml without workflow scope\"}');"
+    run ship_breaker_check testproj 5
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"circuit open (workflow-scope)"* ]]
+}
+
 @test "only runs after the breaker's last park comment count" {
     run_row failed 50
     run_row failed 40

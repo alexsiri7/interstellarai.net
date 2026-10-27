@@ -57,6 +57,11 @@ ship_breaker_db() {
 # ship_breaker_rows <project> <issue> [since 'YYYY-MM-DD HH:MM:SS' UTC]
 # Newest first, at most 10: status<TAB>rate_limited(0|1)<TAB>workflow_scope(0|1).
 # A completed run whose outcome node printed a placeholder verdict reads failed.
+# The workflow-scope match reads only node and workflow results, where a
+# refused push lands. The agent's own stream (provider_event, tool_called,
+# tool_completed) is skipped: a run that reads or edits this file sees these
+# very LIKE patterns, and on 2026-10-22 that parked interstellarai.net#209 as
+# workflow-scope although nothing was pushed (its real failure was review__route).
 # Both json_valid guards matter: one malformed node_output would otherwise fail
 # the whole query, and the breaker would refuse every launch.
 ship_breaker_rows() {
@@ -74,6 +79,7 @@ ship_breaker_rows() {
                 AND (e.data LIKE '%rate_limit%' OR e.data LIKE '%hit your%limit%')),
       EXISTS (SELECT 1 FROM remote_agent_workflow_events e
               WHERE e.workflow_run_id = r.id
+                AND e.event_type IN ('node_failed', 'node_completed', 'workflow_failed')
                 AND (e.data LIKE '%create or update workflow%'
                      OR e.data LIKE '%without \`workflow\` scope%'
                      OR e.data LIKE '%lacks \`workflow\` scope%')),
