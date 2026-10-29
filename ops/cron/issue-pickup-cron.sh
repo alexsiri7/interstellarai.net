@@ -78,6 +78,8 @@ source "$SCRIPT_DIR/lib/screen.sh"
 # state only. See lib/lachesis.sh and lachesis_pick below.
 # shellcheck source=lib/lachesis.sh
 source "$SCRIPT_DIR/lib/lachesis.sh"
+# shellcheck source=lib/severity.sh
+source "$SCRIPT_DIR/lib/severity.sh"
 LACHESIS_PICKUP_ON=0
 lachesis_pickup_enabled && LACHESIS_PICKUP_ON=1
 
@@ -947,7 +949,7 @@ lachesis_pick() {
 # A close or dependency that fails launches nothing either; tried next tick.
 settle_defaulted() {
   local project="$1" issue="$2" repo="alexsiri7/$1" body action blocker
-  local re='<!-- archon-settle-default: (close-completed|close-not-planned|depend-[0-9]+) -->'
+  local re="<!-- archon-settle-default: ($SETTLE_DEFAULT_ACTION_RE) -->"
   body=$(gh api --paginate "repos/$repo/issues/$issue/comments" --jq '.[-1].body | @json' 2>/dev/null \
     | tail -n 1 | jq -r . 2>/dev/null) || return 1
   [[ "$body" == "No answer came within the wait, so the default was taken: "* && "$body" =~ $re ]] || return 1

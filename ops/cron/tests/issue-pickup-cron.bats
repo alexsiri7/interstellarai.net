@@ -1077,6 +1077,9 @@ STUB
     unset _LACHESIS_SH
     # shellcheck source=../lib/lachesis.sh
     source "$(dirname "$SCRIPT_FILE")/lib/lachesis.sh"
+    unset _SEVERITY_SH
+    # shellcheck source=../lib/severity.sh
+    source "$(dirname "$SCRIPT_FILE")/lib/severity.sh"
     load_fn lachesis_next_fetch
     load_fn lachesis_issue_for
     load_fn lachesis_why_none

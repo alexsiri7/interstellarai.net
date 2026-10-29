@@ -304,7 +304,9 @@ SETTLE_DEFAULT_WAIT_DAYS=2
 # suggested_action — what the verdict asks for: close-completed,
 # close-not-planned, depend-<M>, proceed, or wait (nothing the factory can do
 # on its own: a named open PR may still land, an open sub-issue, a blocker it
-# cannot record).
+# cannot record). Every action but proceed and wait must match
+# SETTLE_DEFAULT_ACTION_RE (lib/severity.sh), or pickup launches a run when
+# its default is taken instead of carrying it out.
 suggested_action() {
   local ref
   case "$verdict" in
@@ -347,7 +349,9 @@ default_text() {
 }
 
 # settle_act <action> — takes a tier-1 action and exits 0; returns 1 when it
-# could not be taken, so the caller asks instead.
+# could not be taken, so the caller asks instead. The marker comment is posted
+# before the issue is released: released without it, the next run's settle
+# would not see the action as taken and could take it again.
 settle_act() {
   local action="$1" marker="<!-- archon-settle-act: $1 -->" note what
   note="$(default_text "$action") Taken without asking (tier 1, #237). The run's verdict: ${verdict:0:300}"
@@ -365,16 +369,19 @@ settle_act() {
     proceed)
       what="Released to run again (a tier-1 outcome, #237): the next run takes this verdict as direction. Lachesis next_issue decides when it runs; if that run also stops without a PR, the factory asks." ;;
   esac
-  if ! gh issue edit "$issue" --repo "$repo" --remove-label "archon:in-progress" >/dev/null 2>&1; then
-    echo "$(date -Is) [issue-pickup] $project: #$issue — took tier-1 action $action, but could not release archon:in-progress"
-    exit 1
-  fi
-  gh issue comment "$issue" --repo "$repo" --body "archon-ship finished without a PR: ${verdict}
+  if ! gh issue comment "$issue" --repo "$repo" --body "archon-ship finished without a PR: ${verdict}
 
 ${what} Run log: \`${run_log}\`
 
 ${marker}
-<!-- lachesis:automated -->" >/dev/null 2>&1 || true
+<!-- lachesis:automated -->" >/dev/null 2>&1; then
+    echo "$(date -Is) [issue-pickup] $project: #$issue — could not post the tier-1 $action comment; asking instead"
+    return 1
+  fi
+  if ! gh issue edit "$issue" --repo "$repo" --remove-label "archon:in-progress" >/dev/null 2>&1; then
+    echo "$(date -Is) [issue-pickup] $project: #$issue — took tier-1 action $action, but could not release archon:in-progress"
+    exit 1
+  fi
   lachesis_note "$project" "$issue" "$note" \
     || echo "$(date -Is) [issue-pickup] $project: #$issue — could not record the note in Lachesis"
   echo "$(date -Is) [issue-pickup] $project: #$issue settled by tier-1 action $action"
@@ -392,12 +399,14 @@ if lachesis_pickup_enabled; then
   tier_log=", tier $tier, default none"
   if [ "$action" != wait ]; then
     tier_log=", tier $tier, default $action"
+    # Any answer releases the issue to run again: pickup carries out only a
+    # taken default (settle_defaulted), so the options offer nothing else.
+    # Closing stays the question's own first choice, done on GitHub.
     ask_defaults=(
       "$(default_text "$action") <!-- archon-settle-default: $action -->"
       "$SETTLE_DEFAULT_WAIT_DAYS"
-      "$(default_text "$action")"
+      "$(default_text proceed)"
       "Answer with what the next run should do differently.")
-    [[ "$action" == close-* ]] || ask_defaults+=("Close #$issue.")
   fi
 fi
 

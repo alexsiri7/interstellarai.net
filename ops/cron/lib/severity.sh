@@ -51,6 +51,13 @@ SEVERITY_TIER3_WORDS=(
 )
 SEVERITY_TIER3_RE=$(IFS='|'; echo "${SEVERITY_TIER3_WORDS[*]}")
 
+# The default actions settle offers (lib/settle-ship-outcome.sh
+# suggested_action) that pickup carries out when Lachesis takes them
+# (issue-pickup-cron.sh settle_defaulted). proceed is not among them: a taken
+# proceed default needs only the launch that follows.
+# shellcheck disable=SC2034  # read by issue-pickup-cron.sh settle_defaulted
+SETTLE_DEFAULT_ACTION_RE='close-completed|close-not-planned|depend-[0-9]+'
+
 # severity_tier <declared> <text> — <declared> when it is 1, 2 or 3, else 2;
 # 3 whenever <text> matches the tier-3 floor.
 severity_tier() {

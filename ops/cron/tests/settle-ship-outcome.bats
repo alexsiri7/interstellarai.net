@@ -17,7 +17,7 @@ setup() {
     # fixtures (default: an ordinary issue), or fails with GH_VIEW_RC. The deferral checks (#211) read state-<N>
     # ("issue|pr<TAB>open|closed") and pull-<N> ("<state><TAB><merged><TAB>
     # <cross><TAB><login>"); gone-<N> makes both answer 404; comments-<N>
-    # holds the issue's comment bodies.
+    # holds the issue's comment bodies. GH_COMMENT_RC fails `issue comment`.
     cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_ARGV"
@@ -39,7 +39,7 @@ case "$*" in
       '{title: $t, body: $b}' ;;
   *"issue close"*)    exit "${GH_CLOSE_RC:-0}" ;;
   *"issue edit"*)     exit "${GH_EDIT_RC:-0}" ;;
-  *"issue comment"*)  exit 0 ;;
+  *"issue comment"*)  exit "${GH_COMMENT_RC:-0}" ;;
 esac
 STUB
     chmod +x "$T/bin/gh"
@@ -947,7 +947,7 @@ tier_outcome() {
     assert_parked 9
     [ "$(asked_default)" = "Close #9 as completed: the run found nothing left to deliver. <!-- archon-settle-default: close-completed -->" ]
     sed -n 's/^ask_question //p' "$LACHESIS_ARGV" | jq -e '.wait_days == 2 and .kind == "clarification"
-        and .options == ["Close #9 as completed: the run found nothing left to deliver.",
+        and .options == ["Run #9 once more, with this verdict as direction.",
                          "Answer with what the next run should do differently."]'
     [[ "$output" == *"tier 2, default close-completed"* ]]
 }
@@ -969,7 +969,49 @@ tier_outcome() {
     [ "$status" -eq 0 ]
     assert_parked 9
     [[ "$(asked_default)" == "Record #8 as blocking #9; "*"<!-- archon-settle-default: depend-8 -->" ]]
-    sed -n 's/^ask_question //p' "$LACHESIS_ARGV" | jq -e '.options[-1] == "Close #9."'
+}
+
+# An answer only releases the issue to run again; pickup carries out a close or
+# a dependency only as a taken default, so no option may offer one.
+@test "tiers: a question offers as options only answers that run the issue again" {
+    lachesis_on
+    printf 'issue\topen\n' > "$T/fixtures/state-8"
+    ref 8 open-issue
+    for verdict in 'No delivery needed: false positive alert, not a code change.' \
+            'No work owed in this repository: the crash is in the upstream SDK.' \
+            'Not done: blocked on #8 landing first.'; do
+        : > "$LACHESIS_ARGV"
+        echo "$verdict" > "$RUN_LOG"
+        run "$SCRIPT" testproj 9 "$RUN_LOG"
+        [ "$status" -eq 0 ]
+        [ -n "$(asked_default)" ]
+        sed -n 's/^ask_question //p' "$LACHESIS_ARGV" | jq -e '.options == ["Run #9 once more, with this verdict as direction.",
+            "Answer with what the next run should do differently."]'
+    done
+}
+
+# Pickup acts on a taken default only when its action matches
+# SETTLE_DEFAULT_ACTION_RE; any other would launch a run instead.
+@test "tiers: every default settle offers, but proceed, is one pickup carries out" {
+    lachesis_on
+    # shellcheck source=../lib/severity.sh
+    source "$(dirname "$SCRIPT")/severity.sh"
+    printf 'issue\topen\n' > "$T/fixtures/state-8"
+    ref 8 open-issue
+    local verdict action
+    for verdict in 'No delivery needed: false positive alert, not a code change.' \
+            'No work owed in this repository: the crash is in the upstream SDK.' \
+            'Not done: blocked on #8 landing first.' \
+            'Not done: the investigation was inconclusive. The crash did not reproduce.'; do
+        : > "$LACHESIS_ARGV"
+        echo "$verdict" > "$RUN_LOG"
+        run "$SCRIPT" testproj 9 "$RUN_LOG"
+        [ "$status" -eq 0 ]
+        action=$(asked_default | sed -nE 's/.*<!-- archon-settle-default: (.*) -->$/\1/p')
+        [ -n "$action" ]
+        [ "$action" = proceed ] || [[ "$action" =~ ^($SETTLE_DEFAULT_ACTION_RE)$ ]] \
+            || { echo "pickup would not carry out $action"; return 1; }
+    done
 }
 
 @test "tiers: blocked on an open PR, or on two issues, asks with no default" {
@@ -1141,6 +1183,37 @@ tier_outcome() {
     grep -q -- "--add-label archon:skipped" "$GH_ARGV"
     [ "$(asked_default)" = "" ]
     [ "$(grep -c '^add_note' "$LACHESIS_ARGV")" -eq 0 ]
+}
+
+@test "tiers: a tier-1 action whose marker comment cannot be posted is not taken: it asks with no default" {
+    lachesis_on
+    export GH_COMMENT_RC=1
+    tier_outcome 1 'Not done: the investigation was inconclusive. The crash did not reproduce.'
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"could not post the tier-1 proceed comment; asking instead"* ]]
+    [ "$(grep -c -- '--remove-label archon:in-progress$' "$GH_ARGV")" -eq 0 ]
+    [ "$(grep -c '^add_note' "$LACHESIS_ARGV")" -eq 0 ]
+    [ "$(asked_default)" = "" ]
+    assert_parked 9
+}
+
+@test "tiers: a tier-1 depend or proceed that cannot release archon:in-progress fails closed" {
+    lachesis_on
+    export GH_EDIT_RC=1
+    printf 'issue\topen\n' > "$T/fixtures/state-8"
+    ref 8 open-issue
+    for verdict in 'Not done: blocked on #8 landing first.' \
+            'Not done: the investigation was inconclusive. The crash did not reproduce.'; do
+        : > "$LACHESIS_ARGV"; : > "$GH_ARGV"
+        tier_outcome 1 "$verdict"
+        run "$SCRIPT" testproj 9 "$RUN_LOG"
+        [ "$status" -eq 1 ]
+        [[ "$output" == *"could not release archon:in-progress"* ]]
+        [[ "$output" != *"settled by tier-1 action"* ]]
+        [ "$(grep -c '^add_note' "$LACHESIS_ARGV")" -eq 0 ]
+        [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 0 ]
+    done
 }
 
 @test "tiers: a tier-1 dependency Lachesis refuses asks with no default" {
