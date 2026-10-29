@@ -138,6 +138,44 @@ run_row() {
     [[ "$output" == *"circuit open (failed:4)"* ]]
 }
 
+@test "a retry run that completed resets the count: a later streak retries again, it does not park" {
+    run_row failed 90
+    run_row failed 80
+    run_row failed 70
+    breaker_comment retry 65
+    run_row completed 60
+    run_row failed 50
+    run_row failed 30
+    run_row failed 10
+    run ship_breaker_check testproj 5
+    [ "$status" -eq 0 ]
+    [ "$(grep -c 'issue edit' "$GH_ARGV")" -eq 0 ]
+    grep -qx -- "$SHIP_BREAKER_RETRY_MARKER" "$GH_ARGV"
+    [ "$(grep -c -- 'failed too' "$GH_ARGV")" -eq 0 ]
+}
+
+@test "only rate-limited runs since the retry leave it pending: may launch" {
+    run_row failed 50
+    run_row failed 40
+    run_row failed 30
+    breaker_comment retry 20
+    run_row failed 10 '{"error":"Claude API error (rate_limit): You have hit your weekly limit"}'
+    run ship_breaker_check testproj 5
+    [ "$status" -eq 0 ]
+    [ "$(grep -c 'issue ' "$GH_ARGV")" -eq 0 ]
+}
+
+@test "the diagnosis posted to the issue carries no secret-shaped text" {
+    run_row failed 50 '{"error":"git push https://x-access-token:ghp_abcdefghijklmnopqrstuvwxyz0123@github.com/a/b failed"}'
+    run_row failed 30 '{"error":"env: GH_TOKEN=github_pat_11ABCDEFGHIJ_klmnopqrst NTFY_TOPIC=sekrit, Authorization: Bearer abcdefghijklmnopqrstu"}'
+    run_row failed 10 '{"error":"the factory token could not push; password: hunter2"}'
+    run ship_breaker_check testproj 5
+    [ "$status" -eq 0 ]
+    ! grep -qE -- 'ghp_|github_pat_|sekrit|abcdefghijklmnopqrstu|hunter2|x-access-token' "$GH_ARGV"
+    grep -q -- "https://\[redacted\]@github.com/a/b failed" "$GH_ARGV"
+    grep -q -- "the factory token could not push; password: \[redacted\]" "$GH_ARGV"
+}
+
 @test "a retry from before the last park is spent: the next trip retries again" {
     breaker_comment retry 90
     breaker_comment park 80

@@ -29,9 +29,11 @@
 # A failed:<n> trip first allows one diagnose-and-retry run (#237): a comment
 # carrying SHIP_BREAKER_RETRY_MARKER lists why the last runs failed, where the
 # next run's triage reads it, and the launch goes ahead. Only a counted failure
-# after that comment parks. A workflow-scope trip parks at once: another run
-# cannot push it either. One retry per park: a human who re-queues a parked
-# issue gets a retry again on its next trip.
+# after that comment parks, and only when every counted run since the comment
+# failed: a retry run that did not fail resets the count, so the next trip is a
+# fresh streak and gets its own retry. A workflow-scope trip parks at once:
+# another run cannot push it either. A human who re-queues a parked issue gets
+# a retry again on its next trip.
 #
 # A park labels the issue manual-review + archon:skipped, posts one comment
 # carrying SHIP_BREAKER_MARKER and logs it. A DB that cannot be read returns 2:
@@ -62,6 +64,24 @@ ship_breaker_db() {
   fi
 }
 
+# A run that failed on a Claude rate limit, as a condition on its events e.
+SHIP_BREAKER_RATE_LIMITED="e.event_type IN ('node_failed', 'workflow_failed')
+  AND (e.data LIKE '%rate_limit%' OR e.data LIKE '%hit your%limit%')"
+
+# ship_breaker_runs_sql <project> <issue> <since> — the FROM and WHERE that
+# select the issue's archon-ship runs (r) started after <since>, the runs the
+# breaker counts. 2 when an argument would not be safe to interpolate.
+ship_breaker_runs_sql() {
+  [[ "$1" =~ ^[A-Za-z0-9._-]+$ && "$2" =~ ^[0-9]+$ \
+     && "$3" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]] || return 2
+  printf '%s' "FROM remote_agent_workflow_runs r
+    JOIN remote_agent_codebases c ON c.id = r.codebase_id
+    WHERE r.workflow_name IN ('archon-ship', 'archon-ship-block')
+      AND r.user_message = 'fix #$2'
+      AND c.name = 'alexsiri7/$1'
+      AND r.started_at > '$3'"
+}
+
 # ship_breaker_rows <project> <issue> [since 'YYYY-MM-DD HH:MM:SS' UTC]
 # Newest first, at most 10: status<TAB>rate_limited(0|1)<TAB>workflow_scope(0|1).
 # A completed run whose outcome node printed a placeholder verdict reads failed.
@@ -73,18 +93,15 @@ ship_breaker_db() {
 # Both json_valid guards matter: one malformed node_output would otherwise fail
 # the whole query, and the breaker would refuse every launch.
 ship_breaker_rows() {
-  local project="$1" issue="$2" since="${3:-1970-01-01 00:00:00}" db out
+  local project="$1" issue="$2" since="${3:-1970-01-01 00:00:00}" db runs out
   local status rate scope verdict
-  [[ "$project" =~ ^[A-Za-z0-9._-]+$ && "$issue" =~ ^[0-9]+$ \
-     && "$since" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]] || return 2
+  runs=$(ship_breaker_runs_sql "$project" "$issue" "$since") || return 2
   db=$(ship_breaker_db)
   [ -r "$db" ] || return 2
   out=$(sqlite3 -readonly -separator $'\t' "file:$db?mode=ro" "
     SELECT r.status,
       EXISTS (SELECT 1 FROM remote_agent_workflow_events e
-              WHERE e.workflow_run_id = r.id
-                AND e.event_type IN ('node_failed', 'workflow_failed')
-                AND (e.data LIKE '%rate_limit%' OR e.data LIKE '%hit your%limit%')),
+              WHERE e.workflow_run_id = r.id AND $SHIP_BREAKER_RATE_LIMITED),
       EXISTS (SELECT 1 FROM remote_agent_workflow_events e
               WHERE e.workflow_run_id = r.id
                 AND e.event_type IN ('node_failed', 'node_completed', 'workflow_failed')
@@ -99,12 +116,7 @@ ship_breaker_rows() {
                    WHERE e.workflow_run_id = r.id AND e.event_type = 'node_completed'
                      AND e.step_name = 'outcome' AND json_valid(e.data)
                    ORDER BY e.rowid DESC LIMIT 1)))
-    FROM remote_agent_workflow_runs r
-    JOIN remote_agent_codebases c ON c.id = r.codebase_id
-    WHERE r.workflow_name IN ('archon-ship', 'archon-ship-block')
-      AND r.user_message = 'fix #$issue'
-      AND c.name = 'alexsiri7/$project'
-      AND r.started_at > '$since'
+    $runs
     ORDER BY r.started_at DESC
     LIMIT 10;" 2>/dev/null) || return 2
   while IFS=$'\t' read -r status rate scope verdict; do
@@ -117,12 +129,12 @@ ship_breaker_rows() {
 # ship_breaker_diagnosis <project> <issue> [since] — why the newest counted
 # runs failed, one "- <started_at>: <error>" line each for at most three. The
 # newest runs that are not rate-limited are the ones a trip counted: anything
-# else would have reset the count.
+# else would have reset the count. The lines go into a public issue comment, so
+# they pass through ship_breaker_redact first.
 ship_breaker_diagnosis() {
-  local project="$1" issue="$2" since="${3:-1970-01-01 00:00:00}" db out started error
+  local project="$1" issue="$2" since="${3:-1970-01-01 00:00:00}" db runs out started error
   db=$(ship_breaker_db)
-  if [[ "$project" =~ ^[A-Za-z0-9._-]+$ && "$issue" =~ ^[0-9]+$ \
-        && "$since" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]] && [ -r "$db" ] \
+  if runs=$(ship_breaker_runs_sql "$project" "$issue" "$since") && [ -r "$db" ] \
      && out=$(sqlite3 -readonly -separator $'\t' "file:$db?mode=ro" "
     SELECT r.started_at,
       (SELECT substr(replace(replace(json_extract(e.data, '\$.error'), char(10), ' '), char(9), ' '), 1, 300)
@@ -130,25 +142,33 @@ ship_breaker_diagnosis() {
        WHERE e.workflow_run_id = r.id AND e.event_type IN ('node_failed', 'workflow_failed')
          AND json_valid(e.data) AND json_extract(e.data, '\$.error') IS NOT NULL
        ORDER BY e.rowid DESC LIMIT 1)
-    FROM remote_agent_workflow_runs r
-    JOIN remote_agent_codebases c ON c.id = r.codebase_id
-    WHERE r.workflow_name IN ('archon-ship', 'archon-ship-block')
-      AND r.user_message = 'fix #$issue'
-      AND c.name = 'alexsiri7/$project'
-      AND r.started_at > '$since'
+    $runs
       AND NOT EXISTS (SELECT 1 FROM remote_agent_workflow_events e
-                      WHERE e.workflow_run_id = r.id
-                        AND e.event_type IN ('node_failed', 'workflow_failed')
-                        AND (e.data LIKE '%rate_limit%' OR e.data LIKE '%hit your%limit%'))
+                      WHERE e.workflow_run_id = r.id AND $SHIP_BREAKER_RATE_LIMITED)
     ORDER BY r.started_at DESC
     LIMIT 3;" 2>/dev/null); then
     while IFS=$'\t' read -r started error; do
       [ -n "$started" ] || continue
       printf -- '- %s: %s\n' "$started" "${error:-no error recorded (a placeholder verdict, or a crash before any node reported)}"
-    done <<<"$out"
+    done <<<"$out" | ship_breaker_redact
   else
     echo "- the run history could not be read"
   fi
+}
+
+# ship_breaker_redact — stdin to stdout with secret-shaped text replaced by
+# [redacted] (ops/cron/README.md: no secret value in an issue). A node error
+# can quote a token, an authenticated URL or an environment dump.
+ship_breaker_redact() {
+  sed -E \
+    -e 's/\b(gh[opsur]_|github_pat_)[A-Za-z0-9_]{16,}/[redacted]/g' \
+    -e 's/\b(sk-|xox[abeprs]-|dp\.(st|ct|pt|sa|scrt)\.)[A-Za-z0-9_.-]{16,}/[redacted]/g' \
+    -e 's/\bAKIA[0-9A-Z]{16}/[redacted]/g' \
+    -e 's/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_.-]+/[redacted]/g' \
+    -e 's#://[^/@[:space:]]+@#://[redacted]@#g' \
+    -e 's/\b(bearer|basic|token) +[A-Za-z0-9._~+/=-]{16,}/\1 [redacted]/Ig' \
+    -e "s/([A-Za-z0-9_]*(token|secret|passw(or)?d|api[_-]?key|private[_-]?key)[A-Za-z0-9_]*[\"']?[:=] *[\"']?)[^[:space:]\"',]+/\1[redacted]/Ig" \
+    -e 's/\b([A-Z][A-Z0-9_]{2,})=[^[:space:]]+/\1=[redacted]/g'
 }
 
 # ship_breaker_verdict — reads ship_breaker_rows on stdin; prints
@@ -164,6 +184,18 @@ ship_breaker_verdict() {
       else if (n >= max) print "failed:" n
       else print "ok"
     }'
+}
+
+# ship_breaker_since_retry — reads the ship_breaker_rows since a retry comment
+# on stdin; prints "pending" (no counted run yet), "reset" (a counted run did
+# not fail, so the streak now tripping is a fresh one) or "failed" (every
+# counted run since, the retry run among them, failed).
+ship_breaker_since_retry() {
+  awk -F'\t' '
+    $1 == "failed" && $2 == 1 { next }
+    $1 != "failed" { r = "reset"; exit }
+    { r = "failed" }
+    END { print (r ? r : "pending") }'
 }
 
 # ship_breaker_retry <project> <issue> <verdict> [since] — the
@@ -211,7 +243,10 @@ ship_breaker_check() {
     [ -n "$retry_at" ] || { ship_breaker_retry "$project" "$issue" "$verdict" "$since"; return; }
     retry_at=$(date -u -d "$retry_at" '+%Y-%m-%d %H:%M:%S' 2>/dev/null) || return 2
     rows=$(ship_breaker_rows "$project" "$issue" "$retry_at") || return 2
-    [ "$(SHIP_BREAKER_THRESHOLD=1 ship_breaker_verdict <<<"$rows")" = ok ] && return 0
+    case "$(ship_breaker_since_retry <<<"$rows")" in
+      pending) return 0 ;;
+      reset) ship_breaker_retry "$project" "$issue" "$verdict" "$since"; return ;;
+    esac
     retried="One diagnose-and-retry run after the breaker's comment failed too. "
   fi
 
