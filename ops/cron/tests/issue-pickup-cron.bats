@@ -44,7 +44,7 @@ case "$*" in
   */events*)                                   cat "$GH_FIXTURES/events-$(issue_of "$*")" 2>/dev/null || true ;;
   *"issue edit"*)                              exit "${GH_EDIT_RC:-0}" ;;
   *"issue close"*)                             exit "${GH_CLOSE_RC:-0}" ;;
-  *"issue comment"*)                           exit 0 ;;
+  *"issue comment"*)                           exit "${GH_COMMENT_RC:-0}" ;;
 esac
 STUB
     chmod +x "$T/bin/gh"
@@ -1397,4 +1397,10 @@ default_taken() {
     lachesis_pick testproj
     [ "$SUMMARY_ACTION" = "none" ]
     grep -q "Lachesis did not record the dependency" "$LOGGED"
+
+    export LACHESIS_DEPEND_RC=0 GH_COMMENT_RC=1
+    SUMMARY_ACTION="none"
+    lachesis_pick testproj
+    [ "$SUMMARY_ACTION" = "settled #42 (default taken)" ]
+    grep -q "#42 — recorded the dependency, but could not post its comment" "$LOGGED"
 }

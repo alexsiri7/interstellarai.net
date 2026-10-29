@@ -977,7 +977,8 @@ settle_defaulted() {
       gh issue comment "$issue" --repo "$repo" --body "Recorded #$blocker as blocking this issue: the factory's question went unanswered and its default was taken. The factory runs it again once #$blocker closes.
 
 <!-- archon-settle-act: $action -->
-<!-- lachesis:automated -->" >/dev/null 2>&1 || true ;;
+<!-- lachesis:automated -->" >/dev/null 2>&1 \
+        || log "$project: #$issue — recorded the dependency, but could not post its comment; the default note stays newest, so the next tick records it again" ;;
   esac
   lachesis_note "$project" "$issue" "Took the unanswered question's default on #$issue: $action." \
     || log "$project: #$issue — could not record the note in Lachesis"
