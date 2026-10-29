@@ -176,6 +176,43 @@ run_row() {
     grep -q -- "the factory token could not push; password: \[redacted\]" "$GH_ARGV"
 }
 
+@test "every secret shape the diagnosis can quote is redacted" {
+    local secret line
+    local -a secrets=(
+        ghs_abcdefghijklmnopqrstuvwxyz github_pat_11ABCDEFGHIJ_klmnopqrst
+        sk-abcdefghijklmnopqrstuvwx xoxb-1234567890-abcdefghijkl dp.st.prd.abcdefghijklmnopqrst
+        AKIAABCDEFGHIJKLMNOP
+        eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJlc2lnbmF0dXJl
+        userpass1234 bearerabcdefghijklmno basicabcdefghijklmnop tokenabcdefghijklmnop
+        tokval1 secval1 pwval1 apikeyval1 privval1 upperval1)
+    run ship_breaker_redact <<'EOF'
+push as ghs_abcdefghijklmnopqrstuvwxyz failed
+cloned with github_pat_11ABCDEFGHIJ_klmnopqrst
+openai rejected sk-abcdefghijklmnopqrstuvwx
+slack rejected xoxb-1234567890-abcdefghijkl
+doppler rejected dp.st.prd.abcdefghijklmnopqrst
+aws rejected AKIAABCDEFGHIJKLMNOP
+session eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJlc2lnbmF0dXJl expired
+fetch https://bot:userpass1234@example.com/x failed
+Authorization: Bearer bearerabcdefghijklmno
+Authorization: Basic basicabcdefghijklmnop
+Authorization: token tokenabcdefghijklmnop
+access_token=tokval1
+client_secret: secval1
+"passwd": "pwval1"
+API-KEY=apikeyval1
+private_key: privval1
+export MY_VAR=upperval1
+EOF
+    [ "$status" -eq 0 ]
+    for secret in "${secrets[@]}"; do
+        [[ "$output" != *"$secret"* ]] || { echo "leaked: $secret"; return 1; }
+    done
+    while IFS= read -r line; do
+        [[ "$line" == *"[redacted]"* ]] || { echo "not redacted: $line"; return 1; }
+    done <<<"$output"
+}
+
 @test "a retry from before the last park is spent: the next trip retries again" {
     breaker_comment retry 90
     breaker_comment park 80

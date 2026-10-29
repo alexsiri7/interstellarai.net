@@ -192,6 +192,7 @@ ship_breaker_verdict() {
 # counted run since, the retry run among them, failed).
 ship_breaker_since_retry() {
   awk -F'\t' '
+    NF == 0 { next }                            # no rows: a here-string of ""
     $1 == "failed" && $2 == 1 { next }
     $1 != "failed" { r = "reset"; exit }
     { r = "failed" }
