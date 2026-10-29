@@ -17,13 +17,16 @@ setup() {
     # fixtures (default: an ordinary issue), or fails with GH_VIEW_RC. The deferral checks (#211) read state-<N>
     # ("issue|pr<TAB>open|closed") and pull-<N> ("<state><TAB><merged><TAB>
     # <cross><TAB><login>"); gone-<N> makes both answer 404; comments-<N>
-    # holds the issue's comment bodies. GH_COMMENT_RC fails `issue comment`.
+    # is the issue's one comment body, which the script's --jq reads. GH_COMMENT_RC fails `issue comment`.
     cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_ARGV"
 case "$*" in
   *sub_issues*)       cat "$GH_FIXTURES/sub-$(sed -E 's#.*/issues/([0-9]+)/.*#\1#' <<<"$*")" 2>/dev/null || printf '0\t0\n' ;;
-  *"/comments"*)      cat "$GH_FIXTURES/comments-$(sed -E 's#.*/issues/([0-9]+)/.*#\1#' <<<"$*")" 2>/dev/null; exit "${GH_COMMENTS_RC:-0}" ;;
+  *"/comments"*)
+    f="$GH_FIXTURES/comments-$(sed -E 's#.*/issues/([0-9]+)/.*#\1#' <<<"$*")"
+    [ -e "$f" ] && jq -Rs '[{body: .}]' "$f" | jq -r "$5"
+    exit "${GH_COMMENTS_RC:-0}" ;;
   "api "*/pulls/*)
     [ -e "$GH_FIXTURES/gone-${2##*/}" ] && { echo 'gh: Not Found (HTTP 404)' >&2; exit 1; }
     cat "$GH_FIXTURES/pull-${2##*/}" 2>/dev/null || exit 1 ;;
@@ -1212,6 +1215,34 @@ tier_outcome() {
         [[ "$output" == *"could not release archon:in-progress"* ]]
         [[ "$output" != *"settled by tier-1 action"* ]]
         [ "$(grep -c '^add_note' "$LACHESIS_ARGV")" -eq 0 ]
+        [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 0 ]
+    done
+}
+
+@test "tiers: a tier-1 act whose release failed is released by the next settle of its run, not asked" {
+    lachesis_on
+    printf 'issue\topen\n' > "$T/fixtures/state-8"
+    ref 8 open-issue
+    for verdict in 'Not done: blocked on #8 landing first.' \
+            'Not done: the investigation was inconclusive. The crash did not reproduce.'; do
+        : > "$LACHESIS_ARGV"; : > "$GH_ARGV"; rm -f "$T/fixtures/comments-9"
+        tier_outcome 1 "$verdict"
+        GH_EDIT_RC=1 run "$SCRIPT" testproj 9 "$RUN_LOG"
+        [ "$status" -eq 1 ]
+        # The act comment landed on GitHub; the unstick_stale re-settle passes
+        # the same log by another path.
+        sed -n '/^issue comment 9 /,/lachesis:automated/p' "$GH_ARGV" \
+            | sed '1s/^issue comment 9 --repo alexsiri7\/testproj --body //' > "$T/fixtures/comments-9"
+        grep -q 'archon-settle-act: ' "$T/fixtures/comments-9"
+        : > "$LACHESIS_ARGV"; : > "$GH_ARGV"
+        run "$SCRIPT" testproj 9 "$T/../${T##*/}/run.log"
+        [ "$status" -eq 0 ]
+        [[ "$output" == *"#9 settled by tier-1 action "* ]]
+        grep -q -- '--remove-label archon:in-progress$' "$GH_ARGV"
+        [ "$(gh_calls 'issue comment')" -eq 0 ]
+        [ "$(gh_calls 'archon:skipped')" -eq 0 ]
+        [ "$(grep -c '^add_note' "$LACHESIS_ARGV")" -eq 1 ]
+        [ "$(grep -c '^add_dependency' "$LACHESIS_ARGV")" -eq 0 ]
         [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 0 ]
     done
 }

@@ -311,8 +311,9 @@ suggested_action() {
   local ref
   case "$verdict" in
     "No delivery needed: "*)
-      [[ "$sub_open" =~ ^[0-9]+$ ]] && [ "$sub_open" -eq 0 ] && [ "$all_refs_known" = 1 ] \
-        || { echo wait; return; }
+      if ! { [[ "$sub_open" =~ ^[0-9]+$ ]] && [ "$sub_open" -eq 0 ] && [ "$all_refs_known" = 1 ]; }; then
+        echo wait; return
+      fi
       for ref in "${refs[@]}"; do
         [ "${kind[$ref]:-}" = pr ] && { echo wait; return; }
       done
@@ -351,13 +352,13 @@ default_text() {
 # settle_act <action> — takes a tier-1 action and exits 0; returns 1 when it
 # could not be taken, so the caller asks instead. The marker comment is posted
 # before the issue is released: released without it, the next run's settle
-# would not see the action as taken and could take it again.
+# would not see the action as taken and could take it again. When the release
+# then fails, settle_resume_act finishes it on the next settle of this run.
 settle_act() {
-  local action="$1" marker="<!-- archon-settle-act: $1 -->" note what
-  note="$(default_text "$action") Taken without asking (tier 1, #237). The run's verdict: ${verdict:0:300}"
+  local action="$1" marker="<!-- archon-settle-act: $1 -->" what
   case "$action" in
     close-*)
-      act_marker="$marker" act_note="$note"
+      act_marker="$marker" act_note="$(tier1_note "$action")"
       local reason=completed
       [ "$action" = close-not-planned ] && reason="not planned"
       close_as_done "the verdict is a tier-1 outcome, acted on without asking (#237)" --reason "$reason"
@@ -378,19 +379,48 @@ ${marker}
     echo "$(date -Is) [issue-pickup] $project: #$issue — could not post the tier-1 $action comment; asking instead"
     return 1
   fi
+  settle_release "$action"
+}
+
+# tier1_note <action> — the Lachesis note that logs a tier-1 action.
+tier1_note() {
+  echo "$(default_text "$1") Taken without asking (tier 1, #237). The run's verdict: ${verdict:0:300}"
+}
+
+# settle_release <action> — releases a tier-1 depend or proceed whose comment
+# has landed, records its note, and exits.
+settle_release() {
+  local action="$1"
   if ! gh issue edit "$issue" --repo "$repo" --remove-label "archon:in-progress" >/dev/null 2>&1; then
     echo "$(date -Is) [issue-pickup] $project: #$issue — took tier-1 action $action, but could not release archon:in-progress"
     exit 1
   fi
-  lachesis_note "$project" "$issue" "$note" \
+  lachesis_note "$project" "$issue" "$(tier1_note "$action")" \
     || echo "$(date -Is) [issue-pickup] $project: #$issue — could not record the note in Lachesis"
   echo "$(date -Is) [issue-pickup] $project: #$issue settled by tier-1 action $action"
   exit 0
 }
 
+# settle_resume_act — exits through settle_release when this run's tier-1
+# act comment is already on the issue: the act was taken and only its release
+# failed, so the marker must not turn it into a question. Matched on the run
+# log's file name, which unstick_stale passes as an absolute path and the
+# ship wrapper as a relative one.
+settle_resume_act() {
+  local action
+  action=$(gh api --paginate "repos/$repo/issues/$issue/comments" --jq '.[].body | @json' 2>/dev/null \
+    | grep -F "${run_log##*/}\`" \
+    | grep -oE '<!-- archon-settle-act: (depend-[0-9]+|proceed) -->' | tail -1)
+  [ -n "$action" ] || return 0
+  action=${action#<!-- archon-settle-act: } action=${action% -->}
+  echo "$(date -Is) [issue-pickup] $project: #$issue — tier-1 action $action already taken by this run; releasing"
+  settle_release "$action"
+}
+
 action=wait tier_log=""
 ask_defaults=()
 if lachesis_pickup_enabled; then
+  settle_resume_act
   tier=$(severity_tier "$declared_tier" "$verdict_block"$'\n'"$title")
   [ "$health_filed" = 1 ] && tier=3
   [ "$tier" = 3 ] || action=$(suggested_action)
