@@ -76,18 +76,45 @@ lachesis_call() {
     python3 -B "$(dirname "${BASH_SOURCE[0]}")/lachesis_call.py" "$@"
 }
 
-# lachesis_ask <project> <issue> <question> [context] — record a question for
-# the author blocking alexsiri7/<project>#<issue> (ask_question, kind
-# clarification): Lachesis posts it, with the context, as a comment on the
-# issue and labels it needs-author, so next_issue passes over the issue until
-# the author answers. True when the question was recorded.
+# lachesis_ask <project> <issue> <question> [context] [default] [wait_days]
+#   [option...] — record a question for the author blocking
+# alexsiri7/<project>#<issue> (ask_question, kind clarification): Lachesis
+# posts it, with the context, as a comment on the issue and labels it
+# needs-author, so next_issue passes over the issue until the author answers.
+# A default (#237) is taken after wait_days (Lachesis's own default when
+# empty) unless the author answers first; options are the answers offered.
+# Each is sent only when given. True when the question was recorded.
 lachesis_ask() {
-  local project="$1" issue="$2" question="$3" context="${4:-}" args
+  local project="$1" issue="$2" question="$3" context="${4:-}" default="${5:-}" wait_days="${6:-}" args
+  shift $(( $# < 6 ? $# : 6 ))
   args=$(jq -nc --arg repo "alexsiri7/$project" --argjson n "$issue" \
-    --arg q "$question" --arg c "$context" \
+    --arg q "$question" --arg c "$context" --arg d "$default" --arg w "$wait_days" \
     '{repo: $repo, question: $q, kind: "clarification", asker: "factory",
-      blocks: [$n], issue: $n, context: $c}') || return 1
+      blocks: [$n], issue: $n, context: $c}
+     + (if $d != "" then {default: $d} else {} end)
+     + (if $w != "" then {wait_days: ($w | tonumber)} else {} end)
+     + (if $ARGS.positional != [] then {options: $ARGS.positional} else {} end)' \
+    --args "$@") || return 1
   lachesis_call ask_question "$args" >/dev/null
+}
+
+# lachesis_note <project> <issue> <text> — record a decision the factory took
+# on alexsiri7/<project>#<issue> without asking (add_note). True when recorded.
+lachesis_note() {
+  local args
+  args=$(jq -nc --arg repo "alexsiri7/$1" --argjson n "$2" --arg t "$3" \
+    '{repo: $repo, role: "factory", type: "decision", text: $t, issue: $n}') || return 1
+  lachesis_call add_note "$args" >/dev/null
+}
+
+# lachesis_depend <project> <issue> <blocker> — record #<blocker> as blocking
+# #<issue> (add_dependency, a native GitHub blocked_by link), so next_issue
+# passes over #<issue> until #<blocker> closes. True when recorded.
+lachesis_depend() {
+  local args
+  args=$(jq -nc --arg repo "alexsiri7/$1" --argjson n "$2" --argjson b "$3" \
+    '{repo: $repo, issue_number: $n, blocked_by_issue_number: $b}') || return 1
+  lachesis_call add_dependency "$args" >/dev/null
 }
 
 # lachesis_ask_once <project> <issue> <key> <question> [context] — lachesis_ask,

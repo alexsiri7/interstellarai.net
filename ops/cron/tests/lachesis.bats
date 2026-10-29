@@ -88,6 +88,24 @@ STUB
     [ "$output" = '{"repo":"alexsiri7/testproj","question":"Why \"this\"?","kind":"clarification","asker":"factory","blocks":[12],"issue":12,"context":"some context"}' ]
 }
 
+@test "lachesis_ask passes a default, its wait and the options only when given (#237)" {
+    export LACHESIS_CALL_CMD="$T/bin/lachesis"
+    lachesis_ask testproj 12 'q?' 'ctx' 'Close #12.' 2 'Close #12.' 'Answer otherwise.'
+    lachesis_ask testproj 12 'q?' 'ctx' 'Close #12.'
+    run jq -sc 'map({default, wait_days, options})' <<<"$(sed -E 's/^ask_question //' "$LACHESIS_ARGV")"
+    [ "$output" = '[{"default":"Close #12.","wait_days":2,"options":["Close #12.","Answer otherwise."]},{"default":"Close #12.","wait_days":null,"options":null}]' ]
+}
+
+@test "lachesis_note and lachesis_depend send add_note and add_dependency" {
+    export LACHESIS_CALL_CMD="$T/bin/lachesis"
+    lachesis_note testproj 12 'Closed #12.'
+    lachesis_depend testproj 12 8
+    grep -qx 'add_note {"repo":"alexsiri7/testproj","role":"factory","type":"decision","text":"Closed #12.","issue":12}' "$LACHESIS_ARGV"
+    grep -qx 'add_dependency {"repo":"alexsiri7/testproj","issue_number":12,"blocked_by_issue_number":8}' "$LACHESIS_ARGV"
+    LACHESIS_RC=1 run lachesis_depend testproj 12 8
+    [ "$status" -ne 0 ]
+}
+
 @test "lachesis_ask_once asks once per issue and key, and again after a failure" {
     export LACHESIS_CALL_CMD="$T/bin/lachesis"
     LACHESIS_RC=1 run lachesis_ask_once testproj 12 k 'q?'
