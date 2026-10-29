@@ -405,12 +405,17 @@ settle_release() {
 # act comment is already on the issue: the act was taken and only its release
 # failed, so the marker must not turn it into a question. Matched on the run
 # log's file name, which unstick_stale passes as an absolute path and the
-# ship wrapper as a relative one.
+# ship wrapper as a relative one. A close is no resume: a close that landed
+# leaves no open issue to settle. Exits 1 when the comments cannot be read:
+# asking then could ask about an act already taken.
 settle_resume_act() {
-  local action
-  action=$(gh api --paginate "repos/$repo/issues/$issue/comments" --jq '.[].body | @json' 2>/dev/null \
-    | grep -F "${run_log##*/}\`" \
-    | grep -oE '<!-- archon-settle-act: (depend-[0-9]+|proceed) -->' | tail -1)
+  local bodies action
+  if ! bodies=$(gh api --paginate "repos/$repo/issues/$issue/comments" --jq '.[].body | @json' 2>/dev/null); then
+    echo "$(date -Is) [issue-pickup] $project: #$issue — could not read its comments to check for a tier-1 action already taken"
+    exit 1
+  fi
+  action=$(grep -F "${run_log##*/}\`" <<<"$bodies" \
+    | grep -oE '<!-- archon-settle-act: [^ ]+ -->' | grep -v ': close-' | tail -1)
   [ -n "$action" ] || return 0
   action=${action#<!-- archon-settle-act: } action=${action% -->}
   echo "$(date -Is) [issue-pickup] $project: #$issue — tier-1 action $action already taken by this run; releasing"

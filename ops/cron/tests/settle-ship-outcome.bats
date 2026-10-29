@@ -1149,14 +1149,31 @@ tier_outcome() {
     [ "$(asked_default)" = "" ]
 }
 
-@test "tiers: comments that cannot be read ask with no default" {
+@test "tiers: comments that cannot be read leave the issue unsettled, asking nothing" {
     lachesis_on
     export GH_COMMENTS_RC=1
     tier_outcome 1 'No delivery needed: false positive alert, not a code change.'
     run "$SCRIPT" testproj 9 "$RUN_LOG"
-    [ "$status" -eq 0 ]
-    assert_parked 9
-    [ "$(asked_default)" = "" ]
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"could not read its comments"* ]]
+    [ "$(gh_calls 'issue comment')" -eq 0 ]
+    [ "$(gh_calls 'archon:skipped')" -eq 0 ]
+    [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 0 ]
+}
+
+@test "tiers: a tier-1 act whose release failed is not asked when the next settle cannot read its comments" {
+    lachesis_on
+    tier_outcome 1 'Not done: the investigation was inconclusive. The crash did not reproduce.'
+    GH_EDIT_RC=1 run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 1 ]
+    sed -n '/^issue comment 9 /,/lachesis:automated/p' "$GH_ARGV" \
+        | sed '1s/^issue comment 9 --repo alexsiri7\/testproj --body //' > "$T/fixtures/comments-9"
+    : > "$LACHESIS_ARGV"; : > "$GH_ARGV"
+    GH_COMMENTS_RC=1 run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 1 ]
+    [ "$(gh_calls 'issue comment')" -eq 0 ]
+    [ "$(gh_calls 'archon:skipped')" -eq 0 ]
+    [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 0 ]
 }
 
 @test "tiers: a health-filed issue, or one whose body cannot be read, is never closed by tier 1" {
