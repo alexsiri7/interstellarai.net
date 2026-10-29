@@ -20,7 +20,8 @@ setup() {
     # (added here), so only the trust tests need to spell authors out. The
     # trust gate itself fails closed on a missing author (see trust.bats).
     # Comment listings (trust_comments_ok) answer from comments-<N>, one login
-    # per line; absent = no comments.
+    # per line; absent = no comments. The newest comment's body, as
+    # settle_defaulted reads it (a JSON string), comes from last-comment-<N>.
     cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_ARGV"
@@ -33,6 +34,7 @@ case "$*" in
   *"issue list"*"--label archon:skipped"*)     owned "$GH_FIXTURES/skipped.json" ;;
   *"issue list"*"--state closed"*)             owned "$GH_FIXTURES/closed.json" ;;
   *"issue list"*)                              owned "$GH_FIXTURES/open.json" ;;
+  *"api --paginate repos/"*/comments*@json*)   cat "$GH_FIXTURES/last-comment-$(issue_of "$*")" 2>/dev/null || echo null ;;
   *"api --paginate repos/"*/comments*)         [ -n "${GH_COMMENTS_FAIL:-}" ] && exit 1
                                                cat "$GH_FIXTURES/comments-$(issue_of "$*")" 2>/dev/null || true ;;
   *"issue view "*)                             cat "$GH_FIXTURES/labels-$(sed -E 's/^issue view ([0-9]+).*/\1/' <<<"$*")" 2>/dev/null || echo '[]' ;;
@@ -505,6 +507,21 @@ JSON
 
     [ "$(gh_calls 'issue edit')" -eq 0 ]
     [ "$SUMMARY_ACTION" = "none" ]
+}
+
+@test "auto_triage passes over launch-smoke issues untouched (#237)" {
+    cat > "$T/fixtures/open.json" <<'JSON'
+[{"number":60,"title":"launch-smoke vmain-1a2b3c","labels":[],"createdAt":"2026-01-01T00:00:00Z"},
+ {"number":61,"title":"[Sentry] launch-smoke vmain-1a2b3c","labels":[],"createdAt":"2026-01-02T00:00:00Z"},
+ {"number":62,"title":"Crash after launch-smoke vmain-1a2b3c","labels":[],"createdAt":"2026-01-03T00:00:00Z"}]
+JSON
+    load_fn auto_triage
+
+    auto_triage testproj
+
+    [ "$SUMMARY_ACTION" = "triage #62" ]
+    [ "$(gh_calls 'issue edit 60')" -eq 0 ]
+    [ "$(gh_calls 'issue edit 61')" -eq 0 ]
 }
 
 @test "auto_triage leaves a triage-in-progress issue alone while its label is young" {
@@ -1050,6 +1067,7 @@ case "$1" in
                 cat "$GH_FIXTURES/next.json" ;;
   ask_question) [ -n "${LACHESIS_ASK_RC:-}" ] && exit "$LACHESIS_ASK_RC"
                 echo '{}' ;;
+  add_dependency) exit "${LACHESIS_DEPEND_RC:-0}" ;;
 esac
 STUB
     chmod +x "$T/bin/lachesis"
@@ -1064,6 +1082,7 @@ STUB
     load_fn lachesis_why_none
     load_fn lachesis_pick
     load_fn lachesis_may_triage
+    load_fn settle_defaulted
 }
 
 # next_issue offering <repo>#<n> first and otherrepo#<m> under also_eligible.
@@ -1293,4 +1312,86 @@ issue_json() {
     [ "$(gh_calls -- 'archon:queued')" -eq 0 ]
     [ "$(gh_calls -- 'archon:skipped')" -eq 0 ]
     [ "$SUMMARY_STALE" -eq 1 ]
+}
+
+# ── Lachesis pickup: a settle question's default was taken (#237) ────────────
+
+# default_taken <N> <action> — #N's newest comment is Lachesis's note that the
+# default with <action>'s marker was taken.
+default_taken() {
+    jq -n --arg a "$2" '"No answer came within the wait, so the default was taken: Do it. <!-- archon-settle-default: \($a) -->"' \
+        > "$T/fixtures/last-comment-$1"
+}
+
+@test "lachesis: a taken close default closes the issue instead of launching it" {
+    lachesis_on
+    next_offers alexsiri7/testproj 42
+    issue_json 42
+    default_taken 42 close-completed
+
+    lachesis_pick testproj
+
+    [ "$SUMMARY_ACTION" = "settled #42 (default taken)" ]
+    grep -q -- "issue close 42 --repo alexsiri7/testproj --reason completed --comment" "$GH_ARGV"
+    grep -qx -- "<!-- archon-settle-act: close-completed -->" "$GH_ARGV"
+    grep -q -- "issue edit 42 --repo alexsiri7/testproj --remove-label archon:skipped --remove-label archon:in-progress --add-label archon:done" "$GH_ARGV"
+    [ "$(gh_calls -- 'archon:in-progress$')" -eq 0 ]
+    grep -q '^add_note ' "$LACHESIS_ARGV"
+}
+
+@test "lachesis: a taken not-planned default closes as not planned" {
+    lachesis_on
+    next_offers alexsiri7/testproj 42
+    issue_json 42
+    default_taken 42 close-not-planned
+    lachesis_pick testproj
+    grep -q -- "issue close 42 --repo alexsiri7/testproj --reason not planned" "$GH_ARGV"
+}
+
+@test "lachesis: a taken dependency default records it instead of launching" {
+    lachesis_on
+    next_offers alexsiri7/testproj 42
+    issue_json 42
+    default_taken 42 depend-8
+
+    lachesis_pick testproj
+
+    [ "$SUMMARY_ACTION" = "settled #42 (default taken)" ]
+    grep -qx 'add_dependency {"repo":"alexsiri7/testproj","issue_number":42,"blocked_by_issue_number":8}' "$LACHESIS_ARGV"
+    grep -qx -- "<!-- archon-settle-act: depend-8 -->" "$GH_ARGV"
+    [ "$(gh_calls -- 'issue close')" -eq 0 ]
+}
+
+@test "lachesis: a taken proceed default, a later comment, or no marker launches as usual" {
+    lachesis_on
+    next_offers alexsiri7/testproj 42
+    issue_json 42
+    for last in \
+        '"No answer came within the wait, so the default was taken: Run it. <!-- archon-settle-default: proceed -->"' \
+        '"Please look at the logs first. <!-- archon-settle-default: close-completed -->"' \
+        '"No answer came within the wait, so the default was taken: Close it."'; do
+        : > "$GH_ARGV"
+        SUMMARY_ACTION="none"
+        echo "$last" > "$T/fixtures/last-comment-42"
+        lachesis_pick testproj
+        [ "$SUMMARY_ACTION" = "pickup #42" ] || { echo "not launched: $last"; return 1; }
+        [ "$(gh_calls -- 'issue close')" -eq 0 ]
+    done
+}
+
+@test "lachesis: a taken default that cannot be acted on launches nothing" {
+    lachesis_on
+    next_offers alexsiri7/testproj 42
+    issue_json 42
+    default_taken 42 close-completed
+    export GH_CLOSE_RC=1
+    lachesis_pick testproj
+    [ "$SUMMARY_ACTION" = "none" ]
+    grep -q "#42 — its question's default (close-completed) was taken, but the close failed" "$LOGGED"
+
+    default_taken 42 depend-8
+    export LACHESIS_DEPEND_RC=1
+    lachesis_pick testproj
+    [ "$SUMMARY_ACTION" = "none" ]
+    grep -q "Lachesis did not record the dependency" "$LOGGED"
 }
