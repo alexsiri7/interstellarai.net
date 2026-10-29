@@ -23,6 +23,7 @@
 #   archon_worktrees_known || ...       # false when some active run's worktree is unknown
 #   archon_runs_known || ...            # false when this tick's snapshot failed
 #   archon_parked_runs 1800             # rows for paused runs nothing will resume
+#   archon_stalled_tool_calls 7200      # rows for running runs with a tool call silent that long
 #   run_id=$(archon_branch_ci_attention_run "$head") # paused at the CI attention step on this branch
 #   run_id=$(archon_branch_running_run "$head") # a running run is working in this branch's worktree
 #   run_id=$(archon_branch_active_run "$head")  # a running or paused run holds this branch's worktree
@@ -64,7 +65,8 @@ ARCHON_PARKED_MARKER_DIR="$HOME/.archon/pipeline-health-state/parked"
 #   $1 workflow_name  $2 status  $3 origin_path  $4 user_message
 #   $5 run_id         $6 pause class            $7 deadline    $8 waiting_since
 #   $9 working_path (the run's worktree)  $10 pause step  $11 pause message
-# Fields 5-11 are appended so every $1..$4 matcher keeps working unchanged.
+#   $12 stalled since  $13 stalled call
+# Fields 5-13 are appended so every $1..$4 matcher keeps working unchanged.
 #
 # The pause class is "" for a running run; for a paused one it mirrors
 # `runAttention` in archon's packages/workflows/src/schemas/workflow-run.ts
@@ -110,6 +112,12 @@ ARCHON_PARKED_MARKER_DIR="$HOME/.archon/pipeline-health-state/parked"
 # empty for every other class. For `attention` they are archon's step name
 # (workflowWaitStepName: "<nodeId>.<bodyWaitId>" for a loop-owned wait) and
 # wait.message; for `gate`, approval.nodeId and approval.message.
+#
+# $12 and $13 describe a running run's oldest stalled tool call: the epoch of
+# its lastProgressAt and "<nodeId>: <title, else name>". The engine lists a
+# call in metadata.tool_call_attention once it has gone toolCallAttentionMs
+# (30m by default) without progress and drops it on the next progress event;
+# with no such call, and for every paused row, $12 is 0 and $13 empty.
 #
 # A listing failure, or a page holding fewer runs than its `total` (the listing
 # is capped at 100), leaves the snapshot short and sets ARCHON_RUNS_SNAPSHOT_OK=0
@@ -171,6 +179,24 @@ def classify(meta):
         return ("blocked_on_child", 0, 0, "", "")
     return ("gate", 0, 0, approval["nodeId"], approval["message"])
 
+def stalled_call(meta):
+    """(since, label) of the tool call silent longest — see the header."""
+    calls = meta.get("tool_call_attention")
+    if not isinstance(calls, list):
+        return (0, "")
+    oldest = None
+    for call in calls:
+        if not isinstance(call, dict):
+            continue
+        since = epoch(call.get("lastProgressAt"))
+        if since and (oldest is None or since < oldest[0]):
+            oldest = (since, call)
+    if oldest is None:
+        return (0, "")
+    since, call = oldest
+    label = (call.get("nodeId") or "") + ": " + (call.get("title") or call.get("name") or "")
+    return (since, label[:200])
+
 def field(value):
     return (value or "").replace("\t", " ").replace("\n", " ")
 
@@ -198,8 +224,9 @@ for r in runs:
     run_id = r.get("id") or ""
     wpath = field(r.get("working_path"))
     pause, deadline, since, step, need = classify(meta) if status == "paused" else ("", 0, 0, "", "")
+    stalled, call = stalled_call(meta) if status == "running" else (0, "")
     print(f"{name}\t{status}\t{origin}\t{msg}\t{run_id}\t{pause}\t{deadline}\t{since}\t{wpath}"
-          f"\t{field(step)}\t{field(need)}")
+          f"\t{field(step)}\t{field(need)}\t{stalled}\t{field(call)}")
 ' 2>&1 >> "$ARCHON_RUNS_SNAPSHOT"); then
       continue
     fi
@@ -301,6 +328,20 @@ archon_parked_runs() {
     $6 == "gate" || $6 == "resolved" || $6 == "unreadable" { report(); next }
     $6 == "attention" && ($10 !~ cire || $8 == 0 || now - $8 > cimax) { report(); next }
     $6 == "wait" && (now - $7 > stale || ($8 > 0 && now - $8 > hard)) { report() }
+  ' "$ARCHON_RUNS_SNAPSHOT"
+}
+
+# archon_stalled_tool_calls <stale_seconds>
+# Print one TSV row per running run whose oldest stalled tool call ($12, $13)
+# has gone more than <stale_seconds> without progress:
+#   run_id <TAB> workflow_name <TAB> origin <TAB> user_message
+#   <TAB> stalled_since_epoch <TAB> call label
+# Call after archon_runs_snapshot, and only when archon_runs_known.
+archon_stalled_tool_calls() {
+  [ -s "$ARCHON_RUNS_SNAPSHOT" ] || return 0
+  awk -F'\t' -v now="$(date +%s)" -v stale="$1" '
+    $12 > 0 && now - $12 > stale {
+      print $5 "\t" $1 "\t" $3 "\t" $4 "\t" $12 "\t" $13 }
   ' "$ARCHON_RUNS_SNAPSHOT"
 }
 
