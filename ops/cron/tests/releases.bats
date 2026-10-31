@@ -200,6 +200,13 @@ YML
     grep -q 'proj — released again' "$T/log"
 }
 
+@test "the newest release-* tag by name is the last release, whatever order gh lists them in" {
+    lagging proj 3 $((T0 - 50 * 3600)); no_workflows proj
+    printf 'refs/tags/release-2026-02-01\nrefs/tags/release-2026-01-01\n' > "$T/gh/proj/tags"
+    release_lag_check proj
+    grep -q 'since release-2026-02-01' "$T/notified"
+}
+
 @test "a lag under 48h does not flag" {
     lagging proj 3 $((T0 - 47 * 3600)); no_workflows proj
     release_lag_check proj

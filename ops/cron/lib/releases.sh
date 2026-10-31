@@ -147,7 +147,7 @@ release_push_workflow() {
 }
 
 # release_lag_check <project> — commits on main not in the newest release-*
-# tag, the oldest of them committed over RELEASE_LAG_SECONDS ago (a repo with
+# tag by name (the one daily-release-cron.sh counts from), the oldest of them committed over RELEASE_LAG_SECONDS ago (a repo with
 # no tag: any commit that old), on a project the cron would release. Needs
 # log and notify_checked from the caller.
 release_lag_check() {
