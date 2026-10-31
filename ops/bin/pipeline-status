@@ -22,6 +22,9 @@ source "$SCRIPT_DIR/../cron/lib/lachesis.sh"
 # whose review said not ready (deadline_kind_note).
 # shellcheck source=../cron/lib/deadlines.sh
 source "$SCRIPT_DIR/../cron/lib/deadlines.sh"
+# pipeline-health's markers for main commits unreleased for 48h.
+# shellcheck source=../cron/lib/releases.sh
+source "$SCRIPT_DIR/../cron/lib/releases.sh"
 OWNER="alexsiri7"
 
 # Colours
@@ -117,6 +120,7 @@ printf '%s\n' "─────────────────────�
 
 any_stuck=0
 any_stalled=0
+any_unreleased=0
 
 for REPO in "${PROJECTS[@]}"; do
     # Open PRs
@@ -155,6 +159,11 @@ for REPO in "${PROJECTS[@]}"; do
         notes+="${RED}${stall}${RESET} "
         any_stalled=1
     fi
+    unreleased=$(release_lag_note "$REPO")
+    if [ -n "$unreleased" ]; then
+        notes+="${RED}${unreleased}${RESET} "
+        any_unreleased=1
+    fi
 
     printf "%-22s  %4s  %6s  " "$REPO" "$pr_count" "$issue_count"
     printf "${ci_str}  ${notes}\n"
@@ -169,6 +178,9 @@ if lachesis_next_failing; then
 fi
 if [ "$any_stalled" -eq 1 ]; then
     printf '%bAt least one repo has open work and merged nothing in 24h — check above.%b\n\n' "$RED" "$RESET"
+fi
+if [ "$any_unreleased" -eq 1 ]; then
+    printf '%bAt least one repo has main commits unreleased for 48h — check above.%b\n\n' "$RED" "$RESET"
 fi
 if [ "$any_stuck" -eq 1 ]; then
     printf "${RED}CI red on main in at least one project — check above.${RESET}\n\n"
