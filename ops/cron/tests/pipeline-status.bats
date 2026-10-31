@@ -14,6 +14,12 @@ setup() {
     source <(awk '/^sweep_status\(\)/{p=1} p{print} p && /^}$/{p=0}' "$cron_dir/../bin/pipeline-status")
     # shellcheck disable=SC1090
     source <(awk '/^issue_pickup_status\(\)/{p=1} p{print} p && /^}$/{p=0}' "$cron_dir/../bin/pipeline-status")
+    # shellcheck disable=SC1090
+    source <(awk '/^ops_review_status\(\)/{p=1} p{print} p && /^}$/{p=0}' "$cron_dir/../bin/pipeline-status")
+    unset _ARCHON_DEADLINES_SH DEADLINE_FRESH_SECONDS
+    export DEADLINE_STATE_DIR="$TEST_TMP/deadlines" DEADLINE_NOW=1000000
+    # shellcheck source=../lib/deadlines.sh
+    source "$cron_dir/lib/deadlines.sh"
     unset _LACHESIS_SH
     export LACHESIS_STATE_DIR="$TEST_TMP/lachesis"
     unset LACHESIS_NEXT_STATUS
@@ -92,4 +98,14 @@ teardown() {
 @test "issue pickup with no record says so" {
     run issue_pickup_status
     [ "$output" = "no next_issue read recorded" ]
+}
+
+@test "ops PRs awaiting review: 0 with no marks, the count and the oldest with some" {
+    run ops_review_status
+    [ "$output" = 0 ]
+    DEADLINE_NOW=$((1000000 - 30 * 3600)) deadline_mark ops-merge interstellarai.net 244 abc archon/x "needs a human merge"
+    DEADLINE_NOW=$((1000000 - 2 * 3600)) deadline_mark ops-merge interstellarai.net 245 def archon/y "needs a human merge"
+    for f in "$DEADLINE_STATE_DIR"/*; do _deadline_set "$f" last_seen 1000000; done
+    run ops_review_status
+    [ "$output" = "2 (oldest 30h)" ]
 }
