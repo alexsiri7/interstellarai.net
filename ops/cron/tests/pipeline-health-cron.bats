@@ -571,6 +571,7 @@ ESCALATIONS_FIXTURE='[
     load_fn open_escalations
     load_fn close_escalation
     load_fn close_resolved_pr_escalations
+    source "${SCRIPT_FILE%/*}/lib/merged-reviews.sh"
     gh() {
         case "$1 $2" in
             "issue list") echo "$ESCALATIONS_FIXTURE" ;;
@@ -591,6 +592,7 @@ ESCALATIONS_FIXTURE='[
     load_fn open_escalations
     load_fn close_escalation
     load_fn close_resolved_pr_escalations
+    source "${SCRIPT_FILE%/*}/lib/merged-reviews.sh"
     gh() {
         case "$1 $2" in
             "issue list") echo "$ESCALATIONS_FIXTURE" ;;

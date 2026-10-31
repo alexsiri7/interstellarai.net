@@ -29,6 +29,15 @@ setup() {
     archon_runs_known() { [ "${RUNS_KNOWN:-1}" = 1 ]; }
     archon_parked_runs() { cat "$PARKED_ROWS"; }
 
+    # The real workflow-name regex; GitHub and the abandon are stubbed. A PR
+    # number in $MERGED_PR reads as merged; the run id in $ABANDON_FAILS cannot
+    # be abandoned.
+    # shellcheck disable=SC1091
+    source "$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/lib/merged-reviews.sh"
+    export ABANDONED="$STATE_DIR/abandoned"
+    review_pr_merged() { [ -n "${MERGED_PR:-}" ] && [[ "$2" == *"#$MERGED_PR"* ]] && echo "$MERGED_PR"; }
+    abandon_review() { printf '%s\n' "$*" >> "$ABANDONED"; [ "$3" != "${ABANDON_FAILS:-}" ]; }
+
     SCRIPT_FILE="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/pipeline-health-cron.sh"
     # shellcheck disable=SC1090
     source <(
@@ -45,6 +54,65 @@ parked_row() {
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$1" "$2" archon-ship /mnt/ext-fast/un-reminder "fix #361" "$(( $(date +%s) - 7200 ))" \
       "${3:-}" "${4:-}" >> "$PARKED_ROWS"
+}
+
+review_row() { # review_row <run_id> <class> <user_message> — a parked archon-review run
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$1" "$2" archon-review /mnt/ext-fast/reli "$3" 0 cycle.attend__ask "Review needs a decision" >> "$PARKED_ROWS"
+}
+
+@test "a parked review whose PR has merged is closed, never alerted or resumed" {
+    MERGED_PR=1756
+    review_row 2d79085e-aaaa attention "review PR #1756"
+    review_row 2d79085e-bbbb wait "review PR #1756"
+    check_parked_runs
+
+    grep -qx 'reli 1756 2d79085e-aaaa' "$ABANDONED"
+    grep -qx 'reli 1756 2d79085e-bbbb' "$ABANDONED"
+    [ ! -e "$NOTIFIED" ]
+    [ ! -e "$ARCHON_ARGV" ]
+    [ ! -e "$PARKED_DIR/alerted-2d79085e-aaaa" ]
+}
+
+@test "a parked review of a merged PR that cannot be closed is alerted once" {
+    MERGED_PR=1756 ABANDON_FAILS=2d79085e-aaaa
+    review_row 2d79085e-aaaa attention "review PR #1756"
+    check_parked_runs
+    check_parked_runs
+
+    [ "$(wc -l < "$ABANDONED")" -eq 2 ]
+    [ "$(wc -l < "$NOTIFIED")" -eq 1 ]
+    grep -q 'archon-review (attention at cycle.attend__ask) — review PR #1756' "$NOTIFIED"
+}
+
+@test "of two parked reviews of one merged PR, only the one that cannot be closed is alerted" {
+    MERGED_PR=1756 ABANDON_FAILS=2d79085e-bbbb
+    review_row 2d79085e-aaaa attention "review PR #1756"
+    review_row 2d79085e-bbbb attention "review PR #1756"
+    check_parked_runs
+
+    [ ! -e "$PARKED_DIR/alerted-2d79085e-aaaa" ]
+    [ -e "$PARKED_DIR/alerted-2d79085e-bbbb" ]
+    [ "$(wc -l < "$NOTIFIED")" -eq 1 ]
+    grep -q 'run 2d79085e-bbbb' "$NOTIFIED"
+}
+
+@test "a parked review of an open PR is alerted as before" {
+    review_row 2d79085e-aaaa attention "review PR #300"
+    check_parked_runs
+
+    [ ! -e "$ABANDONED" ]
+    [ "$(wc -l < "$NOTIFIED")" -eq 1 ]
+    grep -q 'archon-review (attention at cycle.attend__ask) — review PR #300' "$NOTIFIED"
+}
+
+@test "a non-review run naming a merged PR is never closed" {
+    MERGED_PR=361
+    parked_row 500946af-dddd gate
+    check_parked_runs
+
+    [ ! -e "$ABANDONED" ]
+    grep -q '500946af-dddd' "$NOTIFIED"
 }
 
 @test "a stale wait is resumed once, without an alert" {
