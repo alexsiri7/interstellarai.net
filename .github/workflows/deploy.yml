@@ -58,7 +58,9 @@ jobs:
             title=$(gh pr view "$pr" --repo "${{ github.repository }}" --json title --jq '.title')
             body="PR #$pr: $title"
           fi
-          curl -s -o /dev/null \
+          # The deploy has already landed; an unreachable ntfy.sh must not turn main red.
+          curl -s -o /dev/null --max-time 30 \
             -H "Title: ${{ github.event.repository.name }} landed in prod" \
             -H "Tags: tada" \
-            -d "$body" "ntfy.sh/$NTFY_TOPIC"
+            -d "$body" "ntfy.sh/$NTFY_TOPIC" \
+            || echo "::warning::ntfy notification failed (curl exit $?)"
