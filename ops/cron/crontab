@@ -21,6 +21,8 @@
 0 9 * * 1 /mnt/ext-fast/interstellarai.net/ops/cron/tool-freshness.sh --apply >> /home/asiri/.local/state/archon-cron/logs/tool-freshness.log 2>&1
 7 * * * * /usr/sbin/logrotate --state /home/asiri/.logrotate.state /mnt/ext-fast/interstellarai.net/ops/cron/logrotate.conf >/dev/null 2>&1
 */5 * * * * /mnt/ext-fast/interstellarai.net/ops/cron/pr-review-cron.sh >> /home/asiri/.local/state/archon-cron/logs/pr-review.log 2>&1
+# On the owner's Claude account: reviews and merges the ops PRs pr-maintenance holds for a human (see the script).
+5,35 * * * * /mnt/ext-fast/interstellarai.net/ops/cron/ops-pr-review.sh >> /home/asiri/.local/state/archon-cron/logs/ops-pr-review.log 2>&1
 0 2 * * * /mnt/ext-fast/interstellarai.net/ops/cron/sweep-audits.sh >> /home/asiri/.local/state/archon-cron/logs/sweep-audits.log 2>&1
 0 4 * * 0 /mnt/ext-fast/interstellarai.net/ops/cron/system-maintenance.sh >> /home/asiri/.local/state/archon-cron/logs/system-maintenance.log 2>&1
 0 3 * * 0 /mnt/ext-fast/interstellarai.net/ops/cron/archon-update.sh >> /home/asiri/.local/state/archon-cron/logs/archon-update.log 2>&1
