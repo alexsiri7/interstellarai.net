@@ -133,6 +133,27 @@ YML
     [ "$status" -eq 1 ]
 }
 
+@test "a push with branches-ignore that leaves main in releases on push" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  push:
+    branches-ignore: [docs]
+YML
+    run release_push_workflow proj
+    [ "$status" -eq 0 ]
+}
+
+@test "a push with branches-ignore listing main does not" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  push:
+    branches-ignore:
+      - main
+YML
+    run release_push_workflow proj
+    [ "$status" -eq 1 ]
+}
+
 @test "a failed tree read is 2" {
     workflow proj .github/workflows/release.yml <<< 'on: push'
     TREE_FAIL=1 run release_push_workflow proj
@@ -248,4 +269,9 @@ YML
     lagging proj 3 $((T0 - 50 * 3600)); no_workflows proj
     release_lag_check proj
     [ "$(release_lag_note proj)" = "UNRELEASED: 3 commit(s) since release-2026-01-01, oldest $(iso $((T0 - 50 * 3600)))" ]
+}
+
+@test "pipeline-status shows an unreleased repo in red" {
+    grep -q 'source "$SCRIPT_DIR/../cron/lib/releases.sh"' "$CRON_DIR/../bin/pipeline-status"
+    grep -q 'unreleased=$(release_lag_note "$REPO")' "$CRON_DIR/../bin/pipeline-status"
 }

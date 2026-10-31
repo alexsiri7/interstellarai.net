@@ -160,7 +160,7 @@ release_lag_check() {
     log "release-lag: $project — could not list release tags, skipping"
     return 0
   fi
-  tag=$(printf '%s\n' "$refs" | sed -n 's#^refs/tags/##p' | sort | tail -n1)
+  tag=$(printf '%s\n' "$refs" | sed -n 's#^refs/tags/##p' | LC_ALL=C sort | tail -n1)
   if [ -n "$tag" ]; then
     out=$(gh api "repos/$RELEASE_OWNER/$project/compare/$tag...main" \
       --jq '"\(.ahead_by) \([.commits[].commit.committer.date] | min // "")"' 2>/dev/null) || out=""

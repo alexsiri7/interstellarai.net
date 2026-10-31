@@ -106,9 +106,10 @@ release_one() {
     return
   fi
 
-  # Find previous release-* tag, if any.
+  # Find previous release-* tag, if any: newest by name, as release_lag_check
+  # picks it.
   local prev_tag
-  prev_tag=$(git tag -l 'release-*' --sort=-creatordate | head -n1)
+  prev_tag=$(git tag -l 'release-*' --sort=-refname | head -n1)
 
   local commit_count
   if [ -n "$prev_tag" ]; then
