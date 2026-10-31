@@ -67,6 +67,10 @@
 #  11. Stall detector: a repo with open PRs older than 24h (not hold or
 #      needs-owner-review) and 0 PRs merged in 24h → ntfy once per episode and
 #      a marker pipeline-status shows in red
+#  12. Stalled tool calls: a running archon run whose current tool call has had
+#      no progress for TOOL_CALL_STALL_MAX_SECONDS (2h; the engine's
+#      metadata.tool_call_attention) → ntfy once per stall episode, nothing
+#      more (#243)
 #
 # Crontab (logs live under ~/.local/state/archon-cron/logs, which survives a
 # reboot; /tmp does not):
@@ -211,7 +215,7 @@ mkdir -p "$STATE_DIR/prciretry" "$STATE_DIR/escalated" \
          "$STATE_DIR/main-ci" "$STATE_DIR/escalated-main" \
          "$STATE_DIR/staging-health" "$STATE_DIR/scheduled-health" \
          "$STATE_DIR/parked" "$STATE_DIR/main-ci-missing" \
-         "$STATE_DIR/build-drift/pending"
+         "$STATE_DIR/build-drift/pending" "$STATE_DIR/stalled-tool-calls"
 
 # Max archon-remediation attempts against a single head SHA before we stop
 # re-firing and ntfy the operator that the factory is stuck.
@@ -221,6 +225,11 @@ MAX_ATTEMPTS=3
 # check_parked_runs nudges it. 6x the longest `wait:` the sdlc pack declares
 # (ci-pause, duration_ms 300000).
 PARKED_WAIT_MAX_SECONDS="${PARKED_WAIT_MAX_SECONDS:-1800}"
+# How long a running run's tool call may go without progress (the engine lists
+# it in metadata.tool_call_attention after 30m) before check_stalled_tool_calls
+# alerts. A plain Bash call reports no progress until it returns, so this sits
+# well past a long build.
+TOOL_CALL_STALL_MAX_SECONDS="${TOOL_CALL_STALL_MAX_SECONDS:-7200}"
 # check_published_prs: how far back the ship run logs are read, and how many
 # of their PRs (newest first) are resolved per project per tick.
 PUBLISHED_PR_WINDOW_DAYS="${PUBLISHED_PR_WINDOW_DAYS:-14}"
@@ -3031,6 +3040,45 @@ archon workflow get $run_id --json" \
 }
 
 # ----------------------------------------------------------------------------
+# Check 12: A running archon run whose tool call has stopped making progress.
+# A run whose tool call never returns stays `running`, which check_parked_runs
+# never looks at, and nothing here noticed #243 for 36h: a generated wait loop
+# (`until ! pgrep -f "bats-exec-suite"`) matched its own `bash -c` argv and
+# held a ship run until someone killed it by hand. The engine records such a
+# call in metadata.tool_call_attention; this ntfys once per run per stall
+# episode. It never kills or abandons anything: from here a slow build and a
+# wedged loop look the same.
+# ----------------------------------------------------------------------------
+check_stalled_tool_calls() {
+  local marker_dir="$STATE_DIR/stalled-tool-calls"
+  local run_id wf origin msg since call silent seen="" marker id
+  if ! archon_runs_known; then
+    log "stalled-tool-calls: no archon run snapshot this tick — skipping"
+    return 0
+  fi
+  while IFS=$'\t' read -r run_id wf origin msg since call; do
+    [ -n "$run_id" ] || continue
+    seen="$seen $run_id"
+    [ -e "$marker_dir/alerted-$run_id" ] && continue
+    silent=$(( $(date +%s) - since ))
+    log "stalled-tool-calls: $wf $run_id — $call silent ${silent}s — alerting"
+    notify "Archon tool call stalled: ${origin##*/}" \
+      "$wf — ${msg:-no user message}
+$call: no progress for $(( silent / 3600 ))h$(( silent % 3600 / 60 ))m
+run $run_id
+archon workflow status $run_id — check whether its process is wedged (e.g. a wait loop matching itself) before killing it" \
+      high warning
+    touch "$marker_dir/alerted-$run_id"
+  done < <(archon_stalled_tool_calls "$TOOL_CALL_STALL_MAX_SECONDS")
+  for marker in "$marker_dir"/alerted-*; do
+    [ -e "$marker" ] || continue
+    id="${marker##*/alerted-}"
+    case " $seen " in *" $id "*) continue ;; esac
+    rm -f "$marker"
+  done
+}
+
+# ----------------------------------------------------------------------------
 if [ "$MODE" = trim ]; then
   run_trim
   exit 0
@@ -3058,6 +3106,7 @@ for project in "${REPOS[@]}"; do
 done
 reconcile_zombies
 check_parked_runs
+check_stalled_tool_calls
 check_daily_trim
 check_disk
 check_archon_tmp_trim

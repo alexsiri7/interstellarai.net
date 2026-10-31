@@ -387,6 +387,63 @@ no_running() { export STUB_PAYLOAD='{"runs": []}'; }
     ! archon_worktrees_known
 }
 
+# ── Stalled tool calls ───────────────────────────────────────────────────────
+#
+# metadata.tool_call_attention as archon writes it for a running run: one
+# entry per tool call that has gone toolCallAttentionMs without progress.
+
+stalled_entry() {
+    # $1 nodeId, $2 title, $3 seconds since lastProgressAt
+    printf '{"streamId": "s1", "nodeId": "%s", "provider": "claude", "toolCallId": "subtask:%s",
+      "name": "Bash", "title": "%s", "startedAt": "%s", "lastProgressAt": "%s",
+      "raisedAt": "%s", "thresholdMs": 1800000}' \
+      "$1" "$1" "$2" "$(iso "-$3")" "$(iso "-$3")" "$(iso "-$(( $3 - 1800 ))")"
+}
+
+running_run() {
+    # $1 run id, $2 metadata JSON body (without workflow_source)
+    printf '{"id": "%s", "workflow_name": "archon-ship-block", "status": "running", "user_message": "fix #242",
+      "working_path": "/w/proj/worktrees/archon/task-%s",
+      "metadata": {"workflow_source": {"origin": "/mnt/ext-fast/proj"}%s}}' "$1" "$1" "${2:+, $2}"
+}
+
+@test "a running run's oldest stalled tool call past the threshold is reported once" {
+    local three_h
+    export STUB_PAYLOAD="{\"runs\": [$(running_run 197afe4f-aaaa "\"tool_call_attention\": [
+      $(stalled_entry deliver__review 'bats run' 3600),
+      $(stalled_entry deliver__update-pr-body 'wait for bats' 10800)]")]}"
+    export STUB_PAYLOAD_PAUSED='{"runs": []}'
+    archon_runs_snapshot
+    three_h=$(snapshot_field 12)
+    [ $(( $(date +%s) - three_h - 10800 )) -le 2 ]
+
+    run archon_stalled_tool_calls 7200
+    [ "${#lines[@]}" -eq 1 ]
+    [ "$output" = "$(printf '197afe4f-aaaa\tarchon-ship-block\t/mnt/ext-fast/proj\tfix #242\t%s\tdeliver__update-pr-body: wait for bats' "$three_h")" ]
+
+    [ -z "$(archon_stalled_tool_calls 14400)" ]
+}
+
+@test "a running run with no stalled call carries 0 and nothing, and is not reported" {
+    export STUB_PAYLOAD="{\"runs\": [$(running_run run-null '"tool_call_attention": null'),
+      $(running_run run-absent)]}"
+    export STUB_PAYLOAD_PAUSED='{"runs": []}'
+    archon_runs_snapshot
+    [ "$(awk -F'\t' '{ print $5 "|" $6 "|" $9 "|" $12 "|" $13 }' "$ARCHON_RUNS_SNAPSHOT")" = \
+      "$(printf 'run-null||/w/proj/worktrees/archon/task-run-null|0|\nrun-absent||/w/proj/worktrees/archon/task-run-absent|0|')" ]
+    [ -z "$(archon_stalled_tool_calls 0)" ]
+}
+
+@test "a paused run's stale tool_call_attention is never reported" {
+    no_running
+    export STUB_PAYLOAD_PAUSED="$(paused_run 500946af-aaaa "$(ci_wait 240 60),
+      \"tool_call_attention\": [$(stalled_entry deliver__update-pr-body 'wait for bats' 10800)]")"
+    archon_runs_snapshot
+    [ "$(snapshot_field 6)" = "wait" ]
+    [ "$(snapshot_field 12)" = "0" ]
+    [ -z "$(archon_stalled_tool_calls 7200)" ]
+}
+
 # ── failed runs nothing adopted (`workflow runs --open`) ─────────────────────
 
 FAILED_SHIP_RUN='{"runs": [{"id": "run-329", "workflow_name": "archon-ship", "status": "failed",
