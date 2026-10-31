@@ -115,6 +115,11 @@ STUB
     unset _ARCHON_TRUST_SH TRUSTED_AUTHORS TRUSTED_ISSUE_BOTS TRUSTED_MERGE_ONLY_AUTHORS
     # shellcheck source=../lib/trust.sh
     source "$(dirname "$SCRIPT_FILE")/lib/trust.sh"
+    # fire_ship asks screening for a restated issue's target.
+    export SCREEN_RESTATE_DIR="$T/restated"
+    unset _ARCHON_SCREEN_SH
+    # shellcheck source=../lib/screen.sh
+    source "$(dirname "$SCRIPT_FILE")/lib/screen.sh"
 }
 
 teardown() {
@@ -592,6 +597,46 @@ JSON
 }
 
 # ── promote_unblocked → pick_and_fire ────────────────────────────────────────
+
+# launched — the launch is backgrounded and disowned (no `wait`): poll for the
+# argv the nohup stub records.
+launched() {
+    local i
+    for i in $(seq 1 50); do [ -s "$T/nohup-argv" ] && return 0; sleep 0.1; done
+    return 1
+}
+
+@test "fire_ship hands a restated issue's restatement to archon-ship as its target, never its body" {
+    echo '["bug","archon:auto-approved","archon:restated"]' > "$T/fixtures/labels-42"
+    mkdir -p "$T/restated"
+    jq -nc '{v:1, source:"sentry-app", type:"bug_report", codes:"H-SECRETS", sentry_issue:"7", site:"",
+             summary:"The app fails to connect to its database", error_class:"OperationalError",
+             frames:[], files:["app/db.py"], repro:""}' > "$T/restated/testproj-42.json"
+    nohup() { printf '%s\n' "$@" > "$T/nohup-argv"; }
+    ship_workflow() { echo archon-ship-block; }
+    fire_ship testproj 42; launched
+    grep -qx -- '--input' "$T/nohup-argv"
+    grep -q '^target=Issue alexsiri7/testproj#42, restated\..*summary: The app fails to connect to its database' "$T/nohup-argv"
+    grep -q 'issue edit 42 .*--add-label archon:in-progress' "$GH_ARGV"
+}
+
+@test "fire_ship does not launch a restated issue with no restatement on record" {
+    echo '["bug","archon:auto-approved","archon:restated"]' > "$T/fixtures/labels-43"
+    nohup() { echo launched > "$T/nohup-argv"; }
+    fire_ship testproj 43 2>/dev/null
+    [ ! -e "$T/nohup-argv" ]
+    ! grep -q 'issue edit 43' "$GH_ARGV"
+    grep -q '#43 — restated issue without a usable restatement' "$LOGGED"
+}
+
+@test "fire_ship launches any other issue with no target, as before" {
+    echo '["bug"]' > "$T/fixtures/labels-44"
+    nohup() { printf '%s\n' "$@" > "$T/nohup-argv"; }
+    ship_workflow() { echo archon-ship-block; }
+    fire_ship testproj 44; launched
+    ! grep -q -- '--input' "$T/nohup-argv"
+    [ "$(tail -n 2 "$T/nohup-argv" | head -1)" = 44 ]
+}
 
 # The everyday path: the issue was queued on an earlier tick, so the search is
 # the only thing that can supply it — nothing to fall back on from this tick's

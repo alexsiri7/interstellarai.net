@@ -69,7 +69,8 @@ source "$SCRIPT_DIR/lib/trust.sh"
 # shellcheck source=lib/heartbeat.sh
 source "$SCRIPT_DIR/lib/heartbeat.sh"
 # Bridge-filed issues are screened (heuristics + classifier) before any of the
-# phases below may act on them; see lib/screen.sh.
+# phases below may act on them: closed, or restated so archon works from the
+# restatement instead of the bridge's text (fire_ship); see lib/screen.sh.
 # shellcheck source=lib/screen.sh
 source "$SCRIPT_DIR/lib/screen.sh"
 # Lachesis pickup (owner's switch, off by default): the issue to work comes from
@@ -116,7 +117,9 @@ ensure_labels() {
     --color "0e8a16" --description "Owner vetted: the factory may work this bridge-filed issue" 2>/dev/null || true
   gh label create "$SCREEN_AUTO_LABEL" --repo "alexsiri7/$repo" \
     --color "c2e0c6" --description "Passed automated screening: the factory may work this bridge-filed issue" 2>/dev/null || true
-  gh label create "$SCREEN_HOLD_LABEL" --repo "alexsiri7/$repo" \
+  gh label create "$SCREEN_RESTATED_LABEL" --repo "alexsiri7/$repo" \
+    --color "c2e0c6" --description "The factory works this issue from screening's restatement only" 2>/dev/null || true
+  gh label create "$TRUST_HELD_LABEL" --repo "alexsiri7/$repo" \
     --color "d93f0b" --description "Held by the factory for the owner" 2>/dev/null || true
 }
 
@@ -695,6 +698,18 @@ fire_ship() {
   local project="$1" issue="$2"
   local repo_dir="$BASE_DIR/$project"
 
+  # A restated bridge issue is worked from screening's restatement, passed as
+  # the run's target, never from its raw text (lib/screen.sh). No restatement
+  # on record, or labels that cannot be read: no launch this tick.
+  local target
+  if ! target=$(screen_ship_target "$project" "$issue"); then
+    log "$project: #$issue — restated issue without a usable restatement here, not launching"
+    SUMMARY_NOTE="#$issue waits for its restatement"
+    return 0
+  fi
+  local -a ship_input=()
+  [ -n "$target" ] && ship_input=(--input "$target")
+
   log "$project: picking up issue #$issue"
   # Lachesis pickup: no queue label to remove, and archon:in-progress is what
   # next_issue passes over, so it must not ride on a removal that can fail.
@@ -709,16 +724,21 @@ fire_ship() {
   # The wrapper settles a no-PR verdict on the issue as soon as the run exits
   # (lib/settle-ship-outcome.sh); its own output lands in this cron's log.
   # Only the archon child may look like a live run to the pgrep guards: the
-  # wrapper's command line carries the literal "fix #$1", never "#<issue>",
-  # and the helper path and project travel in the environment so no path
-  # substring can match another project's anchor.
+  # wrapper's command line carries the literal "archon workflow run
+  # "$SHIP_WF"", never "archon workflow run archon-…", and the helper path and
+  # project travel in the environment so no path substring can match another
+  # project's anchor.
   # The workflow name rides in the environment too (lib/ship-workflow.sh), so
   # the wrapper's own command line stays free of it.
+  # A restatement target rides as the arguments after the log path: it names
+  # only this issue's "#N" (screening strips every other "#"), so the guards'
+  # "#<issue>" matchers still see one issue per run.
   CLAUDECODE=0 SETTLE_SCRIPT="$SCRIPT_DIR/lib/settle-ship-outcome.sh" SETTLE_PROJECT="$project" \
     SHIP_WF="$(ship_workflow)" nohup bash -c '
-      archon workflow run "$SHIP_WF" "fix #$1" >"$2" 2>&1
-      "$SETTLE_SCRIPT" "$SETTLE_PROJECT" "$1" "$2"' \
-    ship-wrapper "$issue" "$logf" 2>/dev/null &
+      n="$1" logf="$2"; shift 2
+      archon workflow run "$SHIP_WF" "$@" "fix #$n" >"$logf" 2>&1
+      "$SETTLE_SCRIPT" "$SETTLE_PROJECT" "$n" "$logf"' \
+    ship-wrapper "$issue" "$logf" "${ship_input[@]}" 2>/dev/null &
   disown
   log "$project: archon launched for #$issue (pid=$!, log=$logf)"
 }
@@ -858,9 +878,10 @@ lachesis_pick() {
   fi
   SUMMARY_QUEUED=1
 
-  # The issue itself: a stranger's, or a bridge's held by screening, waits for
-  # the owner to vet it (archon:approved releases it); a bridge issue not yet
-  # screened waits for lib/screen.sh, which runs every tick.
+  # The issue itself: a stranger's, or a bridge's with a legacy
+  # needs-owner-review hold, waits for the owner to vet it (archon:approved
+  # releases it); a bridge issue not yet screened waits for lib/screen.sh,
+  # which runs every tick and never holds for the owner.
   if ! view=$(gh issue view "$issue" --repo "alexsiri7/$project" \
       --json number,author,labels,title,body 2>/dev/null); then
     log "$project: #$issue — could not read the issue; not starting archon this tick"
@@ -870,7 +891,7 @@ lachesis_pick() {
     if ! trust_issue_ok "$(jq -r '.author.login // ""' <<<"$view")" \
         || jq -e --arg held "$TRUST_HELD_LABEL" '[.labels[]?.name] | index($held)' <<<"$view" >/dev/null 2>&1; then
       if lachesis_ask_once "$project" "$issue" untrusted-issue \
-          "The factory will not start archon on #$issue: it was filed by an author outside the trusted list, or held by screening. Vet it, label it archon:approved if it is safe to work, or close it; then answer this question." \
+          "The factory will not start archon on #$issue: it was filed by an author outside the trusted list, or carries a needs-owner-review hold from before screening stopped holding issues. Vet it, label it archon:approved if it is safe to work, or close it; then answer this question." \
           "Untrusted text is never handed to archon (prompt injection), whatever Lachesis's order says."; then
         log "$project: #$issue — untrusted or held issue, waiting on the author in Lachesis"
       else
