@@ -230,3 +230,25 @@ EOF
     [[ "$body" == *'- `frontend`'* ]]
     [[ "$body" != *'docs'* ]]
 }
+
+@test "every check state GitHub reports is exactly one of green, failing or still running" {
+    LOG_DIR="$T"
+    source <(awk '/^(failing_check_names|pr_checks_green)\(\)/{p=1} p{print} p && /^}$/{p=0}' "$CRON_DIR/pr-maintenance-cron.sh")
+    # CheckConclusionState, then StatusState; a check run still in progress has no conclusion.
+    green="SUCCESS NEUTRAL SKIPPED"
+    failing="ACTION_REQUIRED CANCELLED FAILURE STALE STARTUP_FAILURE TIMED_OUT ERROR"
+    running="EXPECTED PENDING"
+    for s in $green $failing $running; do
+        GH_PR_VIEW="{\"statusCheckRollup\":[{\"name\":\"c\",\"conclusion\":\"$s\"}]}"
+        is_green=no; is_failing=no
+        pr_checks_green 1 && is_green=yes
+        [ -n "$(failing_check_names 1)" ] && is_failing=yes
+        case " $green " in *" $s "*) want="yes no" ;; *)
+        case " $failing " in *" $s "*) want="no yes" ;; *) want="no no" ;; esac ;; esac
+        [ "$is_green $is_failing" = "$want" ] || { echo "$s: green=$is_green failing=$is_failing, want $want"; false; }
+    done
+    GH_PR_VIEW='{"statusCheckRollup":[{"name":"c","status":"IN_PROGRESS","conclusion":null}]}'
+    run pr_checks_green 1
+    [ "$status" -ne 0 ]
+    [ -z "$(failing_check_names 1)" ]
+}
