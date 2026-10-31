@@ -38,9 +38,11 @@ setup() {
     export GH_PR_VIEW='{"statusCheckRollup":[{"name":"frontend","conclusion":"FAILURE"},{"name":"lint","conclusion":"SUCCESS"},{"context":"security-scan","state":"ERROR"}]}'
 
     # issue create: each filed issue's title and body land in $ISSUES/<n>.
+    # GH_ISSUE_CREATE_FAIL / GH_PR_VIEW_FAIL make that call fail.
     cat > "$STUB_BIN/gh" <<'STUB'
 #!/usr/bin/env bash
 if [ "$1 $2" = "issue create" ]; then
+  [ -n "$GH_ISSUE_CREATE_FAIL" ] && { echo "HTTP 502: Bad Gateway"; exit 1; }
   n=$(( $(ls "$ISSUES" | wc -l) / 2 + 900 ))
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -54,7 +56,10 @@ if [ "$1 $2" = "issue create" ]; then
 fi
 printf '%s\n' "$*" >> "$STUB_GH_ARGV"
 [ "$1 $2" = "pr list" ] && printf '%s' "$GH_PR_LIST"
-[ "$1 $2" = "pr view" ] && printf '%s' "$GH_PR_VIEW"
+if [ "$1 $2" = "pr view" ]; then
+  [ -n "$GH_PR_VIEW_FAIL" ] && { echo "HTTP 502" >&2; exit 1; }
+  printf '%s' "$GH_PR_VIEW"
+fi
 exit 0
 STUB
     cat > "$STUB_BIN/archon" <<'STUB'
@@ -85,7 +90,7 @@ titles() { cat "$ISSUES"/*.title 2>/dev/null | sort; }
     tick 0
     tick $((23 * H))
     [ "$(filed)" -eq 0 ]
-    ! grep -q '^pr edit' "$STUB_GH_ARGV"
+    [ "$(grep -c '^pr edit' "$STUB_GH_ARGV")" -eq 0 ]
 
     tick $((24 * H))
     [ "$status" -eq 0 ]
@@ -135,8 +140,8 @@ titles() { cat "$ISSUES"/*.title 2>/dev/null | sort; }
 }
 
 @test "branch parsing: npm, scoped npm, pip and github_actions, at the root and in nested directories" {
-    mkdir -p "$REPO/frontend" "$REPO/services/api"
-    export GH_PR_LIST="[$(bump 1 dependabot/npm_and_yarn/react-19.3.1), $(bump 2 dependabot/npm_and_yarn/frontend/playwright/test-1.64.1), $(bump 3 dependabot/npm_and_yarn/types/node-22.10.1), $(bump 4 dependabot/pip/services/api/django-rest-framework-3.16.0), $(bump 5 dependabot/github_actions/actions/checkout-4), $(bump 6 dependabot/npm_and_yarn/frontend/base-64-1.0.0)]"
+    mkdir -p "$REPO/frontend" "$REPO/services/api" "$REPO/.github/tools"
+    export GH_PR_LIST="[$(bump 1 dependabot/npm_and_yarn/react-19.3.1), $(bump 2 dependabot/npm_and_yarn/frontend/playwright/test-1.64.1), $(bump 3 dependabot/npm_and_yarn/types/node-22.10.1), $(bump 4 dependabot/pip/services/api/django-rest-framework-3.16.0), $(bump 5 dependabot/github_actions/actions/checkout-4), $(bump 6 dependabot/npm_and_yarn/frontend/base-64-1.0.0), $(bump 7 dependabot/pip/dot-github/tools/pip-audit-2.10.1)]"
     tick 0; tick $((24 * H))
     [ "$status" -eq 0 ]
     [ "$(titles)" = "$(sort <<'EOF'
@@ -146,6 +151,7 @@ Upgrade @types/node to 22.10.1 in / and fix what breaks
 Upgrade django-rest-framework to 3.16.0 in services/api and fix what breaks
 Upgrade actions/checkout to 4 in / and fix what breaks
 Upgrade base-64 to 1.0.0 in frontend and fix what breaks
+Upgrade pip-audit to 2.10.1 in .github/tools and fix what breaks
 EOF
 )" ]
     grep -q '(github_actions, directory `/`)' "$ISSUES"/*.body
@@ -156,7 +162,7 @@ EOF
     tick 0; tick $((24 * H))
     [ "$status" -eq 0 ]
     [ "$(filed)" -eq 0 ]
-    ! grep -qE '^pr (comment|edit)' "$STUB_GH_ARGV"
+    [ "$(grep -cE '^pr (comment|edit)' "$STUB_GH_ARGV")" -eq 0 ]
     for n in 7 8 9; do
         [ "$(grep -c "dependabot PR #$n is red but its branch .* filing nothing" <<<"$output")" -eq 1 ]
     done
@@ -167,7 +173,7 @@ EOF
     tick 0; tick $((24 * H))
     [ "$status" -eq 0 ]
     [ "$(filed)" -eq 0 ]
-    ! grep -qE '^pr (comment|edit)' "$STUB_GH_ARGV"
+    [ "$(grep -cE '^pr (comment|edit)' "$STUB_GH_ARGV")" -eq 0 ]
 }
 
 @test "the 24h counts only failing checks on one head: green or a new head restarts it" {
@@ -186,4 +192,41 @@ EOF
     [ "$(filed)" -eq 0 ]
     tick $((61 * H))
     [ "$(filed)" -eq 1 ]
+}
+
+@test "an issue that could not be filed is retried next tick, and nothing is linked or held meanwhile" {
+    export GH_PR_LIST="[$(bump 40 dependabot/npm_and_yarn/react-19.3.1)]"
+    tick 0
+    GH_ISSUE_CREATE_FAIL=1 tick $((24 * H))
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"PR #40 — could not file the upgrade issue"* ]]
+    [ "$(filed)" -eq 0 ]
+    [ "$(grep -cE '^pr (comment|edit)' "$STUB_GH_ARGV")" -eq 0 ]
+
+    tick $((24 * H + 900))
+    [ "$(filed)" -eq 1 ]
+    grep -q '^pr comment 40 --body .*issues/900' "$STUB_GH_ARGV"
+    grep -q '^pr edit 40 --add-label hold$' "$STUB_GH_ARGV"
+}
+
+@test "checks that cannot be read are logged and keep the 24h clock running" {
+    export GH_PR_LIST="[$(bump 41 dependabot/npm_and_yarn/react-19.3.1)]"
+    tick 0
+    GH_PR_VIEW_FAIL=1 tick $((12 * H))
+    [[ "$output" == *"dependabot PR #41 — could not read its checks"* ]]
+    tick $((24 * H))
+    [ "$(filed)" -eq 1 ]
+}
+
+@test "a stale check is a failure, a neutral or skipped one is not" {
+    export GH_PR_LIST="[$(bump 42 dependabot/npm_and_yarn/react-19.3.1)]"
+    GH_PR_VIEW='{"statusCheckRollup":[{"name":"frontend","conclusion":"SUCCESS"},{"name":"docs","conclusion":"SKIPPED"},{"name":"advisory","conclusion":"NEUTRAL"}]}'
+    tick 0; tick $((24 * H))
+    [ "$(filed)" -eq 0 ]
+    GH_PR_VIEW='{"statusCheckRollup":[{"name":"frontend","conclusion":"STALE"},{"name":"docs","conclusion":"SKIPPED"}]}'
+    tick $((25 * H)); tick $((49 * H))
+    [ "$(filed)" -eq 1 ]
+    body=$(cat "$ISSUES/900.body")
+    [[ "$body" == *'- `frontend`'* ]]
+    [[ "$body" != *'docs'* ]]
 }
