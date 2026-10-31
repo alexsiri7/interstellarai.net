@@ -88,7 +88,7 @@ claude_auth_failed() {
         --color D93F0B --description "Needs a human — not picked up by archon" >/dev/null 2>&1 || true
       if gh issue create --repo "$CLAUDE_AUTH_ISSUE_REPO" --label "$HUMAN_NEEDED_LABEL" \
           --title "$(claude_auth_issue_title "$dir")" --body "$(cat <<EOF
-The Claude account in \`$dir\` fails a real request, so cron jobs that use it (the nightly sweep-audits rotation) cannot run on it:
+The Claude account in \`$dir\` fails a real request, so cron jobs that use it (the nightly sweep-audits audit) cannot run on it:
 
 \`\`\`
 $detail
