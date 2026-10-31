@@ -78,6 +78,8 @@ source "$SCRIPT_DIR/lib/screen.sh"
 # state only. See lib/lachesis.sh and lachesis_pick below.
 # shellcheck source=lib/lachesis.sh
 source "$SCRIPT_DIR/lib/lachesis.sh"
+# shellcheck source=lib/severity.sh
+source "$SCRIPT_DIR/lib/severity.sh"
 LACHESIS_PICKUP_ON=0
 lachesis_pickup_enabled && LACHESIS_PICKUP_ON=1
 
@@ -170,9 +172,11 @@ has_human_label() {
 # One issue per tick, matching the pick_and_fire pattern for fixes. Blocked
 # candidates are parked as archon:blocked on the way past, without a triage run.
 # Only called when no fix workflow is already running for this repo (gated in
-# the main loop by checking SUMMARY_ACTION after pick_and_fire).
+# the main loop by checking SUMMARY_ACTION after pick_and_fire). Launch-smoke
+# issues (a release's smoke crash, filed by Sentry or its bridge) are passed
+# over untouched: they record a release, not work (un-reminder #232, #237).
 auto_triage() {
-  local project="$1"
+  local project="$1" launch_smoke_re='^(\[Sentry\] )?launch-smoke '
   local repo_dir="$BASE_DIR/$project"
 
   if [ ! -d "$repo_dir/.git" ]; then
@@ -234,6 +238,7 @@ auto_triage() {
   while IFS= read -r row; do
     local num labels_json created created_sec age
     num=$(echo "$row" | jq -r '.number')
+    [[ "$(jq -r '.title // ""' <<<"$row")" =~ $launch_smoke_re ]] && continue
     labels_json=$(echo "$row" | jq -c '[.labels[].name]')
     created=$(echo "$row" | jq -r '.createdAt')
     created_sec=$(date -d "$created" +%s 2>/dev/null || echo 0)
@@ -814,7 +819,9 @@ pick_and_fire() {
 # parked run keeps the no-stacking guards. Labels gate nothing here. Every wait
 # for the author is a Lachesis question, which labels the issue needs-author so
 # next_issue passes over it: a stranger's issue or comment (prompt-injection
-# gate, lib/trust.sh) and a ship circuit-breaker park.
+# gate, lib/trust.sh) and a ship circuit-breaker park. A settle question whose
+# close or dependency default was taken is acted on instead of launched
+# (settle_defaulted).
 LACHESIS_NEXT_JSON=""
 LACHESIS_NEXT_STATE=""   # "" not asked yet this tick, ok, failed
 
@@ -918,6 +925,8 @@ lachesis_pick() {
     return
   fi
 
+  settle_defaulted "$project" "$issue" && return
+
   rc=0; SHIP_BREAKER_ASK=lachesis_ask ship_breaker_check "$project" "$issue" || rc=$?
   if [ "$rc" = 1 ]; then
     log "$project: #$issue — parked by the ship circuit breaker, not relaunching"
@@ -928,6 +937,54 @@ lachesis_pick() {
   fi
 
   fire_ship "$project" "$issue"
+}
+
+# settle_defaulted <project> <issue> — true when it took the default of a
+# settle question (lib/settle-ship-outcome.sh, #237) instead of a launch.
+# Lachesis takes an unanswered question's default by posting "No answer came
+# within the wait, so the default was taken: <default>" and releasing the
+# issue; for a close or a dependency, launching would only pay for a run that
+# reaches the same verdict. Only when that note is the newest comment: any
+# later one is a person speaking. A default to run it again needs nothing here.
+# A close or dependency that fails launches nothing either; tried next tick.
+settle_defaulted() {
+  local project="$1" issue="$2" repo="alexsiri7/$1" body action blocker
+  local re="<!-- archon-settle-default: ($SETTLE_DEFAULT_ACTION_RE) -->"
+  body=$(gh api --paginate "repos/$repo/issues/$issue/comments" --jq '.[-1].body | @json' 2>/dev/null \
+    | tail -n 1 | jq -r . 2>/dev/null) || return 1
+  [[ "$body" == "No answer came within the wait, so the default was taken: "* && "$body" =~ $re ]] || return 1
+  action="${BASH_REMATCH[1]}"
+  case "$action" in
+    close-*)
+      if ! gh issue close "$issue" --repo "$repo" \
+          --reason "$([ "$action" = close-not-planned ] && echo "not planned" || echo completed)" \
+          --comment "Closed as archon:done: the factory's question went unanswered and its default was taken. Reopen and add archon:queued to run it again.
+
+<!-- archon-settle-act: $action -->
+<!-- lachesis:automated -->" >/dev/null 2>&1; then
+        log "$project: #$issue — its question's default ($action) was taken, but the close failed; not launching"
+        return 0
+      fi
+      gh issue edit "$issue" --repo "$repo" --remove-label "archon:skipped" \
+          --remove-label "archon:in-progress" --add-label "archon:done" >/dev/null 2>&1 \
+        || log "$project: #$issue — closed, but could not relabel archon:done" ;;
+    depend-*)
+      blocker="${action#depend-}"
+      if ! lachesis_depend "$project" "$issue" "$blocker"; then
+        log "$project: #$issue — its question's default ($action) was taken, but Lachesis did not record the dependency; not launching"
+        return 0
+      fi
+      gh issue comment "$issue" --repo "$repo" --body "Recorded #$blocker as blocking this issue: the factory's question went unanswered and its default was taken. The factory runs it again once #$blocker closes.
+
+<!-- archon-settle-act: $action -->
+<!-- lachesis:automated -->" >/dev/null 2>&1 \
+        || log "$project: #$issue — recorded the dependency, but could not post its comment; the default note stays newest, so the next tick records it again" ;;
+  esac
+  lachesis_note "$project" "$issue" "Took the unanswered question's default on #$issue: $action." \
+    || log "$project: #$issue — could not record the note in Lachesis"
+  log "$project: #$issue — took its question's default ($action) instead of a launch"
+  SUMMARY_ACTION="settled #$issue (default taken)"
+  return 0
 }
 
 # lachesis_may_triage — with Lachesis pickup on, triage spends the allowance

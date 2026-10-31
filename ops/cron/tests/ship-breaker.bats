@@ -27,6 +27,7 @@ printf '%s\n' "$*" >> "$GH_ARGV"
 case "$*" in
   *"/comments"*) cat "$GH_COMMENTS" 2>/dev/null || true ;;
   *"issue edit"*) exit "${GH_EDIT_RC:-0}" ;;
+  *"issue comment"*) exit "${GH_COMMENT_RC:-0}" ;;
 esac
 STUB
     chmod +x "$T/bin/gh"
@@ -46,6 +47,12 @@ teardown() {
 }
 
 N=0
+# breaker_comment park|retry <minutes ago> — one of the breaker's comments on
+# #5, as ship_breaker_check's --jq prints it.
+breaker_comment() {
+    printf '%s\t%s\n' "$1" "$(date -u -d "-$2 minutes" +%Y-%m-%dT%H:%M:%SZ)" >> "$GH_COMMENTS"
+}
+
 # run_row <status> <minutes ago> [event data...] — one archon-ship run on #5.
 run_row() {
     local status="$1" ago="$2"; shift 2
@@ -67,21 +74,161 @@ run_row() {
     [ ! -s "$GH_ARGV" ]
 }
 
-@test "three consecutive failed runs park the issue" {
+@test "three consecutive failed runs first get one diagnose-and-retry run (#237)" {
+    run_row failed 50
+    run_row failed 30 '{"error":"boom\nat line 2"}'
+    run_row failed 10
+    run ship_breaker_check testproj 5
+    [ "$status" -eq 0 ]
+    [ "$(grep -c 'issue edit' "$GH_ARGV")" -eq 0 ]
+    grep -q -- "issue comment 5 --repo alexsiri7/testproj --body The archon-ship circuit breaker would park #5: its last 3 runs all failed" "$GH_ARGV"
+    grep -qE -- "^- [0-9-]+ [0-9:]+: boom at line 2$" "$GH_ARGV"
+    [ "$(grep -c -- '^- .*: no error recorded' "$GH_ARGV")" -eq 2 ]
+    grep -qx -- "$SHIP_BREAKER_RETRY_MARKER" "$GH_ARGV"
+    grep -qx -- '<!-- lachesis:automated -->' "$GH_ARGV"
+    [[ "$output" == *"circuit would open (failed:3); one diagnose-and-retry run first"* ]]
+}
+
+@test "a retry comment that cannot be posted launches nothing" {
     run_row failed 50
     run_row failed 30
+    run_row failed 10
+    GH_COMMENT_RC=1 run ship_breaker_check testproj 5
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"could not post the retry comment"* ]]
+}
+
+@test "the diagnosis says so when the run history cannot be read" {
+    export ARCHON_DB="$T/missing.db"
+    [ "$(ship_breaker_diagnosis testproj 5)" = "- the run history could not be read" ]
+}
+
+@test "a retry newer than the last failed run may launch" {
+    run_row failed 50
+    run_row failed 30
+    run_row failed 10
+    breaker_comment retry 5
+    run ship_breaker_check testproj 5
+    [ "$status" -eq 0 ]
+    [ "$(grep -c 'issue ' "$GH_ARGV")" -eq 0 ]
+}
+
+@test "a retry followed by a completed run may launch" {
+    run_row failed 50
+    run_row failed 40
+    run_row failed 30
+    breaker_comment retry 20
+    run_row completed 10
+    run ship_breaker_check testproj 5
+    [ "$status" -eq 0 ]
+}
+
+@test "a failed run after the retry parks the issue" {
+    run_row failed 50
+    run_row failed 40
+    run_row failed 30
+    breaker_comment retry 20
     run_row failed 10
     run ship_breaker_check testproj 5
     [ "$status" -eq 1 ]
     grep -q -- "issue edit 5 --repo alexsiri7/testproj .*--add-label manual-review --add-label archon:skipped" "$GH_ARGV"
-    grep -q -- "issue comment 5 " "$GH_ARGV"
-    [[ "$output" == *"circuit open (failed:3)"* ]]
+    grep -q -- "One diagnose-and-retry run after the breaker's comment failed too." "$GH_ARGV"
+    grep -qx -- "$SHIP_BREAKER_MARKER" "$GH_ARGV"
     grep -qx -- '<!-- lachesis:automated -->' "$GH_ARGV"
+    [[ "$output" == *"circuit open (failed:4)"* ]]
+}
+
+@test "a retry run that completed resets the count: a later streak retries again, it does not park" {
+    run_row failed 90
+    run_row failed 80
+    run_row failed 70
+    breaker_comment retry 65
+    run_row completed 60
+    run_row failed 50
+    run_row failed 30
+    run_row failed 10
+    run ship_breaker_check testproj 5
+    [ "$status" -eq 0 ]
+    [ "$(grep -c 'issue edit' "$GH_ARGV")" -eq 0 ]
+    grep -qx -- "$SHIP_BREAKER_RETRY_MARKER" "$GH_ARGV"
+    [ "$(grep -c -- 'failed too' "$GH_ARGV")" -eq 0 ]
+}
+
+@test "only rate-limited runs since the retry leave it pending: may launch" {
+    run_row failed 50
+    run_row failed 40
+    run_row failed 30
+    breaker_comment retry 20
+    run_row failed 10 '{"error":"Claude API error (rate_limit): You have hit your weekly limit"}'
+    run ship_breaker_check testproj 5
+    [ "$status" -eq 0 ]
+    [ "$(grep -c 'issue ' "$GH_ARGV")" -eq 0 ]
+}
+
+@test "the diagnosis posted to the issue carries no secret-shaped text" {
+    run_row failed 50 '{"error":"git push https://x-access-token:ghp_abcdefghijklmnopqrstuvwxyz0123@github.com/a/b failed"}'
+    run_row failed 30 '{"error":"env: GH_TOKEN=github_pat_11ABCDEFGHIJ_klmnopqrst NTFY_TOPIC=sekrit, Authorization: Bearer abcdefghijklmnopqrstu"}'
+    run_row failed 10 '{"error":"the factory token could not push; password: hunter2"}'
+    run ship_breaker_check testproj 5
+    [ "$status" -eq 0 ]
+    ! grep -qE -- 'ghp_|github_pat_|sekrit|abcdefghijklmnopqrstu|hunter2|x-access-token' "$GH_ARGV"
+    grep -q -- "https://\[redacted\]@github.com/a/b failed" "$GH_ARGV"
+    grep -q -- "the factory token could not push; password: \[redacted\]" "$GH_ARGV"
+}
+
+@test "every secret shape the diagnosis can quote is redacted" {
+    local secret line
+    local -a secrets=(
+        ghs_abcdefghijklmnopqrstuvwxyz github_pat_11ABCDEFGHIJ_klmnopqrst
+        sk-abcdefghijklmnopqrstuvwx xoxb-1234567890-abcdefghijkl dp.st.prd.abcdefghijklmnopqrst
+        AKIAABCDEFGHIJKLMNOP
+        eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJlc2lnbmF0dXJl
+        userpass1234 bearerabcdefghijklmno basicabcdefghijklmnop tokenabcdefghijklmnop
+        tokval1 secval1 pwval1 apikeyval1 privval1 upperval1)
+    run ship_breaker_redact <<'EOF'
+push as ghs_abcdefghijklmnopqrstuvwxyz failed
+cloned with github_pat_11ABCDEFGHIJ_klmnopqrst
+openai rejected sk-abcdefghijklmnopqrstuvwx
+slack rejected xoxb-1234567890-abcdefghijkl
+doppler rejected dp.st.prd.abcdefghijklmnopqrst
+aws rejected AKIAABCDEFGHIJKLMNOP
+session eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJlc2lnbmF0dXJl expired
+fetch https://bot:userpass1234@example.com/x failed
+Authorization: Bearer bearerabcdefghijklmno
+Authorization: Basic basicabcdefghijklmnop
+Authorization: token tokenabcdefghijklmnop
+access_token=tokval1
+client_secret: secval1
+"passwd": "pwval1"
+API-KEY=apikeyval1
+private_key: privval1
+export MY_VAR=upperval1
+EOF
+    [ "$status" -eq 0 ]
+    for secret in "${secrets[@]}"; do
+        [[ "$output" != *"$secret"* ]] || { echo "leaked: $secret"; return 1; }
+    done
+    while IFS= read -r line; do
+        [[ "$line" == *"[redacted]"* ]] || { echo "not redacted: $line"; return 1; }
+    done <<<"$output"
+}
+
+@test "a retry from before the last park is spent: the next trip retries again" {
+    breaker_comment retry 90
+    breaker_comment park 80
+    run_row failed 50
+    run_row failed 30
+    run_row failed 10
+    run ship_breaker_check testproj 5
+    [ "$status" -eq 0 ]
+    grep -qx -- "$SHIP_BREAKER_RETRY_MARKER" "$GH_ARGV"
+    [ "$(grep -c 'issue edit' "$GH_ARGV")" -eq 0 ]
 }
 
 @test "a park whose relabel fails posts no marker comment (it would reset the count)" {
     run_row failed 50
     run_row failed 30
+    breaker_comment retry 20
     run_row failed 10
     GH_EDIT_RC=1 run ship_breaker_check testproj 5
     [ "$status" -eq 1 ]
@@ -111,8 +258,8 @@ outcome_row() {
     outcome_row 30 $'Not done: blocked on test. test\nReport: /x/triage.md'
     outcome_row 10 $'Not done: blocked on test. test\nReport: /x/triage.md'
     run ship_breaker_check testproj 5
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"circuit open (failed:3)"* ]]
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"circuit would open (failed:3)"* ]]
 }
 
 @test "a completed run with a real verdict still resets the count" {
@@ -138,6 +285,7 @@ outcome_row() {
     run ship_breaker_check testproj 5
     [ "$status" -eq 1 ]
     [[ "$output" == *"circuit open (workflow-scope)"* ]]
+    run ! grep -qx -- "$SHIP_BREAKER_RETRY_MARKER" "$GH_ARGV"
 }
 
 @test "the agent stream quoting the scope patterns is not a refused push (#209)" {
@@ -167,7 +315,7 @@ outcome_row() {
     run_row failed 40
     run_row failed 30
     run_row failed 5
-    date -u -d '-20 minutes' +%Y-%m-%dT%H:%M:%SZ > "$GH_COMMENTS"
+    breaker_comment park 20
     run ship_breaker_check testproj 5
     [ "$status" -eq 0 ]
     [ "$(grep -c 'issue edit' "$GH_ARGV")" -eq 0 ]
@@ -227,9 +375,21 @@ outcome_row() {
 
 # ── Lachesis pickup: the park is a question (SHIP_BREAKER_ASK) ───────────────
 
-@test "with SHIP_BREAKER_ASK a trip asks the author instead of relabelling" {
+@test "with SHIP_BREAKER_ASK a trip retries before it asks" {
     run_row failed 50
     run_row failed 30
+    run_row failed 10
+    ask() { touch "$T/asked"; }
+    SHIP_BREAKER_ASK=ask run ship_breaker_check testproj 5
+    [ "$status" -eq 0 ]
+    [ ! -e "$T/asked" ]
+    grep -qx -- "$SHIP_BREAKER_RETRY_MARKER" "$GH_ARGV"
+}
+
+@test "with SHIP_BREAKER_ASK a failed retry asks the author instead of relabelling" {
+    run_row failed 50
+    run_row failed 30
+    breaker_comment retry 20
     run_row failed 10
     ask() { printf '%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" > "$T/asked"; }
     SHIP_BREAKER_ASK=ask run ship_breaker_check testproj 5
@@ -243,6 +403,7 @@ outcome_row() {
 @test "with SHIP_BREAKER_ASK a question that fails still launches nothing" {
     run_row failed 50
     run_row failed 30
+    breaker_comment retry 20
     run_row failed 10
     ask() { return 1; }
     SHIP_BREAKER_ASK=ask run ship_breaker_check testproj 5

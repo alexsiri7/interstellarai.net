@@ -366,6 +366,10 @@ PROCS
     [ "$(flag)" = drain ]
     touch -d '30 minutes ago' "$T/state/restore/meta"
     export SAFE_REBOOT_NOW=$(date +%s)
+    # Needs real wall-clock NOW for the meta-age check above, but that makes
+    # the window check below flaky (true only during 02:30-06:30): pin the
+    # window to this instant so it is reliably outside it.
+    export SAFE_REBOOT_WINDOW="$(date -d "@$SAFE_REBOOT_NOW" +%H:%M)-$(date -d "@$SAFE_REBOOT_NOW" +%H:%M)"
     run "$SCRIPT" gate
     [ "$(flag)" = asiri ]
     grep -q 'Reboot did not happen' "$T/ntfy.log"

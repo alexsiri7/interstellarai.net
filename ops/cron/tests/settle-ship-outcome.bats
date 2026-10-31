@@ -13,17 +13,20 @@ setup() {
     # Stub gh: records argv, answers sub_issues with what its --jq would print,
     # "<total>\t<open>" (absent = no sub-issues), and runs the script's own --jq
     # over the ref-<N> GitHub JSON for a single issue or PR (see ref()).
-    # `issue view` prints the body-<issue> fixture (default: an ordinary body),
-    # or fails with GH_VIEW_RC. The deferral checks (#211) read state-<N>
+    # `issue view` prints {title, body} from the title-<issue> and body-<issue>
+    # fixtures (default: an ordinary issue), or fails with GH_VIEW_RC. The deferral checks (#211) read state-<N>
     # ("issue|pr<TAB>open|closed") and pull-<N> ("<state><TAB><merged><TAB>
     # <cross><TAB><login>"); gone-<N> makes both answer 404; comments-<N>
-    # holds the issue's comment bodies.
+    # is the issue's one comment body, which the script's --jq reads. GH_COMMENT_RC fails `issue comment`.
     cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_ARGV"
 case "$*" in
   *sub_issues*)       cat "$GH_FIXTURES/sub-$(sed -E 's#.*/issues/([0-9]+)/.*#\1#' <<<"$*")" 2>/dev/null || printf '0\t0\n' ;;
-  *"/comments"*)      cat "$GH_FIXTURES/comments-$(sed -E 's#.*/issues/([0-9]+)/.*#\1#' <<<"$*")" 2>/dev/null; exit "${GH_COMMENTS_RC:-0}" ;;
+  *"/comments"*)
+    f="$GH_FIXTURES/comments-$(sed -E 's#.*/issues/([0-9]+)/.*#\1#' <<<"$*")"
+    [ -e "$f" ] && jq -Rs '[{body: .}]' "$f" | jq -r "$5"
+    exit "${GH_COMMENTS_RC:-0}" ;;
   "api "*/pulls/*)
     [ -e "$GH_FIXTURES/gone-${2##*/}" ] && { echo 'gh: Not Found (HTTP 404)' >&2; exit 1; }
     cat "$GH_FIXTURES/pull-${2##*/}" 2>/dev/null || exit 1 ;;
@@ -33,10 +36,13 @@ case "$*" in
   "api "*/issues/*)   [ "$3" = --jq ] && jq -r "$4" "$GH_FIXTURES/ref-${2##*/}" 2>/dev/null ;;
   *"issue view"*)
     [ -n "${GH_VIEW_RC:-}" ] && exit "$GH_VIEW_RC"
-    cat "$GH_FIXTURES/body-$(sed -E 's/^issue view ([0-9]+).*/\1/' <<<"$*")" 2>/dev/null || echo 'An ordinary issue.' ;;
+    n=$(sed -E 's/^issue view ([0-9]+).*/\1/' <<<"$*")
+    jq -n --arg t "$(cat "$GH_FIXTURES/title-$n" 2>/dev/null || echo 'An ordinary issue')" \
+      --arg b "$(cat "$GH_FIXTURES/body-$n" 2>/dev/null || echo 'An ordinary issue.')" \
+      '{title: $t, body: $b}' ;;
   *"issue close"*)    exit "${GH_CLOSE_RC:-0}" ;;
   *"issue edit"*)     exit "${GH_EDIT_RC:-0}" ;;
-  *"issue comment"*)  exit 0 ;;
+  *"issue comment"*)  exit "${GH_COMMENT_RC:-0}" ;;
 esac
 STUB
     chmod +x "$T/bin/gh"
@@ -645,6 +651,7 @@ lachesis_on() {
     cat > "$T/bin/lachesis" <<'STUB'
 #!/usr/bin/env bash
 printf '%s %s\n' "$1" "${2:-}" >> "$LACHESIS_ARGV"
+[ "$1" = add_dependency ] && exit "${LACHESIS_DEPEND_RC:-0}"
 exit "${LACHESIS_RC:-0}"
 STUB
     chmod +x "$T/bin/lachesis"
@@ -918,4 +925,372 @@ assert_released() {
     [ "$status" -eq 0 ]
     grep -q -- "--add-label archon:skipped" "$GH_ARGV"
     [ "$(gh_calls 'archon-settle-stale-refs')" -eq 0 ]
+}
+
+# ── Severity tiers (#237), with Lachesis pickup on ───────────────────────────
+
+# asked_default — the default of the one question asked ("" for none).
+asked_default() {
+    [ "$(grep -c '^ask_question ' "$LACHESIS_ARGV")" -eq 1 ]
+    sed -n 's/^ask_question //p' "$LACHESIS_ARGV" | jq -r '.default // ""'
+}
+
+# tier_outcome <tier> <summary> — a v0.12 outcome line declaring <tier>.
+tier_outcome() {
+    jq -nc --argjson t "$1" --arg s "$2" '{delivered: false, reason: "blocked", pr_url: "", summary: $s, tier: $t}' > "$RUN_LOG"
+}
+
+@test "tiers: an unconfirmed No delivery needed with no tier asks with closing as its 2-day default" {
+    lachesis_on
+    echo 'No delivery needed: false positive alert, not a code change.' > "$RUN_LOG"
+
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_parked 9
+    [ "$(asked_default)" = "Close #9 as completed: the run found nothing left to deliver. <!-- archon-settle-default: close-completed -->" ]
+    sed -n 's/^ask_question //p' "$LACHESIS_ARGV" | jq -e '.wait_days == 2 and .kind == "clarification"
+        and .options == ["Run #9 once more, with this verdict as direction.",
+                         "Answer with what the next run should do differently."]'
+    [[ "$output" == *"tier 2, default close-completed"* ]]
+}
+
+@test "tiers: No work owed defaults to closing as not planned" {
+    lachesis_on
+    echo 'No work owed in this repository: the crash is in the upstream SDK.' > "$RUN_LOG"
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    [[ "$(asked_default)" == *"<!-- archon-settle-default: close-not-planned -->" ]]
+}
+
+@test "tiers: blocked on one open issue defaults to recording the dependency" {
+    lachesis_on
+    printf 'Not done: blocked on #8 landing first.\n' > "$RUN_LOG"
+    printf 'issue\topen\n' > "$T/fixtures/state-8"
+    ref 8 open-issue
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 9
+    [[ "$(asked_default)" == "Record #8 as blocking #9; "*"<!-- archon-settle-default: depend-8 -->" ]]
+}
+
+# An answer only releases the issue to run again; pickup carries out a close or
+# a dependency only as a taken default, so no option may offer one.
+@test "tiers: a question offers as options only answers that run the issue again" {
+    lachesis_on
+    printf 'issue\topen\n' > "$T/fixtures/state-8"
+    ref 8 open-issue
+    for verdict in 'No delivery needed: false positive alert, not a code change.' \
+            'No work owed in this repository: the crash is in the upstream SDK.' \
+            'Not done: blocked on #8 landing first.'; do
+        : > "$LACHESIS_ARGV"
+        echo "$verdict" > "$RUN_LOG"
+        run "$SCRIPT" testproj 9 "$RUN_LOG"
+        [ "$status" -eq 0 ]
+        [ -n "$(asked_default)" ]
+        sed -n 's/^ask_question //p' "$LACHESIS_ARGV" | jq -e '.options == ["Run #9 once more, with this verdict as direction.",
+            "Answer with what the next run should do differently."]'
+    done
+}
+
+# Pickup acts on a taken default only when its action matches
+# SETTLE_DEFAULT_ACTION_RE; any other would launch a run instead.
+@test "tiers: every default settle offers, but proceed, is one pickup carries out" {
+    lachesis_on
+    # shellcheck source=../lib/severity.sh
+    source "$(dirname "$SCRIPT")/severity.sh"
+    printf 'issue\topen\n' > "$T/fixtures/state-8"
+    ref 8 open-issue
+    local verdict action
+    for verdict in 'No delivery needed: false positive alert, not a code change.' \
+            'No work owed in this repository: the crash is in the upstream SDK.' \
+            'Not done: blocked on #8 landing first.' \
+            'Not done: the investigation was inconclusive. The crash did not reproduce.'; do
+        : > "$LACHESIS_ARGV"
+        echo "$verdict" > "$RUN_LOG"
+        run "$SCRIPT" testproj 9 "$RUN_LOG"
+        [ "$status" -eq 0 ]
+        action=$(asked_default | sed -nE 's/.*<!-- archon-settle-default: (.*) -->$/\1/p')
+        [ -n "$action" ]
+        [ "$action" = proceed ] || [[ "$action" =~ ^($SETTLE_DEFAULT_ACTION_RE)$ ]] \
+            || { echo "pickup would not carry out $action"; return 1; }
+    done
+}
+
+@test "tiers: blocked on an open PR, or on two issues, asks with no default" {
+    lachesis_on
+    printf 'Not done: blocked on PR #8.\n' > "$RUN_LOG"
+    printf 'pr\topen\n' > "$T/fixtures/state-8"
+    printf 'open\tfalse\tfalse\talexsiri7\n' > "$T/fixtures/pull-8"
+    ref 8 pr
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    [ "$(asked_default)" = "" ]
+    sed -n 's/^ask_question //p' "$LACHESIS_ARGV" | jq -e 'has("wait_days") or has("options") | not'
+
+    : > "$LACHESIS_ARGV"; : > "$GH_ARGV"
+    printf 'Not done: blocked on #8 and #10.\n' > "$RUN_LOG"
+    for n in 8 10; do printf 'issue\topen\n' > "$T/fixtures/state-$n"; ref "$n" open-issue; done
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    [ "$(asked_default)" = "" ]
+    [[ "$output" == *"tier 2, default none"* ]]
+}
+
+@test "tiers: any other Not done defaults to running once more" {
+    lachesis_on
+    printf 'Not done: the investigation was inconclusive. The crash did not reproduce.\n' > "$RUN_LOG"
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    [[ "$(asked_default)" == "Run #9 once more, with this verdict as direction. <!-- archon-settle-default: proceed -->" ]]
+}
+
+@test "tiers: No delivery needed naming an open PR, or an open sub-issue, asks with no default" {
+    lachesis_on
+    echo 'No delivery needed: PR #50 implements this.' > "$RUN_LOG"
+    ref 50 pr
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    [ "$(asked_default)" = "" ]
+
+    : > "$LACHESIS_ARGV"
+    echo 'No delivery needed: every phase of this epic has shipped.' > "$RUN_LOG"
+    printf '3\t1\n' > "$T/fixtures/sub-9"
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    [ "$(asked_default)" = "" ]
+}
+
+@test "tiers: a tier-3 word in the verdict or the title asks with no default, even when tier 1 is declared" {
+    lachesis_on
+    tier_outcome 1 'No delivery needed: the fix needs a production database backfill.'
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 9
+    [ "$(asked_default)" = "" ]
+    [[ "$output" == *"tier 3, default none"* ]]
+
+    : > "$LACHESIS_ARGV"; : > "$GH_ARGV"
+    tier_outcome 1 'No delivery needed: nothing left to change.'
+    fixture title-9 'Rotate the signing key before the next release'
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 9
+    [ "$(asked_default)" = "" ]
+}
+
+@test "tiers: tier 1 No delivery needed closes as completed with the act marker and a note, asking nothing" {
+    lachesis_on
+    tier_outcome 1 'No delivery needed: false positive alert, not a code change.'
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    grep -q -- "issue close 9 --repo alexsiri7/testproj --reason completed --comment" "$GH_ARGV"
+    grep -qx -- "<!-- archon-settle-act: close-completed -->" "$GH_ARGV"
+    grep -q -- "--add-label archon:done" "$GH_ARGV"
+    [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 0 ]
+    sed -n 's/^add_note //p' "$LACHESIS_ARGV" | jq -e '.repo == "alexsiri7/testproj" and .issue == 9 and .type == "decision"'
+}
+
+@test "tiers: tier 1 No work owed closes as not planned" {
+    lachesis_on
+    tier_outcome 1 'No work owed in this repository: the crash is in the upstream SDK.'
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    grep -q -- "issue close 9 --repo alexsiri7/testproj --reason not planned --comment" "$GH_ARGV"
+    grep -qx -- "<!-- archon-settle-act: close-not-planned -->" "$GH_ARGV"
+}
+
+@test "tiers: tier 1 blocked on an open issue records the dependency and releases" {
+    lachesis_on
+    tier_outcome 1 'Not done: blocked on #8 landing first.'
+    printf 'issue\topen\n' > "$T/fixtures/state-8"
+    ref 8 open-issue
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    sed -n 's/^add_dependency //p' "$LACHESIS_ARGV" | jq -e '. == {repo: "alexsiri7/testproj", issue_number: 9, blocked_by_issue_number: 8}'
+    assert_released 9
+    grep -qx -- "<!-- archon-settle-act: depend-8 -->" "$GH_ARGV"
+    [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 0 ]
+    [ "$(grep -c '^add_note' "$LACHESIS_ARGV")" -eq 1 ]
+}
+
+@test "tiers: tier 1 other Not done releases to run again with the proceed marker" {
+    lachesis_on
+    tier_outcome 1 'Not done: the investigation was inconclusive. The crash did not reproduce.'
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_released 9
+    grep -qx -- "<!-- archon-settle-act: proceed -->" "$GH_ARGV"
+    grep -q -- "the next run takes this verdict as direction" "$GH_ARGV"
+    [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 0 ]
+    [[ "$output" == *"#9 settled by tier-1 action proceed"* ]]
+}
+
+@test "tiers: proceed runs again at most once per issue, acted or offered" {
+    lachesis_on
+    for marker in '<!-- archon-settle-act: proceed -->' '<!-- archon-settle-default: proceed -->'; do
+        : > "$LACHESIS_ARGV"; : > "$GH_ARGV"
+        printf 'earlier\n%s\n' "$marker" > "$T/fixtures/comments-9"
+        tier_outcome 1 'Not done: the investigation was inconclusive. The crash did not reproduce.'
+        run "$SCRIPT" testproj 9 "$RUN_LOG"
+        [ "$status" -eq 0 ]
+        assert_parked 9
+        [ "$(asked_default)" = "" ]
+        [ "$(gh_calls 'archon-settle-act')" -eq 0 ]
+    done
+}
+
+@test "tiers: a default offered before is not offered again" {
+    lachesis_on
+    printf '<!-- archon-settle-default: close-completed -->\n' > "$T/fixtures/comments-9"
+    echo 'No delivery needed: false positive alert, not a code change.' > "$RUN_LOG"
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    [ "$(asked_default)" = "" ]
+}
+
+@test "tiers: comments that cannot be read leave the issue unsettled, asking nothing" {
+    lachesis_on
+    export GH_COMMENTS_RC=1
+    tier_outcome 1 'No delivery needed: false positive alert, not a code change.'
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"could not read its comments"* ]]
+    [ "$(gh_calls 'issue comment')" -eq 0 ]
+    [ "$(gh_calls 'archon:skipped')" -eq 0 ]
+    [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 0 ]
+}
+
+@test "tiers: a tier-1 act whose release failed is not asked when the next settle cannot read its comments" {
+    lachesis_on
+    tier_outcome 1 'Not done: the investigation was inconclusive. The crash did not reproduce.'
+    GH_EDIT_RC=1 run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 1 ]
+    sed -n '/^issue comment 9 /,/lachesis:automated/p' "$GH_ARGV" \
+        | sed '1s/^issue comment 9 --repo alexsiri7\/testproj --body //' > "$T/fixtures/comments-9"
+    : > "$LACHESIS_ARGV"; : > "$GH_ARGV"
+    GH_COMMENTS_RC=1 run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 1 ]
+    [ "$(gh_calls 'issue comment')" -eq 0 ]
+    [ "$(gh_calls 'archon:skipped')" -eq 0 ]
+    [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 0 ]
+}
+
+@test "tiers: a health-filed issue, or one whose body cannot be read, is never closed by tier 1" {
+    lachesis_on
+    tier_outcome 1 'No work owed in this repository: main is red on a flaky runner.'
+    printf '## Main CI red\n\nAuto-filed by `pipeline-health-cron.sh`.\n' > "$T/fixtures/body-9"
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 9
+    [ "$(asked_default)" = "" ]
+
+    : > "$LACHESIS_ARGV"; : > "$GH_ARGV"
+    rm "$T/fixtures/body-9"
+    export GH_VIEW_RC=1
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 9
+    [ "$(asked_default)" = "" ]
+}
+
+@test "tiers: a tier-1 close that fails asks with no default" {
+    lachesis_on
+    export GH_CLOSE_RC=1
+    tier_outcome 1 'No delivery needed: false positive alert, not a code change.'
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    grep -q -- "--add-label archon:skipped" "$GH_ARGV"
+    [ "$(asked_default)" = "" ]
+    [ "$(grep -c '^add_note' "$LACHESIS_ARGV")" -eq 0 ]
+}
+
+@test "tiers: a tier-1 action whose marker comment cannot be posted is not taken: it asks with no default" {
+    lachesis_on
+    export GH_COMMENT_RC=1
+    tier_outcome 1 'Not done: the investigation was inconclusive. The crash did not reproduce.'
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"could not post the tier-1 proceed comment; asking instead"* ]]
+    [ "$(grep -c -- '--remove-label archon:in-progress$' "$GH_ARGV")" -eq 0 ]
+    [ "$(grep -c '^add_note' "$LACHESIS_ARGV")" -eq 0 ]
+    [ "$(asked_default)" = "" ]
+    assert_parked 9
+}
+
+@test "tiers: a tier-1 depend or proceed that cannot release archon:in-progress fails closed" {
+    lachesis_on
+    export GH_EDIT_RC=1
+    printf 'issue\topen\n' > "$T/fixtures/state-8"
+    ref 8 open-issue
+    for verdict in 'Not done: blocked on #8 landing first.' \
+            'Not done: the investigation was inconclusive. The crash did not reproduce.'; do
+        : > "$LACHESIS_ARGV"; : > "$GH_ARGV"
+        tier_outcome 1 "$verdict"
+        run "$SCRIPT" testproj 9 "$RUN_LOG"
+        [ "$status" -eq 1 ]
+        [[ "$output" == *"could not release archon:in-progress"* ]]
+        [[ "$output" != *"settled by tier-1 action"* ]]
+        [ "$(grep -c '^add_note' "$LACHESIS_ARGV")" -eq 0 ]
+        [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 0 ]
+    done
+}
+
+@test "tiers: a tier-1 act whose release failed is released by the next settle of its run, not asked" {
+    lachesis_on
+    printf 'issue\topen\n' > "$T/fixtures/state-8"
+    ref 8 open-issue
+    for verdict in 'Not done: blocked on #8 landing first.' \
+            'Not done: the investigation was inconclusive. The crash did not reproduce.'; do
+        : > "$LACHESIS_ARGV"; : > "$GH_ARGV"; rm -f "$T/fixtures/comments-9"
+        tier_outcome 1 "$verdict"
+        GH_EDIT_RC=1 run "$SCRIPT" testproj 9 "$RUN_LOG"
+        [ "$status" -eq 1 ]
+        # The act comment landed on GitHub; the unstick_stale re-settle passes
+        # the same log by another path.
+        sed -n '/^issue comment 9 /,/lachesis:automated/p' "$GH_ARGV" \
+            | sed '1s/^issue comment 9 --repo alexsiri7\/testproj --body //' > "$T/fixtures/comments-9"
+        grep -q 'archon-settle-act: ' "$T/fixtures/comments-9"
+        : > "$LACHESIS_ARGV"; : > "$GH_ARGV"
+        run "$SCRIPT" testproj 9 "$T/../${T##*/}/run.log"
+        [ "$status" -eq 0 ]
+        [[ "$output" == *"#9 settled by tier-1 action "* ]]
+        grep -q -- '--remove-label archon:in-progress$' "$GH_ARGV"
+        [ "$(gh_calls 'issue comment')" -eq 0 ]
+        [ "$(gh_calls 'archon:skipped')" -eq 0 ]
+        [ "$(grep -c '^add_note' "$LACHESIS_ARGV")" -eq 1 ]
+        [ "$(grep -c '^add_dependency' "$LACHESIS_ARGV")" -eq 0 ]
+        [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 0 ]
+    done
+}
+
+@test "tiers: a tier-1 dependency Lachesis refuses asks with no default" {
+    lachesis_on
+    export LACHESIS_DEPEND_RC=1
+    tier_outcome 1 'Not done: blocked on #8 landing first.'
+    printf 'issue\topen\n' > "$T/fixtures/state-8"
+    ref 8 open-issue
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 9
+    [ "$(asked_default)" = "" ]
+}
+
+@test "tiers: --recheck never acts on a tier" {
+    lachesis_on
+    printf '{"delivered":false,"tier":1,"summary":"No delivery needed: false positive alert.\\n\\nParked as archon:skipped. x"}\n' > "$RUN_LOG"
+    run "$SCRIPT" --recheck testproj 9 "$RUN_LOG"
+    [ "$status" -eq 1 ]
+    assert_untouched
+    [ ! -s "$LACHESIS_ARGV" ]
+}
+
+@test "tiers: with pickup off a tier-1 outcome parks exactly as before" {
+    export LACHESIS_CALL_CMD="$T/no-such-lachesis"
+    tier_outcome 1 'No delivery needed: false positive alert, not a code change.'
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 9
+    [ "$(gh_calls 'comments')" -eq 0 ]
+    [[ "$output" != *"tier"* ]]
 }
