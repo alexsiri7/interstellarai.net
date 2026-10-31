@@ -230,6 +230,15 @@ review_row() { # review_row <run_id> <class> <user_message> — a parked archon-
     grep -q 'Ship it now?' "$NOTIFIED"
 }
 
+@test "a row with no user_message keeps its deadline, step and need in place" {
+    printf '%s\t%s\t%s\t%s\t\t%s\t%s\t%s\n' 500946af-aaaa gate archon-ship /mnt/ext-fast/un-reminder 0 \
+      review-gate "Ship it now?" > "$PARKED_ROWS"
+    check_parked_runs
+
+    [ "$(wc -l < "$NOTIFIED")" -eq 1 ]
+    grep -q 'archon-ship (gate at review-gate) — no user message Ship it now? run 500946af-aaaa' "$NOTIFIED"
+}
+
 @test "the real archon_parked_runs row feeds check_parked_runs unchanged" {
     # The only test that crosses the seam: both sides assert the eight-column
     # contract independently, so a reordered column would otherwise pass twice.

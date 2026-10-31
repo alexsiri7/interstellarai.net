@@ -97,3 +97,39 @@ stalled_row() {
     [ "$(wc -l < "$NOTIFIED")" -eq 1 ]
     grep -q 'interstellarai.net archon-ship-block — fix #242 deliver__update-pr-body: wait for bats: no progress for 3h0m run 197afe4f-aaaa' "$NOTIFIED"
 }
+
+@test "a row with no user_message or origin keeps every later field in place" {
+    printf '%s\t%s\t\t\t%s\t%s\n' 197afe4f-aaaa archon-ship-block "$(( $(date +%s) - 10800 ))" \
+      "deliver__update-pr-body: wait for bats" > "$STALLED_ROWS"
+    set -u
+    check_stalled_tool_calls
+    set +u
+
+    [ "$(wc -l < "$NOTIFIED")" -eq 1 ]
+    grep -q 'archon-ship-block — no user message deliver__update-pr-body: wait for bats: no progress for 3h0m run 197afe4f-aaaa' "$NOTIFIED"
+}
+
+@test "a stalled call with no readable progress time alerts once without a duration" {
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' 197afe4f-aaaa archon-ship-block /mnt/ext-fast/interstellarai.net "fix #242" -1 \
+      "deliver__update-pr-body: wait for bats" > "$STALLED_ROWS"
+    check_stalled_tool_calls
+    check_stalled_tool_calls
+
+    [ "$(wc -l < "$NOTIFIED")" -eq 1 ]
+    grep -q 'wait for bats: listed as stalled, with no readable lastProgressAt run 197afe4f-aaaa' "$NOTIFIED"
+}
+
+@test "two runs stalled in one tick keep their markers apart" {
+    stalled_row 197afe4f-aaaa
+    stalled_row 197afe4f-bbbb
+    check_stalled_tool_calls
+    [ "$(wc -l < "$NOTIFIED")" -eq 2 ]
+
+    : > "$STALLED_ROWS"
+    stalled_row 197afe4f-bbbb
+    check_stalled_tool_calls
+
+    [ ! -e "$MARKER_DIR/alerted-197afe4f-aaaa" ]
+    [ -e "$MARKER_DIR/alerted-197afe4f-bbbb" ]
+    [ "$(wc -l < "$NOTIFIED")" -eq 2 ]
+}

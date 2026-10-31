@@ -3003,7 +3003,9 @@ check_parked_runs() {
     log "parked-runs: no archon run snapshot this tick — skipping"
     return 0
   fi
-  while IFS=$'\t' read -r run_id class wf origin msg deadline step need; do
+  # Rows are TSV, but tab is IFS whitespace: `read` would merge an empty field
+  # (a run with no user_message) into the next and shift every later one.
+  while IFS=$'\037' read -r run_id class wf origin msg deadline step need; do
     [ -n "$run_id" ] || continue
     seen="$seen $run_id"
     if [[ "$wf" =~ $ARCHON_REVIEW_WORKFLOWS_RE ]] && pr=$(review_pr_merged "${origin##*/}" "$msg"); then
@@ -3035,7 +3037,7 @@ ${need:+$need
 archon workflow get $run_id --json" \
       high hourglass
     touch "$marker_dir/alerted-$run_id"
-  done < <(archon_parked_runs "$PARKED_WAIT_MAX_SECONDS")
+  done < <(archon_parked_runs "$PARKED_WAIT_MAX_SECONDS" | tr '\t' '\037')
   # A nudged run that healthily re-parks leaves this tick's parked set with a
   # fresh deadline; drop its markers so the next stall starts from a resume.
   for marker in "$marker_dir"/resumed-* "$marker_dir"/alerted-* "$marker_dir"/ci-resume-failed-*; do
@@ -3061,25 +3063,31 @@ archon workflow get $run_id --json" \
 # ----------------------------------------------------------------------------
 check_stalled_tool_calls() {
   local marker_dir="$STATE_DIR/stalled-tool-calls"
-  local run_id wf origin msg since call silent seen="" marker id
+  local run_id wf origin msg since call silent silence seen="" marker id
   if ! archon_runs_known; then
     log "stalled-tool-calls: no archon run snapshot this tick — skipping"
     return 0
   fi
-  while IFS=$'\t' read -r run_id wf origin msg since call; do
+  # \037, not tab: see check_parked_runs.
+  while IFS=$'\037' read -r run_id wf origin msg since call; do
     [ -n "$run_id" ] || continue
     seen="$seen $run_id"
     [ -e "$marker_dir/alerted-$run_id" ] && continue
-    silent=$(( $(date +%s) - since ))
-    log "stalled-tool-calls: $wf $run_id — $call silent ${silent}s — alerting"
+    if [ "$since" -gt 0 ]; then
+      silent=$(( $(date +%s) - since ))
+      silence="no progress for $(( silent / 3600 ))h$(( silent % 3600 / 60 ))m"
+    else
+      silence="listed as stalled, with no readable lastProgressAt"
+    fi
+    log "stalled-tool-calls: $wf $run_id — $call: $silence — alerting"
     notify "Archon tool call stalled: ${origin##*/}" \
       "$wf — ${msg:-no user message}
-$call: no progress for $(( silent / 3600 ))h$(( silent % 3600 / 60 ))m
+$call: $silence
 run $run_id
 archon workflow status $run_id — check whether its process is wedged (e.g. a wait loop matching itself) before killing it" \
       high warning
     touch "$marker_dir/alerted-$run_id"
-  done < <(archon_stalled_tool_calls "$TOOL_CALL_STALL_MAX_SECONDS")
+  done < <(archon_stalled_tool_calls "$TOOL_CALL_STALL_MAX_SECONDS" | tr '\t' '\037')
   for marker in "$marker_dir"/alerted-*; do
     [ -e "$marker" ] || continue
     id="${marker##*/alerted-}"
