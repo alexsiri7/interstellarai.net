@@ -144,13 +144,17 @@ rebase_requested_for() {
 # failing_check_names <number> — the names of the PR's checks that concluded
 # failed, one per line, reduced to a safe character set: they go into an issue
 # body. Prints nothing when none failed; exit 1 when the checks cannot be read.
+# Every check counts, required or not: Phase 1 merges only CLEAN, so a bump
+# that is UNSTABLE on a non-required check sits as surely as a BLOCKED one.
+# Failed is the complement of pr_checks_green less the checks still running:
+# NEUTRAL and SKIPPED pass, as they do for a required check.
 failing_check_names() {
   local view
-  view=$(gh pr view "$1" --json statusCheckRollup 2>/dev/null) || return 1
+  view=$(gh pr view "$1" --json statusCheckRollup 2>>"$LOG_DIR/pr-maintenance-errors.log") || return 1
   printf '%s' "$view" | jq -r '
     .statusCheckRollup[]?
     | select((.conclusion // .state // "") | ascii_upcase
-             | IN("FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"))
+             | IN("FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"))
     | (.name // .context // "")' 2>/dev/null \
     | { tr -cd 'A-Za-z0-9 ._/():\n-' | grep -v '^ *$' | sort -u || true; }
 }
@@ -166,13 +170,17 @@ DEPENDABOT_BRANCH_RE='^dependabot/([a-z_]+)/(([A-Za-z0-9_][A-Za-z0-9._-]*/)*[A-Z
 # ecosystem and the version. The branch does not mark where the directory ends
 # and a slashed package name (actions/checkout, @playwright/test) begins, so
 # <dir> is the longest leading part of <path> that is a directory in the
-# checkout, "/" when none is.
+# checkout, "/" when none is. Dependabot writes a leading "." of a directory
+# as "dot-" (.github/tools → dot-github/tools).
 dependabot_branch_fields() {
   [[ "$1" =~ $DEPENDABOT_BRANCH_RE ]] || return 1
   local eco="${BASH_REMATCH[1]}" path="${BASH_REMATCH[2]}" version="${BASH_REMATCH[4]}"
   local dir="" pkg="$path" prefix="" seg rest="$path"
   while [[ "$rest" == */* ]]; do
     seg="${rest%%/*}"; rest="${rest#*/}"
+    if [[ "$seg" == dot-* ]] && [ -d "$REPO_DIR/${prefix:+$prefix/}.${seg#dot-}" ]; then
+      seg=".${seg#dot-}"
+    fi
     prefix="${prefix:+$prefix/}$seg"
     if [ -d "$REPO_DIR/$prefix" ]; then dir="$prefix"; pkg="$rest"; fi
   done
@@ -695,7 +703,10 @@ for PROJECT in "${PROJECTS[@]}"; do
     [ -n "$PR" ] || continue
     trust_is_dependabot "$AUTHOR" || continue
     pr_on_hold "$PR" "$HOLD" && continue
-    CHECKS=$(failing_check_names "$PR") || continue
+    if ! CHECKS=$(failing_check_names "$PR"); then
+      log "$PROJECT: dependabot PR #$PR — could not read its checks (see $LOG_DIR/pr-maintenance-errors.log), retrying next tick"
+      continue
+    fi
     if [ -z "$CHECKS" ]; then
       rm -f "$MAINTENANCE_STATE_DIR/${PROJECT}-${PR}.red-seen"
       continue
