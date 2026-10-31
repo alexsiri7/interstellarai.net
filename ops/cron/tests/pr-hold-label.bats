@@ -259,6 +259,19 @@ review_fired() { # review_fired <pr-number>
     [ ! -f "$HOME/.archon/state/pr-review/proj-300.pid" ]
 }
 
+@test "review: a CLEAN archon-ship PR pushed after a review correction is reviewed (#173)" {
+    mkdir -p "$HOME/.archon/state/pr-maintenance"
+    # 300 was corrected at an earlier head; 301's correction is still on its head.
+    echo "abcold" > "$HOME/.archon/state/pr-maintenance/proj-300.corrected"
+    echo "abc301" > "$HOME/.archon/state/pr-maintenance/proj-301.corrected"
+    export GH_PR_LIST="[$(pr 300 false CLEAN '[]' archon/task-archon-ship-block-1), $(pr 301 false CLEAN '[]' archon/task-archon-ship-2)]"
+    run "$CRON_DIR/pr-review-cron.sh"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"proj: PR #301 is a CLEAN archon-ship PR"* ]]
+    [[ "$output" == *"1 ship-merging, 1 fired"* ]]
+    review_fired 300
+}
+
 @test "review: archon-ship PRs not yet CLEAN, and CLEAN PRs on other heads, are still reviewed" {
     export GH_PR_LIST="[$(pr 300 false BLOCKED '[]' archon/task-archon-ship-1), $(pr 301 false CLEAN '[]')]"
     run "$CRON_DIR/pr-review-cron.sh"
