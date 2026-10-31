@@ -71,6 +71,10 @@
 #      no progress for TOOL_CALL_STALL_MAX_SECONDS (2h; the engine's
 #      metadata.tool_call_attention) → ntfy once per stall episode, nothing
 #      more (#243)
+#  13. Unreleased main (lib/releases.sh, release_lag_check): main commits not
+#      in the newest release-* tag for over 48h, on a project
+#      daily-release-cron.sh would release → ntfy once per episode and a
+#      marker pipeline-status shows in red (#248)
 #
 # Crontab (logs live under ~/.local/state/archon-cron/logs, which survives a
 # reboot; /tmp does not):
@@ -152,6 +156,8 @@ source "$SCRIPT_DIR/lib/ship-breaker.sh"
 source "$SCRIPT_DIR/lib/quota-pause.sh"
 # shellcheck source=lib/deadlines.sh
 source "$SCRIPT_DIR/lib/deadlines.sh"
+# shellcheck source=lib/releases.sh
+source "$SCRIPT_DIR/lib/releases.sh"
 BASE_DIR="${BASE_DIR:-/mnt/ext-fast}"
 STATE_DIR="$HOME/.archon/pipeline-health-state"
 # Where the crontab sends every script's stdout/stderr (see ops/cron/crontab).
@@ -3113,6 +3119,7 @@ for project in "${REPOS[@]}"; do
   check_shipped_prs "$project"
   check_published_prs "$project"
   sweep_stale_labels "$project"
+  release_lag_check "$project"
 done
 reconcile_zombies
 check_parked_runs

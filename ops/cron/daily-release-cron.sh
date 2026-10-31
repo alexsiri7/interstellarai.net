@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # daily-release-cron.sh — run daily at 08:00 from cron.
-# For each project, if origin/main has new commits since the last
-# release-* tag, create a date tag `release-YYYY-MM-DD` and a GitHub
-# release with auto-generated notes.
+# For each project in archon-projects.txt, if origin/main has new commits
+# since the last release-* tag, create a date tag `release-YYYY-MM-DD` and a
+# GitHub release with auto-generated notes. Skipped: projects listed in
+# DAILY_RELEASE_OPT_OUT, and projects whose own release*.yml workflow already
+# runs on push to main (lib/releases.sh).
 #
 # Crontab:
 #   0 8 * * * <repo>/ops/cron/daily-release-cron.sh >> ~/.local/state/archon-cron/logs/daily-release.log 2>&1
@@ -11,8 +13,14 @@ set -uo pipefail
 
 export PATH="$HOME/.bun/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
 
-PROJECTS=(reli word-coach-annie filmduel cosmic-match un-reminder kindred interstellarai.net)
-BASE_DIR="/mnt/ext-fast"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/archon-projects.sh
+source "$SCRIPT_DIR/lib/archon-projects.sh"
+# shellcheck source=lib/releases.sh
+source "$SCRIPT_DIR/lib/releases.sh"
+
+load_archon_projects PROJECTS
+BASE_DIR="${BASE_DIR:-/mnt/ext-fast}"
 OWNER="alexsiri7"
 LOG_PREFIX="[daily-release]"
 TODAY="$(date +%Y-%m-%d)"
@@ -69,6 +77,11 @@ release_one() {
   local repo_dir="$BASE_DIR/$project"
   local tag="release-$TODAY"
 
+  if release_opted_out "$project"; then
+    log "$project: opted out (DAILY_RELEASE_OPT_OUT), skipping"
+    return
+  fi
+
   if [ ! -d "$repo_dir/.git" ]; then
     log "$project: no repo at $repo_dir, skipping"
     return
@@ -93,9 +106,10 @@ release_one() {
     return
   fi
 
-  # Find previous release-* tag, if any.
+  # Find previous release-* tag, if any: newest by name, as release_lag_check
+  # picks it.
   local prev_tag
-  prev_tag=$(git tag -l 'release-*' --sort=-creatordate | head -n1)
+  prev_tag=$(git tag -l 'release-*' --sort=-refname | head -n1)
 
   local commit_count
   if [ -n "$prev_tag" ]; then
@@ -108,6 +122,13 @@ release_one() {
     log "$project: no new commits since ${prev_tag:-repo start}, skipping"
     return
   fi
+
+  local workflow rc=0
+  workflow=$(release_push_workflow "$project") || rc=$?
+  case "$rc" in
+    0) log "$project: $workflow already releases on push to main, skipping"; return ;;
+    2) log "$project: could not read release workflows, skipping"; return ;;
+  esac
 
   log "$project: releasing $tag ($commit_count commits since ${prev_tag:-repo start})"
 
