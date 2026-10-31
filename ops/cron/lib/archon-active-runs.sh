@@ -118,7 +118,10 @@ ARCHON_PARKED_MARKER_DIR="$HOME/.archon/pipeline-health-state/parked"
 # its lastProgressAt and "<nodeId>: <title, else name>". The engine lists a
 # call in metadata.tool_call_attention once it has gone toolCallAttentionMs
 # (30m by default) without progress and drops it on the next progress event;
-# with no such call, and for every paused row, $12 is 0 and $13 empty.
+# with no such call, and for every paused row, $12 is 0 and $13 empty. A listed
+# call whose lastProgressAt cannot be read (or a list that is not one) makes $12
+# -1 and $13 that call's label: the engine says something is stalled and this
+# cannot say for how long, which must not read as "nothing stalled".
 #
 # A listing failure, or a page holding fewer runs than its `total` (the listing
 # is capped at 100), leaves the snapshot short and sets ARCHON_RUNS_SNAPSHOT_OK=0
@@ -180,23 +183,27 @@ def classify(meta):
         return ("blocked_on_child", 0, 0, "", "")
     return ("gate", 0, 0, approval["nodeId"], approval["message"])
 
+def call_label(call):
+    if not isinstance(call, dict):
+        return "unreadable tool_call_attention entry"
+    label = (call.get("nodeId") or "") + ": " + (call.get("title") or call.get("name") or "")
+    return label[:200]
+
 def stalled_call(meta):
     """(since, label) of the tool call silent longest — see the header."""
     calls = meta.get("tool_call_attention")
-    if not isinstance(calls, list):
+    if calls is None or calls == []:
         return (0, "")
+    if not isinstance(calls, list):
+        return (-1, "unreadable tool_call_attention")
     oldest = None
     for call in calls:
-        if not isinstance(call, dict):
-            continue
-        since = epoch(call.get("lastProgressAt"))
-        if since and (oldest is None or since < oldest[0]):
+        since = epoch(call.get("lastProgressAt")) if isinstance(call, dict) else 0
+        if not since:
+            return (-1, call_label(call))
+        if oldest is None or since < oldest[0]:
             oldest = (since, call)
-    if oldest is None:
-        return (0, "")
-    since, call = oldest
-    label = (call.get("nodeId") or "") + ": " + (call.get("title") or call.get("name") or "")
-    return (since, label[:200])
+    return (oldest[0], call_label(oldest[1]))
 
 def field(value):
     return (value or "").replace("\t", " ").replace("\n", " ")
@@ -340,14 +347,17 @@ archon_parked_runs() {
 
 # archon_stalled_tool_calls <stale_seconds>
 # Print one TSV row per running run whose oldest stalled tool call ($12, $13)
-# has gone more than <stale_seconds> without progress:
+# has gone more than <stale_seconds> without progress, or whose stalled call
+# has no readable progress time ($12 -1, reported at once, as archon_parked_runs
+# does an unreadable pause):
 #   run_id <TAB> workflow_name <TAB> origin <TAB> user_message
-#   <TAB> stalled_since_epoch <TAB> call label
+#   <TAB> stalled_since_epoch (-1 when unreadable) <TAB> call label
+# Any field but the first may be empty.
 # Call after archon_runs_snapshot, and only when archon_runs_known.
 archon_stalled_tool_calls() {
   [ -s "$ARCHON_RUNS_SNAPSHOT" ] || return 0
   awk -F'\t' -v now="$(date +%s)" -v stale="$1" '
-    $12 > 0 && now - $12 > stale {
+    $12 < 0 || ($12 > 0 && now - $12 > stale) {
       print $5 "\t" $1 "\t" $3 "\t" $4 "\t" $12 "\t" $13 }
   ' "$ARCHON_RUNS_SNAPSHOT"
 }
