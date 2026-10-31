@@ -447,6 +447,16 @@ running_run() {
 run-odd\tarchon-ship-block\t/mnt/ext-fast/proj\tfix #242\t-1\tunreadable tool_call_attention')" ]
 }
 
+@test "a bare non-dict entry inside the tool_call_attention list is unreadable, not skipped" {
+    export STUB_PAYLOAD="{\"runs\": [$(running_run run-mixed "\"tool_call_attention\": [
+      $(stalled_entry deliver__review 'bats run' 600), \"not an entry\"]")]}"
+    export STUB_PAYLOAD_PAUSED='{"runs": []}'
+    archon_runs_snapshot
+
+    run archon_stalled_tool_calls 86400
+    [ "$output" = "$(printf 'run-mixed\tarchon-ship-block\t/mnt/ext-fast/proj\tfix #242\t-1\tunreadable tool_call_attention entry')" ]
+}
+
 @test "a paused run's stale tool_call_attention is never reported" {
     no_running
     export STUB_PAYLOAD_PAUSED="$(paused_run 500946af-aaaa "$(ci_wait 240 60),
