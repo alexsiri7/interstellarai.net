@@ -128,3 +128,16 @@ YML
     [[ "$output" == *"zoomies: no new commits since release-2026-01-01, skipping"* ]]
     ! grep -q "alexsiri7/zoomies/git/trees" "$GH_CALLS" || false
 }
+
+@test "the last release is the newest release-* tag by name, not the last one created" {
+    project zoomies
+    local work="$TEST_TMP/work/zoomies" origin="$TEST_TMP/origins/zoomies.git"
+    git -C "$work" commit -q --allow-empty -m "second"
+    GIT_COMMITTER_DATE="2026-02-01T08:00:00Z" git -C "$work" tag -a -m r release-2026-02-01
+    GIT_COMMITTER_DATE="2026-03-01T08:00:00Z" git -C "$work" tag -a -m r release-2026-01-01 HEAD~1
+    git -C "$work" push -q "$origin" main release-2026-02-01 release-2026-01-01
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    ! released zoomies || false
+    [[ "$output" == *"zoomies: no new commits since release-2026-02-01, skipping"* ]]
+}
