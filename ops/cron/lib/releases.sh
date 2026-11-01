@@ -79,13 +79,14 @@ release_opted_out() {
 
 # _release_trigger_shape — the workflow on stdin's release-relevant trigger
 # shape, one line on stdout: "push" (runs on a push to main: `on:` names push
-# with no branch filter, or branches lists main, * or **, or branches-ignore
-# leaves main out), "tag:<pattern>" (a push trigger with a tags pattern that
-# does not hit main), "dispatch" (a workflow_dispatch trigger, no main-hitting
-# or tags-pattern push), or "none" (neither).
+# with no branch filter, or branches has a glob matching main, or
+# branches-ignore has no glob matching main), "tag:<pattern>" (a push trigger
+# with a tags pattern that does not hit main), "dispatch" (a
+# workflow_dispatch trigger, no main-hitting or tags-pattern push), or "none"
+# (neither).
 _release_trigger_shape() {
   python3 -c '
-import re, sys
+import fnmatch, re, sys
 
 Q = chr(34) + chr(39)
 lines = [re.sub(r"\s+#.*$", "", l.rstrip()) for l in sys.stdin.read().splitlines()]
@@ -110,10 +111,10 @@ def children(start, base):
 
 def push_hits_main(filt):
     if "branches" in filt:
-        return any(p in ("main", "*", "**") for p in filt["branches"])
+        return any(fnmatch.fnmatch("main", p) for p in filt["branches"])
     if "branches-ignore" in filt:
-        return "main" not in filt["branches-ignore"]
-    return "tags" not in filt
+        return not any(fnmatch.fnmatch("main", p) for p in filt["branches-ignore"])
+    return "tags" not in filt and "tags-ignore" not in filt
 
 def split_top(s):
     parts, depth, cur = [], 0, ""

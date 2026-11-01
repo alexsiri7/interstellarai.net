@@ -211,6 +211,38 @@ YML
     [ "$status" -eq 1 ]
 }
 
+@test "a push with only a tags-ignore filter never hits main, so it does not run on push (#248 R1)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  push:
+    tags-ignore: ['nightly-*']
+YML
+    run release_push_workflow proj
+    [ "$status" -eq 1 ]
+}
+
+@test "branches-ignore: ['**'] excludes every branch, so a tags push trigger does not run on push to main (#248 R1)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  push:
+    branches-ignore: ['**']
+    tags: ['v*']
+YML
+    run release_classify proj
+    [ "$status" -eq 1 ]
+    [ "$output" = "tag .github/workflows/release.yml v*" ]
+}
+
+@test "a branches glob that matches main without being the literal main, * or ** still releases on push (#248 R1)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  push:
+    branches: ['ma*']
+YML
+    run release_push_workflow proj
+    [ "$status" -eq 0 ]
+}
+
 @test "a failed tree read is 2" {
     workflow proj .github/workflows/release.yml <<< 'on: push'
     TREE_FAIL=1 run release_push_workflow proj
@@ -415,6 +447,10 @@ YML
     local y m d
     IFS=. read -r y m d <<< "$(date -u +%Y.%-m.%-d)"
     [ "$(release_tag_for_pattern 'v*.*.*')" = "v$y.$m.$d" ]
+}
+
+@test "release_tag_for_pattern returns a literal, wildcard-free pattern unchanged (#248 R3)" {
+    [ "$(release_tag_for_pattern 'stable')" = "stable" ]
 }
 
 @test "release_tag_for_pattern fails, printing nothing, for glob syntax no git ref can satisfy (#248 / seam R3)" {
