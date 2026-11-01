@@ -739,6 +739,54 @@ YML
     [ "$(deadline_get "$(marker proj)" notified)" = $((T0 + 1800)) ]
 }
 
+# ── release_lag_check: unreadable release workflows (#248 R1) ────────────────
+
+@test "a read failure under 48h old does not ntfy, but one over 48h does, once per episode" {
+    TREE_FAIL=1 release_lag_check proj
+    [ "$(ntfys)" = 0 ]
+    [ "$(deadline_get "$(marker proj).unreadable" since)" = "$T0" ]
+
+    export RELEASE_NOW=$((T0 + 47 * 3600))
+    TREE_FAIL=1 release_lag_check proj
+    [ "$(ntfys)" = 0 ]
+
+    export RELEASE_NOW=$((T0 + 50 * 3600))
+    TREE_FAIL=1 release_lag_check proj
+    [ "$(ntfys)" = 1 ]
+    grep -q '^Release workflow unreadable: proj|proj: could not read its release workflow' "$T/notified"
+    [ "$(deadline_get "$(marker proj).unreadable" notified)" = "$((T0 + 50 * 3600))" ]
+
+    # Still unreadable next tick: no second ntfy for the same episode.
+    export RELEASE_NOW=$((T0 + 51 * 3600))
+    TREE_FAIL=1 release_lag_check proj
+    [ "$(ntfys)" = 1 ]
+}
+
+@test "a project that recovers after a long read-error episode clears the unreadable marker" {
+    TREE_FAIL=1 release_lag_check proj
+    export RELEASE_NOW=$((T0 + 50 * 3600))
+    TREE_FAIL=1 release_lag_check proj
+    [ "$(ntfys)" = 1 ]
+    [ -f "$(marker proj).unreadable" ]
+
+    no_workflows proj; : > "$T/gh/proj/tags"; echo 0 > "$T/gh/proj/old-commits"
+    release_lag_check proj
+    [ ! -e "$(marker proj).unreadable" ]
+    grep -q 'proj — release workflow read recovered' "$T/log"
+}
+
+@test "a transient read failure right after a real lag leaves the real marker alone and does not itself ntfy early" {
+    lagging proj 3 $((T0 - 50 * 3600)); no_workflows proj
+    release_lag_check proj
+    [ "$(ntfys)" = 1 ]
+    before=$(cat "$(marker proj)")
+
+    export RELEASE_NOW=$((T0 + 1800))
+    TREE_FAIL=1 release_lag_check proj
+    [ "$(cat "$(marker proj)")" = "$before" ]
+    [ "$(ntfys)" = 1 ]
+}
+
 # ── release_lag_note ─────────────────────────────────────────────────────────
 
 @test "release_lag_note prints the marker's line, and nothing without one" {

@@ -368,6 +368,34 @@ release_tag_for_pattern() {
   esac
 }
 
+# _release_unreadable_check <project> <now> — rc 2 (release_mode could not
+# read the project's release workflows) persisting for over
+# RELEASE_LAG_SECONDS gets one ntfy per episode, the same since/notified
+# bookkeeping release_lag_check itself uses, in its own marker file so a
+# transient read failure never clobbers a real, already-flagged lag (#248 R1).
+_release_unreadable_check() {
+  local project="$1" now="$2" f since notified
+  f="$RELEASE_LAG_STATE_DIR/$project.unreadable"
+  mkdir -p "$RELEASE_LAG_STATE_DIR" 2>/dev/null || return 0
+  since=$(deadline_get "$f" since); [[ "$since" =~ ^[0-9]+$ ]] || since="$now"
+  notified=$(deadline_get "$f" notified); [[ "$notified" =~ ^[0-9]+$ ]] || notified=0
+  if [ "$notified" = 0 ] && [ "$((now - since))" -ge "$RELEASE_LAG_SECONDS" ]; then
+    if notify_checked "Release workflow unreadable: $project" \
+         "$project: could not read its release workflow(s) on GitHub for over $((RELEASE_LAG_SECONDS / 3600))h (since $(date -u -d "@$since" '+%Y-%m-%dT%H:%M:%SZ')). daily-release-cron.sh cannot release it and release_lag_check cannot tell whether it is current. Check: the project's slug in archon-projects.txt, gh auth, and whether the repo was renamed or removed. https://github.com/$RELEASE_OWNER/$project" \
+         high warning; then
+      notified="$now"
+    fi
+  fi
+  _deadline_write "$f" "since=$since" "notified=$notified" 2>/dev/null || true
+}
+
+_release_unreadable_clear() { # <project>
+  local f="$RELEASE_LAG_STATE_DIR/$1.unreadable"
+  [ -f "$f" ] || return 0
+  rm -f "$f"
+  log "release-lag: $1 — release workflow read recovered"
+}
+
 # release_lag_check <project> — commits on main not yet covered by real
 # release evidence, the oldest of them committed over RELEASE_LAG_SECONDS ago,
 # on a project the cron would release. The evidence depends on release_classify:
@@ -378,6 +406,12 @@ release_tag_for_pattern() {
 #             push to main — that alone produces no release-* tag or dated
 #             release either): the newest release-* tag daily-release-cron.sh
 #             itself creates (a repo with no tag: any commit that old)
+# A persistent read failure (rc 2) does not return silently: a project whose
+# release workflow read starts failing (renamed repo, revoked token scope, a
+# typo'd slug) would otherwise both stop being released and stop being
+# flagged, indistinguishable from a healthy one (#248 R1). Tracked the same
+# way the lag itself is — since/notified in a marker, one ntfy per episode —
+# via _release_unreadable_check/_release_unreadable_clear below.
 # Needs log and notify_checked from the caller.
 release_lag_check() {
   local project="$1" now cutoff refs tag="" out ahead oldest f rc=0 mode path pattern
@@ -387,8 +421,11 @@ release_lag_check() {
 
   release_mode "$project" || rc=$?
   case "$rc" in
-    2) log "release-lag: $project — could not read release workflows, skipping"; return 0 ;;
+    2) log "release-lag: $project — could not read release workflows, skipping"
+       _release_unreadable_check "$project" "$now"
+       return 0 ;;
   esac
+  _release_unreadable_clear "$project"
 
   case "$mode" in
     push) mode=none ;;

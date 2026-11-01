@@ -280,6 +280,44 @@ YML
     ! grep -q "^workflow run" "$GH_CALLS" || false
 }
 
+@test "a tag-pattern release workflow with a real prior tag tags again once new commits land (#248 R2)" {
+    project punland
+    workflow punland .github/workflows/release.yml <<'YML'
+on:
+  push:
+    tags: ['v*']
+YML
+    git -C "$TEST_TMP/work/punland" tag v2026.1.1
+    git -C "$TEST_TMP/work/punland" push -q "$TEST_TMP/origins/punland.git" v2026.1.1
+    git -C "$TEST_TMP/work/punland" commit -q --allow-empty -m "second"
+    git -C "$TEST_TMP/work/punland" push -q "$TEST_TMP/origins/punland.git" main
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    new_tag="v$(date -u +%Y.%-m.%-d)"
+    [[ "$output" == *"punland: tagging $new_tag to match v* (1 commits since v2026.1.1)"* ]]
+    tagged punland "$new_tag"
+    # v2026.1.1 is untouched, and today's tag is a second, distinct tag — not
+    # a re-tag or the dated fallback.
+    [ "$(git -C "$TEST_TMP/origins/punland.git" tag -l 'v*' | wc -l)" -eq 2 ]
+    tagged punland v2026.1.1
+    ! released punland || false
+}
+
+@test "a dispatch-only release workflow dispatches again once new commits land after a real past successful run (#248 R3)" {
+    project punland
+    workflow punland .github/workflows/release.yml <<'YML'
+on:
+  workflow_dispatch:
+YML
+    dispatch_ran punland "$(date -u -d '-2 hours' '+%Y-%m-%dT%H:%M:%SZ')"
+    git -C "$TEST_TMP/work/punland" commit -q --allow-empty -m "second"
+    git -C "$TEST_TMP/work/punland" push -q "$TEST_TMP/origins/punland.git" main
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"punland: dispatching .github/workflows/release.yml ("*" commits since "* ]]
+    grep -q "^workflow run release.yml --repo alexsiri7/punland --ref main" "$GH_CALLS"
+}
+
 @test "the last release is the newest release-* tag by name, not the last one created" {
     project zoomies
     local work="$TEST_TMP/work/zoomies" origin="$TEST_TMP/origins/zoomies.git"
