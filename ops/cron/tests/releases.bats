@@ -422,6 +422,50 @@ YML
     [ "$output" = "dispatch .github/workflows/release.yml" ]
 }
 
+@test "release_classify reports tag for a top-level flow-mapping on: spanning multiple lines (#248 R1)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on: {
+  push: { tags: ["v*"] },
+  workflow_dispatch: {}
+}
+YML
+    run release_classify proj
+    [ "$status" -eq 1 ]
+    [ "$output" = "tag .github/workflows/release.yml v*" ]
+}
+
+@test "release_classify reports tag for a block on: with a flow-mapping push: spanning multiple lines (#248 R1)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  push: {
+    tags: ["v*"]
+  }
+  workflow_dispatch:
+YML
+    run release_classify proj
+    [ "$status" -eq 1 ]
+    [ "$output" = "tag .github/workflows/release.yml v*" ]
+}
+
+@test "release_classify reports tag for a flow-mapping on: with a bare-scalar tags value (#248 R3)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on: {push: {tags: v*}}
+YML
+    run release_classify proj
+    [ "$status" -eq 1 ]
+    [ "$output" = "tag .github/workflows/release.yml v*" ]
+}
+
+@test "release_classify reports tag for a block on: with a flow-mapping push: using a bare-scalar tags value (#248 R3)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  push: {tags: v*}
+YML
+    run release_classify proj
+    [ "$status" -eq 1 ]
+    [ "$output" = "tag .github/workflows/release.yml v*" ]
+}
+
 @test "release_classify reports push for a block-sequence on: (#248 / seam R1)" {
     workflow proj .github/workflows/release.yml <<'YML'
 on:
@@ -630,6 +674,10 @@ YML
     echo refs/tags/release-2026-01-01 > "$T/gh/proj/tags"
     compare_fixture 0 "$(iso $((T0 - 50 * 3600)))" > "$T/gh/proj/compare"
     echo 1 > "$T/gh/proj/old-commits"
+    # No matching v* tag exists and no successful run on main either (#248
+    # R2's fallback finds no evidence here, same as before that fallback
+    # existed).
+    last_run proj ""
     release_lag_check proj
     [ -f "$(marker proj)" ]
     grep -q 'not released since the repo started' "$T/notified"
@@ -687,6 +735,50 @@ YML
     printf 'refs/tags/release-2026-01-01\nrefs/tags/v3.0\n' > "$T/gh/proj/tags"
     echo 1 > "$T/gh/proj/old-commits"
     compare_fixture 0 "" > "$T/gh/proj/compare"
+    release_lag_check proj
+    [ ! -e "$(marker proj)" ]
+    [ "$(ntfys)" = 0 ]
+}
+
+@test "a tag-mode release workflow with no matching tag but a fresh successful run on main does not flag (#248 R2)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+YML
+    : > "$T/gh/proj/tags"
+    last_run proj "$(iso $((T0 - 1 * 3600)))"
+    release_lag_check proj
+    [ ! -e "$(marker proj)" ]
+    [ "$(ntfys)" = 0 ]
+}
+
+@test "a tag-mode release workflow with no matching tag falls back to commits since its newest run (#248 R2)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+YML
+    : > "$T/gh/proj/tags"
+    last_run proj "$(iso $((T0 - 100 * 3600)))"
+    since_commits proj 2 "$(iso $((T0 - 50 * 3600)))"
+    release_lag_check proj
+    [ -f "$(marker proj)" ]
+    grep -q "since $(iso $((T0 - 100 * 3600)))" "$T/notified"
+}
+
+@test "a tag-mode release workflow's runs read failing, with no matching tag, leaves no marker (#248 R2)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+YML
+    : > "$T/gh/proj/tags"
+    # last_run is never called, so $T/gh/proj/runs is absent and the gh stub
+    # fails this read the same way it fails any other missing fixture.
     release_lag_check proj
     [ ! -e "$(marker proj)" ]
     [ "$(ntfys)" = 0 ]

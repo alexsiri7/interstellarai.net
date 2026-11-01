@@ -135,6 +135,24 @@ def split_top(s):
         parts.append(cur)
     return parts
 
+def consume_flow(first, rest):
+    def delta(s):
+        d = 0
+        for ch in s:
+            if ch in "{[":
+                d += 1
+            elif ch in "}]":
+                d -= 1
+        return d
+    buf, depth, consumed = first, delta(first), 0
+    for nxt in rest:
+        if depth <= 0:
+            break
+        buf += " " + nxt.strip()
+        depth += delta(nxt)
+        consumed += 1
+    return buf, consumed
+
 def decide(push_filt, has_dispatch):
     if push_filt is not None and push_hits_main(push_filt):
         return "push"
@@ -152,7 +170,8 @@ for i, l in enumerate(lines):
     val = m.group(2)
     if val:
         if val.startswith("{"):
-            inner = val.strip()
+            joined, _ = consume_flow(val.strip(), lines[i + 1:])
+            inner = joined.strip()
             inner = inner[1:-1] if inner.endswith("}") else inner[1:]
             push_filt, has_dispatch = None, False
             for part in split_top(inner):
@@ -187,7 +206,10 @@ for i, l in enumerate(lines):
     kid = ind(body[0])
     push_filt = None
     has_dispatch = False
+    skip_until = -1
     for j, b in enumerate(body):
+        if j <= skip_until:
+            continue
         if ind(b) != kid:
             continue
         s = b.strip()
@@ -202,11 +224,13 @@ for i, l in enumerate(lines):
             continue
         v, filt = v.strip(), {}
         if v.startswith("{"):
+            joined, consumed = consume_flow(v, body[j + 1:])
+            skip_until = j + consumed
             for k in PUSH_FILTER_KEYS:
-                mm = re.search(r"(^|[{,\s])" + k + r"\s*:\s*(\[[^\]]*\]|[^,}]+)", v)
+                mm = re.search(r"(^|[{,\s])" + k + r"\s*:\s*(\[[^\]]*\]|[^,}]+)", joined)
                 if mm:
                     filt[k] = items(mm.group(2))
-                    v = v.replace(mm.group(0), mm.group(1))
+                    joined = joined.replace(mm.group(0), mm.group(1))
         else:
             sub, cur = [], None
             for r in body[j + 1:]:
@@ -410,7 +434,11 @@ _release_unreadable_clear() { # <project>
 # release_lag_check <project> — commits on main not yet covered by real
 # release evidence, the oldest of them committed over RELEASE_LAG_SECONDS ago,
 # on a project the cron would release. The evidence depends on release_classify:
-#   tag       newest tag matching the workflow's own push:tags pattern
+#   tag       newest tag matching the workflow's own push:tags pattern, or —
+#             when no such tag exists yet (the project is released by hand or
+#             dispatch rather than by the cron's own tag push) — the same
+#             workflow's newest successful run on main, the same evidence
+#             dispatch mode uses (#248 R2)
 #   dispatch  the workflow's newest successful run
 #   none      no usable trigger at all (no release*.yml, one with neither a
 #             tag-pattern nor a dispatch trigger, or one that only runs on
@@ -460,6 +488,19 @@ release_lag_check() {
               # the same way git's own "git tag -l" matches it (#248 / seam R4)
               case "$t" in $pattern) printf '%s\n' "$t" ;; esac
             done | release_latest_tag_by_name)
+      if [ -z "$tag" ]; then
+        # No tag matching the pattern exists yet — the project may still be
+        # released by hand or workflow_dispatch rather than by the cron's own
+        # tag push. Fall back to the same run evidence dispatch mode uses
+        # instead of treating this as unreleased since the repo started
+        # (#248 R2).
+        if ! tag=$(gh api "repos/$RELEASE_OWNER/$project/actions/workflows/${path##*/}/runs?branch=main&status=success" \
+              --jq '.workflow_runs[0].created_at // ""' 2>/dev/null); then
+          log "release-lag: $project — could not read $path's runs, skipping"
+          return 0
+        fi
+        [ -n "$tag" ] && mode=dispatch
+      fi
       ;;
     dispatch)
       if ! tag=$(gh api "repos/$RELEASE_OWNER/$project/actions/workflows/${path##*/}/runs?event=workflow_dispatch" \
