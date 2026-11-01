@@ -25,15 +25,20 @@ setup() {
 
     log() { echo "$*" >> "$T/log"; }
     notify_checked() { printf '%s|%s\n' "$1" "$2" >> "$T/notified"; return "${NOTIFY_RC:-0}"; }
-    # A missing fixture file is a failed read.
+    : > "$T/gh-calls"
+    # A missing fixture file is a failed read. Fixtures are keyed by project
+    # only (not owner), so the owner segment is parsed out but otherwise
+    # ignored here — RELEASE_OWNER's own test asserts it from the raw call
+    # log instead (#248 R3).
     gh() {
         local url="" filter="" a p prev=""
+        printf '%s\n' "$*" >> "$T/gh-calls"
         for a in "$@"; do
             case "$a" in repos/*) url="$a" ;; esac
             [ "$prev" = --jq ] && filter="$a"
             prev="$a"
         done
-        p="${url#repos/alexsiri7/}"; p="${p%%/*}"
+        p="${url#repos/*/}"; p="${p%%/*}"
         case "$url" in
             */git/trees/main*) [ -z "${TREE_FAIL:-}" ] && [ -f "$T/gh/$p/tree" ] || return 1
                                jq -R '{type: "blob", path: .}' "$T/gh/$p/tree" | jq -s '{tree: .}' \
@@ -274,6 +279,14 @@ YML
     run release_push_workflow proj
     [ "$status" -eq 0 ]
     [ "$output" = .github/workflows/release.yml ]
+}
+
+@test "RELEASE_OWNER overrides the hardcoded alexsiri7 owner in gh calls (#248 R3)" {
+    no_workflows proj
+    RELEASE_OWNER=someorg run release_classify proj
+    [ "$status" -eq 3 ]
+    grep -q 'repos/someorg/proj/git/trees/main' "$T/gh-calls"
+    ! grep -q 'repos/alexsiri7/proj' "$T/gh-calls" || false
 }
 
 # ── release_classify ─────────────────────────────────────────────────────────
@@ -523,12 +536,17 @@ YML
     [ "$(ntfys)" = 1 ]
 }
 
-@test "a project with a push-to-main release workflow does not flag" {
+@test "a project with a push-to-main release workflow is tracked by the cron's own fallback tag, same as mode none, and still flags (#248 R1)" {
     lagging proj 3 $((T0 - 50 * 3600))
     workflow proj .github/workflows/release.yml <<< 'on: [push, workflow_dispatch]'
     release_lag_check proj
+    [ -f "$(marker proj)" ]
+    grep -q 'since release-2026-01-01' "$T/notified"
+
+    compare_fixture 0 "" > "$T/gh/proj/compare"
+    release_lag_check proj
     [ ! -e "$(marker proj)" ]
-    [ "$(ntfys)" = 0 ]
+    grep -q 'proj — released again' "$T/log"
 }
 
 @test "a release.yml with neither a tag nor a dispatch trigger (mode none) is tracked by the cron's own fallback tag, same as a project with no release.yml, and clears once released" {

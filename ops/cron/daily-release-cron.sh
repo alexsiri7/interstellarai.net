@@ -2,16 +2,16 @@
 # daily-release-cron.sh — run daily at 08:00 from cron.
 # For each project in archon-projects.txt, releases it the way its own
 # release*.yml (lib/releases.sh, release_classify) wants (#248):
-#   - a release*.yml that already runs on push to main: skipped, it releases
-#     itself.
 #   - one with a push:tags pattern: tag origin/main to match it (e.g. "v*" ->
 #     "v2026.11.1"), if there are new commits since the newest tag already
 #     matching that pattern.
 #   - one that is workflow_dispatch-only: dispatch it with its defaults, if
 #     there are new commits since its newest successful run.
-#   - neither (including no release*.yml at all): keep the original
-#     release-YYYY-MM-DD GitHub release with auto-generated notes, if there
-#     are new commits since the newest release-* tag.
+#   - neither (including no release*.yml at all, or one that only runs on
+#     push to main — that alone produces no release-* tag or dated release):
+#     keep the original release-YYYY-MM-DD GitHub release with
+#     auto-generated notes, if there are new commits since the newest
+#     release-* tag.
 # Also skipped: projects listed in DAILY_RELEASE_OPT_OUT.
 #
 # Crontab:
@@ -242,7 +242,9 @@ release_one() {
   local rc=0 mode path pattern
   release_mode "$project" || rc=$?
   case "$rc" in
-    0) log "$project: $path already releases on push to main, skipping"; return ;;
+    0) log "$project: $path runs on push to main, but that alone produces no release-* tag or dated release — falling back"
+       release_one_fallback "$project" "$head_sha" "$tag"
+       return ;;
     2) log "$project: could not read release workflows, skipping"; return ;;
   esac
 

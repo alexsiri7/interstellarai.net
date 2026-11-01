@@ -1,8 +1,10 @@
 #!/usr/bin/env bats
 # Tests for ops/cron/daily-release-cron.sh: it releases every project in
-# archon-projects.txt, except one opted out, one whose own release workflow
-# runs on push to main, one whose workflows cannot be read, and one with
-# nothing new since its last release-* tag.
+# archon-projects.txt, except one opted out, one whose workflows cannot be
+# read, and one with nothing new since its last release-* tag. A project
+# whose own release workflow runs on push to main is still released through
+# the dated fallback, since the push trigger alone produces neither a
+# release-* tag nor a GitHub release (#248 R1).
 #
 # Runs the real script under a throwaway HOME, against local clones whose
 # origin is a local bare repo. Stubs live in $HOME/.local/bin, which the script
@@ -128,7 +130,7 @@ YML
     [[ "$output" == *"zoomies: opted out (DAILY_RELEASE_OPT_OUT), skipping"* ]]
 }
 
-@test "a project whose release workflow runs on push to main is not released" {
+@test "a project whose release workflow runs on push to main still gets the dated fallback release (#248 R1)" {
     project reli; project un-reminder
     workflow un-reminder .github/workflows/release.yml <<'YML'
 on:
@@ -139,8 +141,11 @@ YML
     run "$SCRIPT"
     [ "$status" -eq 0 ]
     released reli
-    ! released un-reminder || false
-    [[ "$output" == *"un-reminder: .github/workflows/release.yml already releases on push to main, skipping"* ]]
+    # A bare push to main only runs un-reminder's own workflow, never the
+    # tag-triggered release job, so the cron's dated fallback is still the
+    # only thing that produces a release-* tag or GitHub release here.
+    released un-reminder
+    [[ "$output" == *"un-reminder: .github/workflows/release.yml runs on push to main, but that alone produces no release-* tag or dated release — falling back"* ]]
 }
 
 @test "a project whose workflows cannot be read is not released" {

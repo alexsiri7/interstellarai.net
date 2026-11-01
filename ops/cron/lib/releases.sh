@@ -30,17 +30,17 @@
 #   release_lag_note <project>       # pipeline-status: "" or the repo's line
 #
 # A repo's release workflow is a file on main named
-# .github/workflows/release*.yml|yaml. One that runs on a push to main means
-# the repo releases itself, so the cron leaves it alone. Otherwise
-# daily-release-cron.sh reads the same file's trigger shape (#248): a
-# `push: tags` pattern means create a tag matching it; a `workflow_dispatch`
-# trigger means dispatch the workflow with its defaults; neither means fall
-# back to its own dated release-* tag — the same fallback tag used when there
-# is no release*.yml at all. Below, a project with a tag-pattern or dispatch
-# release*.yml is tracked by real release evidence (the newest tag matching
-# its pattern, or its newest successful dispatch run) instead of that tag;
-# one with neither, or no release*.yml at all, is tracked by that fallback
-# release-* tag.
+# .github/workflows/release*.yml|yaml. daily-release-cron.sh reads its
+# trigger shape (#248): a `push: tags` pattern means create a tag matching
+# it; a `workflow_dispatch` trigger means dispatch the workflow with its
+# defaults; neither — including a workflow that only runs on a bare push to
+# main, which produces no release-* tag or GitHub release on its own — means
+# fall back to its own dated release-* tag, the same fallback tag used when
+# there is no release*.yml at all. Below, a project with a tag-pattern or
+# dispatch release*.yml is tracked by real release evidence (the newest tag
+# matching its pattern, or its newest successful dispatch run) instead of
+# that tag; one with neither, or no release*.yml at all, is tracked by that
+# fallback release-* tag.
 #
 # One marker per lagging project in RELEASE_LAG_STATE_DIR/<project>, key=value
 # lines (since, tag, ahead, oldest, notified), cleared once main is released
@@ -270,9 +270,9 @@ release_classify() {
 }
 
 release_push_workflow() {
-  local project="$1" line rc=0
-  line=$(release_classify "$project") || rc=$?
-  [ "$rc" = 0 ] && echo "${line#push }"
+  local project="$1" mode path pattern rc=0
+  release_mode "$project" || rc=$?
+  [ "$mode" = push ] && echo "$path"
   return "$rc"
 }
 
@@ -349,10 +349,11 @@ release_tag_for_pattern() {
 # on a project the cron would release. The evidence depends on release_classify:
 #   tag       newest tag matching the workflow's own push:tags pattern
 #   dispatch  the workflow's newest successful run
-#   none      no usable trigger at all (no release*.yml, or one with neither
-#             a tag-pattern nor a dispatch trigger): the newest release-* tag
-#             daily-release-cron.sh itself creates (a repo with no tag: any
-#             commit that old)
+#   none      no usable trigger at all (no release*.yml, one with neither a
+#             tag-pattern nor a dispatch trigger, or one that only runs on
+#             push to main — that alone produces no release-* tag or dated
+#             release either): the newest release-* tag daily-release-cron.sh
+#             itself creates (a repo with no tag: any commit that old)
 # Needs log and notify_checked from the caller.
 release_lag_check() {
   local project="$1" now cutoff refs tag="" out ahead oldest f rc=0 mode path pattern
@@ -362,8 +363,11 @@ release_lag_check() {
 
   release_mode "$project" || rc=$?
   case "$rc" in
-    0) _release_lag_clear "$project" "$path releases on push to main"; return 0 ;;
     2) log "release-lag: $project — could not read release workflows, skipping"; return 0 ;;
+  esac
+
+  case "$mode" in
+    push) mode=none ;;
   esac
 
   case "$mode" in
