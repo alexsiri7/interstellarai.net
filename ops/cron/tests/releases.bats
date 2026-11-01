@@ -133,13 +133,26 @@ since_commits() {
 
 # ── release_classify: push detection ─────────────────────────────────────────
 
-@test "an un-reminder-shaped release.yml (push to main + tags) releases on push" {
+@test "a push trigger combining branches: [main] with a tags pattern classifies as tag, not push (#248 R1)" {
     workflow proj .github/workflows/release.yml <<'YML'
 name: Release
 on:
   push:
     branches: [main]
     tags: ['v*']
+jobs: {}
+YML
+    run release_classify proj
+    [ "$status" -eq 1 ]
+    [ "$output" = "tag .github/workflows/release.yml v*" ]
+}
+
+@test "a bare push-to-main release.yml with no tags pattern still releases on push" {
+    workflow proj .github/workflows/release.yml <<'YML'
+name: Release
+on:
+  push:
+    branches: [main]
 jobs: {}
 YML
     run release_classify proj
@@ -191,8 +204,8 @@ YML
 jobs: {}
 YML
     run release_classify proj
-    [ "$status" -eq 0 ]
-    [ "$output" = "push .github/workflows/release.yml" ]
+    [ "$status" -eq 1 ]
+    [ "$output" = "tag .github/workflows/release.yml v*" ]
 }
 
 @test "a push limited to develop does not run on push" {
@@ -360,6 +373,22 @@ YML
     run release_classify proj
     [ "$status" -eq 0 ]
     [ "$output" = "push .github/workflows/release.yml" ]
+}
+
+@test "release_classify prefers a tag-pattern file over an earlier, separate push-to-main-only file (#248 R1)" {
+    workflow proj .github/workflows/release-notes.yml <<'YML'
+on:
+  push:
+    branches: [main]
+YML
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  push:
+    tags: ['v*']
+YML
+    run release_classify proj
+    [ "$status" -eq 1 ]
+    [ "$output" = "tag .github/workflows/release.yml v*" ]
 }
 
 @test "release_classify prefers a tag-pattern file over an earlier, separate dispatch-only file" {
@@ -936,6 +965,71 @@ YML
     TREE_FAIL=1 release_lag_check proj
     [ "$(cat "$(marker proj)")" = "$before" ]
     [ "$(ntfys)" = 1 ]
+}
+
+# ── release_lag_check: unreadable lag evidence (#248 R2) ─────────────────────
+# Distinct from the unreadable-release-workflow marker above: release_mode
+# classifies the workflow fine (rc 0/1), but a later gh read release_lag_check
+# itself makes — the runs lookup here — keeps failing.
+
+@test "a persistent lag-evidence read failure under 48h does not ntfy, but one over 48h does, once per episode (#248 R2)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  workflow_dispatch:
+YML
+    # last_run is never called, so $T/gh/proj/runs is absent and every tick's
+    # runs read fails the same way the dispatch-only "no marker" test does.
+    release_lag_check proj
+    [ "$(ntfys)" = 0 ]
+    [ "$(deadline_get "$(marker proj).evidence-unreadable" since)" = "$T0" ]
+
+    export RELEASE_NOW=$((T0 + 47 * 3600))
+    release_lag_check proj
+    [ "$(ntfys)" = 0 ]
+
+    export RELEASE_NOW=$((T0 + 50 * 3600))
+    release_lag_check proj
+    [ "$(ntfys)" = 1 ]
+    grep -q '^Release lag evidence unreadable: proj|proj: could not read the GitHub evidence' "$T/notified"
+    [ "$(deadline_get "$(marker proj).evidence-unreadable" notified)" = "$((T0 + 50 * 3600))" ]
+
+    # Still unreadable next tick: no second ntfy for the same episode.
+    export RELEASE_NOW=$((T0 + 51 * 3600))
+    release_lag_check proj
+    [ "$(ntfys)" = 1 ]
+}
+
+@test "an opted-out project with persistently unreadable lag evidence never ntfys, even past 48h (#248 R2)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  workflow_dispatch:
+YML
+    DAILY_RELEASE_OPT_OUT=proj release_lag_check proj
+    [ "$(ntfys)" = 0 ]
+    [ ! -e "$(marker proj).evidence-unreadable" ]
+
+    export RELEASE_NOW=$((T0 + 50 * 3600))
+    DAILY_RELEASE_OPT_OUT=proj release_lag_check proj
+    [ "$(ntfys)" = 0 ]
+    [ ! -e "$(marker proj).evidence-unreadable" ]
+}
+
+@test "a project that recovers after a long lag-evidence read-error episode clears the evidence-unreadable marker (#248 R2)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  workflow_dispatch:
+YML
+    release_lag_check proj
+    export RELEASE_NOW=$((T0 + 50 * 3600))
+    release_lag_check proj
+    [ "$(ntfys)" = 1 ]
+    [ -f "$(marker proj).evidence-unreadable" ]
+
+    last_run proj "$(iso $((T0 + 50 * 3600)))"
+    since_commits proj 0 ""
+    release_lag_check proj
+    [ ! -e "$(marker proj).evidence-unreadable" ]
+    grep -q 'proj — lag evidence read recovered' "$T/log"
 }
 
 # ── release_lag_note ─────────────────────────────────────────────────────────

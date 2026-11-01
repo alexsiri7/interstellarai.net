@@ -130,7 +130,7 @@ YML
     [[ "$output" == *"zoomies: opted out (DAILY_RELEASE_OPT_OUT), skipping"* ]]
 }
 
-@test "a project whose release workflow runs on push to main still gets the dated fallback release (#248 R1)" {
+@test "a push trigger combining branches: [main] with a tags pattern is tagged, not given the dated fallback (#248 R1)" {
     project reli; project un-reminder
     workflow un-reminder .github/workflows/release.yml <<'YML'
 on:
@@ -141,7 +141,25 @@ YML
     run "$SCRIPT"
     [ "$status" -eq 0 ]
     released reli
-    # A bare push to main only runs un-reminder's own workflow, never the
+    # The tags pattern wins over the main-branch push filter in the same
+    # block, so un-reminder is tag-released like any other tag-mode project —
+    # not shunted to the dated fallback (#248 R1).
+    [[ "$output" == *"un-reminder: tagging v$(date -u +%Y.%-m.%-d) to match v*"* ]]
+    tagged un-reminder 'v*'
+    ! released un-reminder || false
+}
+
+@test "a bare push-to-main release workflow with no tags pattern still gets the dated fallback release" {
+    project reli; project un-reminder
+    workflow un-reminder .github/workflows/release.yml <<'YML'
+on:
+  push:
+    branches: [main]
+YML
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    released reli
+    # A bare push to main only runs un-reminder's own workflow, never a
     # tag-triggered release job, so the cron's dated fallback is still the
     # only thing that produces a release-* tag or GitHub release here.
     released un-reminder
@@ -189,7 +207,7 @@ YML
     run "$SCRIPT"
     [ "$status" -eq 0 ]
     ! released punland || false
-    grep -q "^workflow run release.yml --repo alexsiri7/punland --ref main" "$GH_CALLS"
+    grep -qx "workflow run release.yml --repo alexsiri7/punland --ref main" "$GH_CALLS"
 }
 
 @test "a tag-pattern release workflow with nothing new since its last matching tag is not tagged again" {
@@ -315,7 +333,7 @@ YML
     run "$SCRIPT"
     [ "$status" -eq 0 ]
     [[ "$output" == *"punland: dispatching .github/workflows/release.yml ("*" commits since "* ]]
-    grep -q "^workflow run release.yml --repo alexsiri7/punland --ref main" "$GH_CALLS"
+    grep -qx "workflow run release.yml --repo alexsiri7/punland --ref main" "$GH_CALLS"
 }
 
 @test "the last release is the newest release-* tag by name, not the last one created" {

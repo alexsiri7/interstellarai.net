@@ -154,10 +154,10 @@ def consume_flow(first, rest):
     return buf, consumed
 
 def decide(push_filt, has_dispatch):
-    if push_filt is not None and push_hits_main(push_filt):
-        return "push"
     if push_filt is not None and push_filt.get("tags"):
         return "tag:" + push_filt["tags"][0]
+    if push_filt is not None and push_hits_main(push_filt):
+        return "push"
     if has_dispatch:
         return "dispatch"
     return "none"
@@ -255,13 +255,16 @@ sys.exit(0)
 }
 
 # release_classify <project> — scans every release*.yml|yaml on main and
-# reports the best trigger shape found. On stdout: "push <path>" (rc 0) for
-# the first file that runs on push to main; else, for the first file
-# offering one, "tag <path> <pattern>" (rc 1, a push:tags pattern —
-# preferred, per #248) or "dispatch <path>" (rc 1, a workflow_dispatch
-# trigger and no tag-pattern file); else "none <path>" (rc 1, release*.yml
-# exists but no file's trigger is usable). rc 2: a read failed. rc 3: no
-# release*.yml at all.
+# reports the best trigger shape found, ranked tag > push > dispatch > none
+# (#248 R1: a file's push-to-main trigger no longer stops the scan, so a tag
+# pattern in another file still wins — even one combining a main-branch push
+# filter with a tags filter in the same block). On stdout: "tag <path>
+# <pattern>" (rc 1, a push:tags pattern — preferred, per #248), else
+# "push <path>" (rc 0, a push-to-main trigger and no tag-pattern file —
+# produces no release-* tag or dated release on its own), else "dispatch
+# <path>" (rc 1, a workflow_dispatch trigger and no tag or push-to-main
+# file), else "none <path>" (rc 1, release*.yml exists but no file's trigger
+# is usable). rc 2: a read failed. rc 3: no release*.yml at all.
 release_classify() {
   local project="$1" paths path content shape pattern first_path=""
   local best_mode="none" best_path="" best_pattern=""
@@ -277,11 +280,16 @@ release_classify() {
     [ -n "$content" ] || return 2
     shape=$(printf '%s\n' "$content" | _release_trigger_shape) || return 2
     case "$shape" in
-      push) echo "push $path"; return 0 ;;
       tag:*)
         if [ "$best_mode" != tag ]; then
           best_mode=tag; best_path="$path"; best_pattern="${shape#tag:}"
         fi
+        ;;
+      push)
+        case "$best_mode" in
+          tag | push) ;;
+          *) best_mode=push; best_path="$path" ;;
+        esac
         ;;
       dispatch)
         [ "$best_mode" = none ] && { best_mode=dispatch; best_path="$path"; }
@@ -289,11 +297,11 @@ release_classify() {
     esac
   done <<< "$paths"
   case "$best_mode" in
-    tag) echo "tag $best_path $best_pattern" ;;
-    dispatch) echo "dispatch $best_path" ;;
-    *) echo "none $first_path" ;;
+    tag) echo "tag $best_path $best_pattern"; return 1 ;;
+    dispatch) echo "dispatch $best_path"; return 1 ;;
+    push) echo "push $best_path"; return 0 ;;
+    *) echo "none $first_path"; return 1 ;;
   esac
-  return 1
 }
 
 # release_mode <project> — the shared decode of release_classify's rc/stdout
@@ -431,6 +439,37 @@ _release_unreadable_clear() { # <project>
   log "release-lag: $1 — release workflow read recovered"
 }
 
+# _release_lag_evidence_unreadable_check <project> <now> — the same
+# since/notified, one-ntfy-per-episode tracking as _release_unreadable_check
+# above, but for a persistent failure to read release_lag_check's own lag
+# evidence (a tag listing, a workflow's runs, or a commit comparison/count)
+# once the release workflow itself was read fine — as opposed to rc 2, which
+# is a failure to even classify the release workflow. A separate marker, so
+# the two failure classes track independently and neither's episode clobbers
+# the other's (#248 R2).
+_release_lag_evidence_unreadable_check() {
+  local project="$1" now="$2" f since notified
+  f="$RELEASE_LAG_STATE_DIR/$project.evidence-unreadable"
+  mkdir -p "$RELEASE_LAG_STATE_DIR" 2>/dev/null || return 0
+  since=$(deadline_get "$f" since); [[ "$since" =~ ^[0-9]+$ ]] || since="$now"
+  notified=$(deadline_get "$f" notified); [[ "$notified" =~ ^[0-9]+$ ]] || notified=0
+  if [ "$notified" = 0 ] && [ "$((now - since))" -ge "$RELEASE_LAG_SECONDS" ]; then
+    if notify_checked "Release lag evidence unreadable: $project" \
+         "$project: could not read the GitHub evidence release_lag_check needs (a tag listing, a workflow's runs, or a commit comparison/count) for over $((RELEASE_LAG_SECONDS / 3600))h (since $(date -u -d "@$since" '+%Y-%m-%dT%H:%M:%SZ')). release_lag_check cannot tell whether $project is current. Check: gh auth and GitHub's API status. https://github.com/$RELEASE_OWNER/$project" \
+         high warning; then
+      notified="$now"
+    fi
+  fi
+  _deadline_write "$f" "since=$since" "notified=$notified" 2>/dev/null || true
+}
+
+_release_lag_evidence_unreadable_clear() { # <project>
+  local f="$RELEASE_LAG_STATE_DIR/$1.evidence-unreadable"
+  [ -f "$f" ] || return 0
+  rm -f "$f"
+  log "release-lag: $1 — lag evidence read recovered"
+}
+
 # release_lag_check <project> — commits on main not yet covered by real
 # release evidence, the oldest of them committed over RELEASE_LAG_SECONDS ago,
 # on a project the cron would release. The evidence depends on release_classify:
@@ -445,12 +484,15 @@ _release_unreadable_clear() { # <project>
 #             push to main — that alone produces no release-* tag or dated
 #             release either): the newest release-* tag daily-release-cron.sh
 #             itself creates (a repo with no tag: any commit that old)
-# A persistent read failure (rc 2) does not return silently: a project whose
-# release workflow read starts failing (renamed repo, revoked token scope, a
-# typo'd slug) would otherwise both stop being released and stop being
-# flagged, indistinguishable from a healthy one (#248 R1). Tracked the same
-# way the lag itself is — since/notified in a marker, one ntfy per episode —
-# via _release_unreadable_check/_release_unreadable_clear below.
+# A persistent read failure — rc 2 (release_mode couldn't classify the
+# workflow) or any later failure reading this function's own lag evidence —
+# does not return silently: a project whose reads start failing (renamed
+# repo, revoked token scope, a typo'd slug, a GitHub API outage) would
+# otherwise both stop being released and stop being flagged, indistinguishable
+# from a healthy one (#248 R1, R2). Tracked the same way the lag itself is —
+# since/notified in a marker, one ntfy per episode — via
+# _release_unreadable_check/_release_unreadable_clear for rc 2, and
+# _release_lag_evidence_unreadable_check/_clear for every later read.
 # Needs log and notify_checked from the caller.
 release_lag_check() {
   local project="$1" now cutoff refs tag="" out ahead oldest f rc=0 mode path pattern
@@ -461,6 +503,7 @@ release_lag_check() {
   if release_opted_out "$project"; then
     _release_lag_clear "$project" "opted out of the daily release"
     _release_unreadable_clear "$project"
+    _release_lag_evidence_unreadable_clear "$project"
     return 0
   fi
 
@@ -481,6 +524,7 @@ release_lag_check() {
       if ! refs=$(gh api --paginate "repos/$RELEASE_OWNER/$project/git/matching-refs/tags/$(_release_glob_prefix "$pattern")" \
             --jq '.[].ref' 2>/dev/null); then
         log "release-lag: $project — could not list $pattern tags, skipping"
+        _release_lag_evidence_unreadable_check "$project" "$now"
         return 0
       fi
       tag=$(printf '%s\n' "$refs" | sed -n 's#^refs/tags/##p' | while IFS= read -r t; do
@@ -497,6 +541,7 @@ release_lag_check() {
         if ! tag=$(gh api "repos/$RELEASE_OWNER/$project/actions/workflows/${path##*/}/runs?branch=main&status=success" \
               --jq '.workflow_runs[0].created_at // ""' 2>/dev/null); then
           log "release-lag: $project — could not read $path's runs, skipping"
+          _release_lag_evidence_unreadable_check "$project" "$now"
           return 0
         fi
         [ -n "$tag" ] && mode=dispatch
@@ -506,6 +551,7 @@ release_lag_check() {
       if ! tag=$(gh api "repos/$RELEASE_OWNER/$project/actions/workflows/${path##*/}/runs?event=workflow_dispatch" \
             --jq '[.workflow_runs[] | select(.status=="completed" and .conclusion=="success")][0].created_at // ""' 2>/dev/null); then
         log "release-lag: $project — could not read $path's runs, skipping"
+        _release_lag_evidence_unreadable_check "$project" "$now"
         return 0
       fi
       ;;
@@ -513,6 +559,7 @@ release_lag_check() {
       if ! refs=$(gh api --paginate "repos/$RELEASE_OWNER/$project/git/matching-refs/tags/release-" \
             --jq '.[].ref' 2>/dev/null); then
         log "release-lag: $project — could not list release tags, skipping"
+        _release_lag_evidence_unreadable_check "$project" "$now"
         return 0
       fi
       tag=$(printf '%s\n' "$refs" | sed -n 's#^refs/tags/##p' | release_latest_tag_by_name)
@@ -534,6 +581,7 @@ release_lag_check() {
     ahead="${out%% *}"; oldest="${out#* }"
     if ! [[ "$ahead" =~ ^[0-9]+$ ]]; then
       log "release-lag: $project — could not compare $tag with main, skipping"
+      _release_lag_evidence_unreadable_check "$project" "$now"
       return 0
     fi
     if [ "$ahead" -eq 0 ] || [[ -z "$oldest" || "$oldest" > "$cutoff" ]]; then
@@ -544,11 +592,14 @@ release_lag_check() {
       --jq 'length' 2>/dev/null) || out=""
     if ! [[ "$out" =~ ^[0-9]+$ ]]; then
       log "release-lag: $project — could not list main commits, skipping"
+      _release_lag_evidence_unreadable_check "$project" "$now"
       return 0
     fi
     ahead=all; oldest="before $cutoff"
     [ "$out" -eq 0 ] && ahead=0
   fi
+
+  _release_lag_evidence_unreadable_clear "$project"
 
   if [ "$ahead" = 0 ]; then
     _release_lag_clear "$project" "released again"
