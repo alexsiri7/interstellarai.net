@@ -1320,3 +1320,8 @@ load_trust() {
     check_cron_heartbeats
     [ "$(cat "$STATE_DIR/watched")" = "$(printf 'issue-pickup 15\npr-maintenance 15')" ]
 }
+
+@test "the per-project tick loop still calls release_lag_check (#248 R5: dropping it silently ends the only production trigger for the unreleased-main flag)" {
+    loop=$(awk '/pipeline health check/{p=1} p{print} p && /^done$/{exit}' "$SCRIPT_FILE")
+    [[ "$loop" == *'release_lag_check "$project"'* ]]
+}

@@ -72,9 +72,10 @@
 #      metadata.tool_call_attention) → ntfy once per stall episode, nothing
 #      more (#243)
 #  13. Unreleased main (lib/releases.sh, release_lag_check): main commits not
-#      in the newest release-* tag for over 48h, on a project
-#      daily-release-cron.sh would release → ntfy once per episode and a
-#      marker pipeline-status shows in red (#248)
+#      covered by the project's own release evidence (a matching tag, a
+#      successful dispatch run, or the newest release-* tag) for over 48h, on
+#      a project daily-release-cron.sh would release → ntfy once per episode
+#      and a marker pipeline-status shows in red (#248)
 #
 # Crontab (logs live under ~/.local/state/archon-cron/logs, which survives a
 # reboot; /tmp does not):

@@ -15,17 +15,31 @@
 #                                    # to main; 1: it has release*.yml, but
 #                                    # none runs on push; 2: read failed;
 #                                    # 3: no release*.yml at all
+#   release_classify <project>       # release_push_workflow, plus how a
+#                                    # non-push release*.yml wants releasing:
+#                                    # rc 1 echoes "tag <path> <pattern>" (its
+#                                    # push trigger has a tags pattern),
+#                                    # "dispatch <path>" (a workflow_dispatch
+#                                    # trigger instead), or "none <path>"
+#                                    # (neither, e.g. a pull_request-only
+#                                    # workflow)
+#   release_latest_tag_by_name        # <tag...> on stdin -> the newest by name
+#   release_tag_for_pattern <pattern> # a new tag matching <pattern> for today
 #   release_lag_check <project>      # pipeline-health: ntfy once per episode
 #   release_lag_note <project>       # pipeline-status: "" or the repo's line
 #
 # A repo's release workflow is a file on main named
 # .github/workflows/release*.yml|yaml. One that runs on a push to main means
-# the repo releases itself, so the cron leaves it alone. A trigger shape the
-# parser does not read counts as "not on push," so daily-release-cron.sh
-# falls back to its own dated release-* tag — but that tag is a changelog
-# marker, not evidence the project's own release channel ran, so a project
-# with its own release*.yml (rc 1) is still tracked by commit age, not by
-# that tag, below.
+# the repo releases itself, so the cron leaves it alone. Otherwise
+# daily-release-cron.sh reads the same file's trigger shape (#248): a
+# `push: tags` pattern means create a tag matching it; a `workflow_dispatch`
+# trigger means dispatch the workflow with its defaults; neither means fall
+# back to its own dated release-* tag. That fallback tag is a changelog
+# marker, not evidence the project's own release channel ran, so below, a
+# project with a tag-pattern or dispatch release*.yml is tracked by real
+# release evidence (the newest tag matching its pattern, or its newest
+# successful dispatch run) instead of that tag; one with neither is still
+# tracked by commit age, same as a project with no release*.yml at all.
 #
 # One marker per lagging project in RELEASE_LAG_STATE_DIR/<project>, key=value
 # lines (since, tag, ahead, oldest, notified), cleared once main is released
@@ -52,10 +66,13 @@ release_opted_out() {
   return 1
 }
 
-# _release_on_push_main — exit 0 when the workflow on stdin runs on a push to
-# main: `on:` names push with no branch filter (a tags-only push does not
-# count), or branches lists main, * or **, or branches-ignore leaves main out.
-_release_on_push_main() {
+# _release_trigger_shape — the workflow on stdin's release-relevant trigger
+# shape, one line on stdout: "push" (runs on a push to main: `on:` names push
+# with no branch filter, or branches lists main, * or **, or branches-ignore
+# leaves main out), "tag:<pattern>" (a push trigger with a tags pattern that
+# does not hit main), "dispatch" (a workflow_dispatch trigger, no main-hitting
+# or tags-pattern push), or "none" (neither).
+_release_trigger_shape() {
   python3 -c '
 import re, sys
 
@@ -94,16 +111,25 @@ for i, l in enumerate(lines):
         continue
     val = m.group(2)
     if val:
-        sys.exit(0 if not val.startswith("{") and "push" in items(val) else 1)
+        hit = not val.startswith("{") and "push" in items(val)
+        print("push" if hit else "none")
+        sys.exit(0)
     body = children(i + 1, 0)
     if not body:
-        sys.exit(1)
+        print("none")
+        sys.exit(0)
     kid = ind(body[0])
+    push_filt = None
+    has_dispatch = False
     for j, b in enumerate(body):
         if ind(b) != kid:
             continue
         key, _, v = b.strip().partition(":")
-        if key.strip(Q) != "push":
+        key = key.strip(Q)
+        if key == "workflow_dispatch":
+            has_dispatch = True
+            continue
+        if key != "push":
             continue
         v, filt = v.strip(), {}
         if v.startswith("{"):
@@ -127,62 +153,169 @@ for i, l in enumerate(lines):
                     k, _, cv = s.partition(":")
                     cur = k.strip(Q)
                     filt[cur] = items(cv) if cv.strip() else []
-        sys.exit(0 if push_hits_main(filt) else 1)
-    sys.exit(1)
-sys.exit(1)
+        push_filt = filt
+    if push_filt is not None and push_hits_main(push_filt):
+        print("push")
+    elif push_filt is not None and push_filt.get("tags"):
+        print("tag:" + push_filt["tags"][0])
+    elif has_dispatch:
+        print("dispatch")
+    else:
+        print("none")
+    sys.exit(0)
+print("none")
+sys.exit(0)
 '
 }
 
-release_push_workflow() {
-  local project="$1" paths path content
+# release_classify <project> — scans every release*.yml|yaml on main (same
+# file set as release_push_workflow) and reports the best trigger shape
+# found. On stdout: "push <path>" (rc 0) for the first file that runs on push
+# to main; else, for the first file offering one, "tag <path> <pattern>" (rc
+# 1, a push:tags pattern — preferred, per #248) or "dispatch <path>" (rc 1,
+# a workflow_dispatch trigger and no tag-pattern file); else "none <path>"
+# (rc 1, release*.yml exists but no file's trigger is usable). rc 2: a read
+# failed. rc 3: no release*.yml at all.
+release_classify() {
+  local project="$1" paths path content shape pattern first_path=""
+  local best_mode="none" best_path="" best_pattern=""
   paths=$(gh api "repos/$RELEASE_OWNER/$project/git/trees/main?recursive=1" \
     --jq '.tree[] | select(.type == "blob") | .path | select(test("^\\.github/workflows/release[^/]*\\.ya?ml$"; "i"))' \
     2>/dev/null) || return 2
   [ -z "$paths" ] && return 3
   while IFS= read -r path; do
     [ -n "$path" ] || continue
+    [ -z "$first_path" ] && first_path="$path"
     content=$(gh api "repos/$RELEASE_OWNER/$project/contents/$path?ref=main" --jq '.content' 2>/dev/null \
       | base64 -d 2>/dev/null) || return 2
     [ -n "$content" ] || return 2
-    if printf '%s\n' "$content" | _release_on_push_main; then
-      echo "$path"
-      return 0
-    fi
+    shape=$(printf '%s\n' "$content" | _release_trigger_shape) || return 2
+    case "$shape" in
+      push) echo "push $path"; return 0 ;;
+      tag:*)
+        if [ "$best_mode" != tag ]; then
+          best_mode=tag; best_path="$path"; best_pattern="${shape#tag:}"
+        fi
+        ;;
+      dispatch)
+        [ "$best_mode" = none ] && { best_mode=dispatch; best_path="$path"; }
+        ;;
+    esac
   done <<< "$paths"
+  case "$best_mode" in
+    tag) echo "tag $best_path $best_pattern" ;;
+    dispatch) echo "dispatch $best_path" ;;
+    *) echo "none $first_path" ;;
+  esac
   return 1
 }
 
-# release_lag_check <project> — commits on main not in the newest release-*
-# tag by name (the one daily-release-cron.sh counts from), the oldest of them committed over RELEASE_LAG_SECONDS ago (a repo with
-# no tag: any commit that old), on a project the cron would release. A
-# project with its own release*.yml (any trigger shape) ignores release-*
-# tags entirely here, even one this cron just created as a changelog
-# fallback: that tag is not evidence the project's real release channel ran.
+release_push_workflow() {
+  local project="$1" line rc=0
+  line=$(release_classify "$project") || rc=$?
+  [ "$rc" = 0 ] && echo "${line#push }"
+  return "$rc"
+}
+
+# release_latest_tag_by_name <tag...> on stdin, one per line — the newest by
+# name (lexicographic, matching `git tag -l --sort=-refname`). The one shared
+# rule daily-release-cron.sh and release_lag_check both need to agree on which
+# tag is "the last release" (#248 / seam R4).
+release_latest_tag_by_name() {
+  LC_ALL=C sort | tail -n1
+}
+
+# _release_glob_regex <pattern> — <pattern> (e.g. "v*") as an anchored ERE,
+# for filtering a tag list client-side (the matching-refs prefix search below
+# is a prefix match, not a full glob).
+_release_glob_regex() {
+  python3 -c '
+import re, sys
+print("".join(".*" if c == "*" else re.escape(c) for c in sys.argv[1]))
+' "$1"
+}
+
+# _release_glob_prefix <pattern> — the literal text before <pattern>'s first
+# "*", for the matching-refs prefix search (e.g. "v*" -> "v").
+_release_glob_prefix() {
+  local p="$1"
+  printf '%s' "${p%%\**}"
+}
+
+# release_tag_for_pattern <pattern> — a new tag matching <pattern> for today
+# (e.g. "v*" -> "v2026.11.1"): the text around <pattern>'s first "*" with
+# today's date (no leading zeros) spliced in. A pattern with no "*" is used
+# as-is (daily-release-cron.sh then skips it once it exists, like any other
+# already-released tag).
+release_tag_for_pattern() {
+  local pattern="$1" prefix suffix
+  case "$pattern" in
+    *'*'*) prefix="${pattern%%\**}"; suffix="${pattern#*\*}" ;;
+    *) printf '%s' "$pattern"; return ;;
+  esac
+  printf '%s%s%s' "$prefix" "$(date -u +%Y.%-m.%-d)" "$suffix"
+}
+
+# release_lag_check <project> — commits on main not yet covered by real
+# release evidence, the oldest of them committed over RELEASE_LAG_SECONDS ago,
+# on a project the cron would release. The evidence depends on release_classify:
+#   tag       newest tag matching the workflow's own push:tags pattern
+#   dispatch  the workflow's newest successful run
+#   none      no release*.yml at all: the newest release-* tag daily-release-
+#             cron.sh itself creates (a repo with no tag: any commit that old)
+# A release*.yml with neither a tag-pattern nor a dispatch trigger (mode none,
+# rc 1) ignores release-* tags: that tag is a changelog fallback, not evidence
+# the project's real release channel ran, and it has no other channel either.
 # Needs log and notify_checked from the caller.
 release_lag_check() {
-  local project="$1" now cutoff refs tag="" out ahead oldest f rc=0 wf
+  local project="$1" now cutoff refs tag="" out ahead oldest f rc=0 line mode path pattern
   now=$(release_now)
   cutoff=$(date -u -d "@$((now - RELEASE_LAG_SECONDS))" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null) || return 0
   f="$RELEASE_LAG_STATE_DIR/$project"
 
-  wf=$(release_push_workflow "$project") || rc=$?
+  line=$(release_classify "$project") || rc=$?
   case "$rc" in
-    0) _release_lag_clear "$project" "$wf releases on push to main"; return 0 ;;
+    0) _release_lag_clear "$project" "${line#push } releases on push to main"; return 0 ;;
     2) log "release-lag: $project — could not read release workflows, skipping"; return 0 ;;
   esac
+  mode=none; path=""; pattern=""
+  [ "$rc" = 1 ] && read -r mode path pattern <<< "$line"
 
-  if [ "$rc" = 1 ]; then
-    tag=""
-  elif ! refs=$(gh api --paginate "repos/$RELEASE_OWNER/$project/git/matching-refs/tags/release-" \
-        --jq '.[].ref' 2>/dev/null); then
-    log "release-lag: $project — could not list release tags, skipping"
-    return 0
-  else
-    tag=$(printf '%s\n' "$refs" | sed -n 's#^refs/tags/##p' | LC_ALL=C sort | tail -n1)
-  fi
+  case "$mode" in
+    tag)
+      if ! refs=$(gh api --paginate "repos/$RELEASE_OWNER/$project/git/matching-refs/tags/$(_release_glob_prefix "$pattern")" \
+            --jq '.[].ref' 2>/dev/null); then
+        log "release-lag: $project — could not list $pattern tags, skipping"
+        return 0
+      fi
+      tag=$(printf '%s\n' "$refs" | sed -n 's#^refs/tags/##p' | grep -xE "$(_release_glob_regex "$pattern")" | release_latest_tag_by_name)
+      ;;
+    dispatch)
+      if ! tag=$(gh api "repos/$RELEASE_OWNER/$project/actions/workflows/${path##*/}/runs?event=workflow_dispatch" \
+            --jq '[.workflow_runs[] | select(.status=="completed" and .conclusion=="success")][0].created_at // ""' 2>/dev/null); then
+        log "release-lag: $project — could not read $path's runs, skipping"
+        return 0
+      fi
+      ;;
+    none)
+      if [ "$rc" = 3 ]; then
+        if ! refs=$(gh api --paginate "repos/$RELEASE_OWNER/$project/git/matching-refs/tags/release-" \
+              --jq '.[].ref' 2>/dev/null); then
+          log "release-lag: $project — could not list release tags, skipping"
+          return 0
+        fi
+        tag=$(printf '%s\n' "$refs" | sed -n 's#^refs/tags/##p' | release_latest_tag_by_name)
+      fi
+      ;;
+  esac
   if [ -n "$tag" ]; then
-    out=$(gh api "repos/$RELEASE_OWNER/$project/compare/$tag...main" \
-      --jq '"\(.ahead_by) \([.commits[].commit.committer.date] | min // "")"' 2>/dev/null) || out=""
+    if [ "$mode" = dispatch ]; then
+      out=$(gh api "repos/$RELEASE_OWNER/$project/commits?sha=main&since=$tag" \
+        --jq '[.[].commit.committer.date] as $d | "\($d|length) \($d|min // "")"' 2>/dev/null) || out=""
+    else
+      out=$(gh api "repos/$RELEASE_OWNER/$project/compare/$tag...main" \
+        --jq '"\(.ahead_by) \([.commits[].commit.committer.date] | min // "")"' 2>/dev/null) || out=""
+    fi
     ahead="${out%% *}"; oldest="${out#* }"
     if ! [[ "$ahead" =~ ^[0-9]+$ ]]; then
       log "release-lag: $project — could not compare $tag with main, skipping"

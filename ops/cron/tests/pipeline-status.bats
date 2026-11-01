@@ -93,3 +93,38 @@ teardown() {
     run issue_pickup_status
     [ "$output" = "no next_issue read recorded" ]
 }
+
+@test "the real script shows and clears the unreleased row and footer (#248 R6)" {
+    local cron_dir="$BATS_TEST_DIRNAME/.."
+    local pipeline_status="$cron_dir/../bin/pipeline-status"
+
+    export HOME="$TEST_TMP/home"
+    mkdir -p "$HOME/.local/bin"
+    cat > "$HOME/.local/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  "api rate_limit"*) echo '{"resources":{"graphql":{"limit":5000,"remaining":4000,"reset":0},"core":{"limit":5000}}}' ;;
+  *) exit 1 ;;
+esac
+EOF
+    chmod +x "$HOME/.local/bin/gh"
+
+    export RELEASE_LAG_STATE_DIR="$TEST_TMP/unreleased" DEADLINE_STATE_DIR="$TEST_TMP/deadlines"
+    export STALL_STATE_DIR="$TEST_TMP/stalled" LACHESIS_STATE_DIR="$TEST_TMP/lachesis"
+    export SWEEP_STATUS_FILE="$TEST_TMP/no-sweep"
+
+    mkdir -p "$RELEASE_LAG_STATE_DIR"
+    printf 'since=1700000000\ntag=release-2026-01-01\nahead=3\noldest=2026-01-01T00:00:00Z\nnotified=1700000000\n' \
+        > "$RELEASE_LAG_STATE_DIR/test-project"
+
+    run "$pipeline_status" test-project
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"UNRELEASED: 3 commit(s) since release-2026-01-01"* ]]
+    [[ "$output" == *"At least one repo has main commits unreleased for 48h"* ]]
+
+    rm -f "$RELEASE_LAG_STATE_DIR/test-project"
+    run "$pipeline_status" test-project
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"UNRELEASED:"* ]]
+    [[ "$output" != *"unreleased for 48h"* ]]
+}

@@ -40,7 +40,9 @@ setup() {
                           base64 "$T/gh/$p/files/$a" 2>/dev/null ;;
             */matching-refs/*) cat "$T/gh/$p/tags" 2>/dev/null ;;
             */compare/*) cat "$T/gh/$p/compare" 2>/dev/null ;;
+            */commits*since=*) cat "$T/gh/$p/since-commits" 2>/dev/null ;;
             */commits*) cat "$T/gh/$p/old-commits" 2>/dev/null ;;
+            */actions/workflows/*/runs*) cat "$T/gh/$p/runs" 2>/dev/null ;;
             *) return 1 ;;
         esac
     }
@@ -71,6 +73,11 @@ lagging() {
 }
 marker() { echo "$RELEASE_LAG_STATE_DIR/$1"; }
 ntfys() { grep -c '' "$T/notified" || true; }
+# last_run <project> <iso-or-empty> — the newest successful dispatch run.
+last_run() { mkdir -p "$T/gh/$1"; printf '%s' "$2" > "$T/gh/$1/runs"; }
+# since_commits <project> <count> <oldest-iso-or-empty> — commits on main
+# since a dispatch run.
+since_commits() { mkdir -p "$T/gh/$1"; echo "$2 $3" > "$T/gh/$1/since-commits"; }
 
 # ── release_push_workflow ────────────────────────────────────────────────────
 
@@ -172,6 +179,70 @@ YML
     [ "$status" -eq 3 ]
 }
 
+@test "release_push_workflow scans every release*.yml file, not just the first" {
+    workflow proj .github/workflows/release-notes.yml <<'YML'
+on:
+  pull_request:
+YML
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  push:
+    branches: [main]
+YML
+    run release_push_workflow proj
+    [ "$status" -eq 0 ]
+    [ "$output" = .github/workflows/release.yml ]
+}
+
+# ── release_classify ─────────────────────────────────────────────────────────
+
+@test "release_classify prefers a push:tags pattern over workflow_dispatch" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+YML
+    run release_classify proj
+    [ "$status" -eq 1 ]
+    [ "$output" = "tag .github/workflows/release.yml v*" ]
+}
+
+@test "release_classify reports workflow_dispatch when there is no tags pattern" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  workflow_dispatch:
+YML
+    run release_classify proj
+    [ "$status" -eq 1 ]
+    [ "$output" = "dispatch .github/workflows/release.yml" ]
+}
+
+@test "release_classify reports none for a release*.yml with neither shape" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  pull_request:
+YML
+    run release_classify proj
+    [ "$status" -eq 1 ]
+    [ "$output" = "none .github/workflows/release.yml" ]
+}
+
+@test "release_classify finds a push file over an earlier dispatch-only one" {
+    workflow proj .github/workflows/release-notes.yml <<'YML'
+on:
+  workflow_dispatch:
+YML
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  push:
+    branches: [main]
+YML
+    run release_classify proj
+    [ "$status" -eq 0 ]
+    [ "$output" = "push .github/workflows/release.yml" ]
+}
+
 # ── release_opted_out ────────────────────────────────────────────────────────
 
 @test "release_opted_out matches a listed slug only" {
@@ -265,6 +336,73 @@ YML
     release_lag_check proj
     [ -f "$(marker proj)" ]
     grep -q 'not released since the repo started' "$T/notified"
+}
+
+@test "a tag-pattern release workflow clears against its own matching tag, not the cron's fallback" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  push:
+    tags: ['v*']
+YML
+    printf 'refs/tags/release-2026-01-01\nrefs/tags/v2026-10-31\n' > "$T/gh/proj/tags"
+    echo "0 " > "$T/gh/proj/compare"
+    release_lag_check proj
+    [ ! -e "$(marker proj)" ]
+    [ "$(ntfys)" = 0 ]
+}
+
+@test "a tag-pattern release workflow flags using its own matching tag's lag" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  push:
+    tags: ['v*']
+YML
+    printf 'refs/tags/release-2026-01-01\nrefs/tags/v2026-09-01\n' > "$T/gh/proj/tags"
+    echo "4 $(iso $((T0 - 50 * 3600)))" > "$T/gh/proj/compare"
+    release_lag_check proj
+    [ -f "$(marker proj)" ]
+    grep -q 'since v2026-09-01' "$T/notified"
+}
+
+@test "a dispatch-only release workflow clears when its newest successful run is fresh" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  workflow_dispatch:
+YML
+    last_run proj "$(iso $((T0 - 1 * 3600)))"
+    since_commits proj 0 ""
+    release_lag_check proj
+    [ ! -e "$(marker proj)" ]
+    [ "$(ntfys)" = 0 ]
+}
+
+@test "a dispatch-only release workflow's lag clears once a run supersedes the fallback commit-age flag" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  workflow_dispatch:
+YML
+    last_run proj ""
+    echo 1 > "$T/gh/proj/old-commits"
+    release_lag_check proj
+    [ -f "$(marker proj)" ]
+    grep -q 'not released since the repo started' "$T/notified"
+
+    last_run proj "$(iso $((T0 - 1 * 3600)))"
+    since_commits proj 0 ""
+    release_lag_check proj
+    [ ! -e "$(marker proj)" ]
+}
+
+@test "a dispatch-only release workflow flags using commits since its newest run" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  workflow_dispatch:
+YML
+    last_run proj "$(iso $((T0 - 100 * 3600)))"
+    since_commits proj 2 "$(iso $((T0 - 50 * 3600)))"
+    release_lag_check proj
+    [ -f "$(marker proj)" ]
+    grep -q "since $(iso $((T0 - 100 * 3600)))" "$T/notified"
 }
 
 @test "a failed read leaves an existing marker untouched" {

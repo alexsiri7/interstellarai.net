@@ -19,7 +19,7 @@ setup() {
     export HOME="$TEST_TMP/home"
     export BASE_DIR="$TEST_TMP/base"
     export ARCHON_PROJECTS_FILE="$TEST_TMP/projects.txt"
-    export GH_CALLS="$TEST_TMP/gh-calls" WORKFLOWS="$TEST_TMP/workflows"
+    export GH_CALLS="$TEST_TMP/gh-calls" WORKFLOWS="$TEST_TMP/workflows" DISPATCH_RUNS="$TEST_TMP/dispatch-runs"
     export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.com GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.com
     unset DAILY_RELEASE_OPT_OUT _ARCHON_RELEASES_SH _ARCHON_DEADLINES_SH
     mkdir -p "$HOME/.local/bin" "$BASE_DIR" "$WORKFLOWS"
@@ -34,6 +34,8 @@ p="${url#repos/alexsiri7/}"; p="${p%%/*}"
 case "$1 $url" in
   "api "*/git/trees/main*) cat "$WORKFLOWS/$p/tree" 2>/dev/null ;;
   "api "*/contents/*) f="${url#*/contents/}"; base64 "$WORKFLOWS/$p/files/${f%%\?*}" 2>/dev/null ;;
+  "api "*/actions/workflows/*/runs*) cat "$DISPATCH_RUNS/$p" 2>/dev/null; true ;;
+  "workflow "*) exit 0 ;;
   "release "*) exit 0 ;;
   *) exit 1 ;;
 esac
@@ -67,6 +69,10 @@ workflow() {
 }
 
 released() { grep -q "^release create release-$TODAY --repo alexsiri7/$1 " "$GH_CALLS"; }
+# tagged <slug> <glob> — origin carries a tag matching <glob> (e.g. 'v*').
+tagged() { git -C "$TEST_TMP/origins/$1.git" tag -l "$2" | grep -q .; }
+# dispatch_ran <slug> <iso> — the slug's release workflow last succeeded then.
+dispatch_ran() { mkdir -p "$DISPATCH_RUNS"; printf '%s' "$2" > "$DISPATCH_RUNS/$1"; }
 
 @test "every project in archon-projects.txt is released, including ones the old list lacked" {
     project reli; project zoomies; project catscape-watchface
@@ -80,7 +86,10 @@ YML
     [ "$status" -eq 0 ]
     released reli
     released zoomies
-    released catscape-watchface
+    # catscape-watchface's own release.yml wants a tag matching 'v*', not
+    # today's generic release-YYYY-MM-DD (#248).
+    ! released catscape-watchface || false
+    tagged catscape-watchface 'v*'
 }
 
 @test "a project in DAILY_RELEASE_OPT_OUT is not released" {
@@ -126,7 +135,46 @@ YML
     released reli
     ! released zoomies || false
     [[ "$output" == *"zoomies: no new commits since release-2026-01-01, skipping"* ]]
-    ! grep -q "alexsiri7/zoomies/git/trees" "$GH_CALLS" || false
+}
+
+@test "a dispatch-only release workflow is dispatched, not released as a GitHub release" {
+    project punland
+    workflow punland .github/workflows/release.yml <<'YML'
+on:
+  workflow_dispatch:
+YML
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    ! released punland || false
+    grep -q "^workflow run release.yml --repo alexsiri7/punland --ref main" "$GH_CALLS"
+}
+
+@test "a tag-pattern release workflow with nothing new since its last matching tag is not tagged again" {
+    project punland
+    workflow punland .github/workflows/release.yml <<'YML'
+on:
+  push:
+    tags: ['v*']
+YML
+    git -C "$TEST_TMP/work/punland" tag v2026.1.1
+    git -C "$TEST_TMP/work/punland" push -q "$TEST_TMP/origins/punland.git" v2026.1.1
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"punland: no new commits since v2026.1.1 (v*), skipping"* ]]
+    [ "$(git -C "$TEST_TMP/origins/punland.git" tag -l 'v*' | wc -l)" -eq 1 ]
+}
+
+@test "a dispatch-only release workflow with nothing new since its last successful run is not dispatched again" {
+    project punland
+    workflow punland .github/workflows/release.yml <<'YML'
+on:
+  workflow_dispatch:
+YML
+    dispatch_ran punland "$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%M:%SZ')"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"punland: no new commits since "*"(.github/workflows/release.yml), skipping"* ]]
+    ! grep -q "^workflow run" "$GH_CALLS" || false
 }
 
 @test "the last release is the newest release-* tag by name, not the last one created" {
