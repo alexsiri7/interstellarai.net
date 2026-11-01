@@ -43,7 +43,11 @@
 # One marker per lagging project in RELEASE_LAG_STATE_DIR/<project>, key=value
 # lines (since, tag, ahead, oldest, notified), cleared once main is released
 # again or the project stops being the cron's to release. A read that fails
-# changes nothing.
+# changes nothing immediately, except that a project whose release workflow
+# stays unreadable for over RELEASE_LAG_SECONDS gets one "Release workflow
+# unreadable" ntfy per episode and a marker in
+# RELEASE_LAG_STATE_DIR/<project>.unreadable, cleared on the first good read
+# or on opt-out.
 
 [ -n "${_ARCHON_RELEASES_SH:-}" ] && return 0
 _ARCHON_RELEASES_SH=1

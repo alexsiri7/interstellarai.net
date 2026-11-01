@@ -461,6 +461,16 @@ YML
     run ! release_opted_out zoomies
 }
 
+@test "DAILY_RELEASE_OPT_OUT_FILE overrides an already-exported DAILY_RELEASE_OPT_OUT, not the other way round (#248 R2)" {
+    echo 'DAILY_RELEASE_OPT_OUT=kith' > "$T/opt-out.env"
+    unset _ARCHON_RELEASES_SH
+    export DAILY_RELEASE_OPT_OUT=zoomies
+    export DAILY_RELEASE_OPT_OUT_FILE="$T/opt-out.env"
+    source "$CRON_DIR/lib/releases.sh"
+    release_opted_out kith
+    run ! release_opted_out zoomies
+}
+
 # ── release_latest_tag_by_name ───────────────────────────────────────────────
 
 @test "release_latest_tag_by_name picks the double-digit day over the single-digit one" {
