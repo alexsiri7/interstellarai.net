@@ -115,6 +115,31 @@ def push_hits_main(filt):
         return "main" not in filt["branches-ignore"]
     return "tags" not in filt
 
+def split_top(s):
+    parts, depth, cur = [], 0, ""
+    for ch in s:
+        if ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    if cur.strip():
+        parts.append(cur)
+    return parts
+
+def decide(push_filt, has_dispatch):
+    if push_filt is not None and push_hits_main(push_filt):
+        return "push"
+    if push_filt is not None and push_filt.get("tags"):
+        return "tag:" + push_filt["tags"][0]
+    if has_dispatch:
+        return "dispatch"
+    return "none"
+
 on_re = re.compile(r"^(on|[\x22\x27]on[\x22\x27]|true)\s*:\s*(.*)$")
 for i, l in enumerate(lines):
     m = on_re.match(l) if ind(l) == 0 else None
@@ -123,7 +148,25 @@ for i, l in enumerate(lines):
     val = m.group(2)
     if val:
         if val.startswith("{"):
-            print("none")
+            inner = val.strip()
+            inner = inner[1:-1] if inner.endswith("}") else inner[1:]
+            push_filt, has_dispatch = None, False
+            for part in split_top(inner):
+                key, _, v = part.strip().partition(":")
+                key = key.strip(Q)
+                if key == "workflow_dispatch":
+                    has_dispatch = True
+                    continue
+                if key != "push":
+                    continue
+                v, filt = v.strip(), {}
+                if v.startswith("{"):
+                    for k in ("branches-ignore", "branches", "tags"):
+                        mm = re.search(r"(^|[{,\s])" + k + r"\s*:\s*\[([^\]]*)\]", v)
+                        if mm:
+                            filt[k] = items(mm.group(2))
+                push_filt = filt
+            print(decide(push_filt, has_dispatch))
         else:
             vals = items(val)
             if "push" in vals:
@@ -143,7 +186,10 @@ for i, l in enumerate(lines):
     for j, b in enumerate(body):
         if ind(b) != kid:
             continue
-        key, _, v = b.strip().partition(":")
+        s = b.strip()
+        if s.startswith("- "):
+            s = s[2:].strip()
+        key, _, v = s.partition(":")
         key = key.strip(Q)
         if key == "workflow_dispatch":
             has_dispatch = True
@@ -173,14 +219,7 @@ for i, l in enumerate(lines):
                     cur = k.strip(Q)
                     filt[cur] = items(cv) if cv.strip() else []
         push_filt = filt
-    if push_filt is not None and push_hits_main(push_filt):
-        print("push")
-    elif push_filt is not None and push_filt.get("tags"):
-        print("tag:" + push_filt["tags"][0])
-    elif has_dispatch:
-        print("dispatch")
-    else:
-        print("none")
+    print(decide(push_filt, has_dispatch))
     sys.exit(0)
 print("none")
 sys.exit(0)

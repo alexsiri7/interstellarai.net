@@ -166,6 +166,19 @@ YML
     [ "$output" = .github/workflows/release.yaml ]
 }
 
+@test "a quoted \"on\": key classifies the same as the bare key (#248 / seam R3)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+"on":
+  push:
+    branches: [main]
+    tags: ['v*']
+jobs: {}
+YML
+    run release_push_workflow proj
+    [ "$status" -eq 0 ]
+    [ "$output" = .github/workflows/release.yml ]
+}
+
 @test "a push limited to develop does not" {
     workflow proj .github/workflows/release.yml <<'YML'
 on:
@@ -307,6 +320,54 @@ YML
 @test "release_classify reports workflow_dispatch for the flow-list form too (#248 / seam R2)" {
     workflow proj .github/workflows/release.yml <<'YML'
 on: [workflow_dispatch]
+YML
+    run release_classify proj
+    [ "$status" -eq 1 ]
+    [ "$output" = "dispatch .github/workflows/release.yml" ]
+}
+
+@test "release_classify reports push for a flow-mapping on: (#248 / seam R1)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on: {push: {branches: [main]}}
+YML
+    run release_classify proj
+    [ "$status" -eq 0 ]
+    [ "$output" = "push .github/workflows/release.yml" ]
+}
+
+@test "release_classify reports tag for a flow-mapping on: with a tags pattern (#248 / seam R1)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on: {push: {tags: [v*]}}
+YML
+    run release_classify proj
+    [ "$status" -eq 1 ]
+    [ "$output" = "tag .github/workflows/release.yml v*" ]
+}
+
+@test "release_classify reports dispatch for a flow-mapping on: with only workflow_dispatch (#248 / seam R1)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on: {workflow_dispatch: {}}
+YML
+    run release_classify proj
+    [ "$status" -eq 1 ]
+    [ "$output" = "dispatch .github/workflows/release.yml" ]
+}
+
+@test "release_classify reports push for a block-sequence on: (#248 / seam R1)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  - push
+  - workflow_dispatch
+YML
+    run release_classify proj
+    [ "$status" -eq 0 ]
+    [ "$output" = "push .github/workflows/release.yml" ]
+}
+
+@test "release_classify reports dispatch for a block-sequence on: with only workflow_dispatch (#248 / seam R1)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  - workflow_dispatch
 YML
     run release_classify proj
     [ "$status" -eq 1 ]
@@ -563,6 +624,18 @@ YML
     release_lag_check proj
     [ -f "$(marker proj)" ]
     grep -q "since $(iso $((T0 - 100 * 3600)))" "$T/notified"
+}
+
+@test "a dispatch-only release workflow's runs read failing leaves no marker (#248 / seam R2)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  workflow_dispatch:
+YML
+    # last_run is never called, so $T/gh/proj/runs is absent and the gh stub
+    # fails this read the same way it fails any other missing fixture.
+    release_lag_check proj
+    [ ! -e "$(marker proj)" ]
+    [ "$(ntfys)" = 0 ]
 }
 
 @test "a failed read leaves an existing marker untouched" {

@@ -40,8 +40,10 @@ case "$1 $url" in
   "api "*/git/trees/main*) cat "$WORKFLOWS/$p/tree" 2>/dev/null ;;
   "api "*/contents/*) f="${url#*/contents/}"; base64 "$WORKFLOWS/$p/files/${f%%\?*}" 2>/dev/null ;;
   # Raw /actions/workflows/.../runs JSON; the real --jq filter runs against
-  # it here, not a pre-filtered fixture (#248 / seam R5).
+  # it here, not a pre-filtered fixture (#248 / seam R5). RUNS_FAIL=<slug>
+  # simulates a failed read for that one project (#248 / seam R2).
   "api "*/actions/workflows/*/runs*)
+    [ -n "${RUNS_FAIL:-}" ] && [ "$p" = "$RUNS_FAIL" ] && exit 1
     f="$DISPATCH_RUNS/$p"
     [ -f "$f" ] || f=<(echo '{"workflow_runs": []}')
     jq -r "$filter" "$f" 2>/dev/null
@@ -244,6 +246,18 @@ YML
     run "$SCRIPT"
     [ "$status" -eq 0 ]
     [[ "$output" == *"punland: no new commits since "*"(.github/workflows/release.yml), skipping"* ]]
+    ! grep -q "^workflow run" "$GH_CALLS" || false
+}
+
+@test "a dispatch-only release workflow is not dispatched when its runs read fails (#248 / seam R2)" {
+    project punland
+    workflow punland .github/workflows/release.yml <<'YML'
+on:
+  workflow_dispatch:
+YML
+    RUNS_FAIL=punland run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"punland: could not read .github/workflows/release.yml's runs, skipping"* ]]
     ! grep -q "^workflow run" "$GH_CALLS" || false
 }
 
