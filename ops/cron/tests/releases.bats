@@ -240,6 +240,16 @@ YML
     [ "$output" = "none .github/workflows/release.yml" ]
 }
 
+@test "a flow-mapping push with only a tags-ignore filter never hits main either (#248 R1)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  push: {tags-ignore: ['nightly-*']}
+YML
+    run release_classify proj
+    [ "$status" -eq 1 ]
+    [ "$output" = "none .github/workflows/release.yml" ]
+}
+
 @test "branches-ignore: ['**'] excludes every branch, so a tags push trigger does not run on push to main (#248 R1)" {
     workflow proj .github/workflows/release.yml <<'YML'
 on:
@@ -483,6 +493,17 @@ YML
     [ "$(release_tag_for_pattern 'v*-*')" = "v$y-$m.$d" ]
 }
 
+@test "release_tag_for_pattern separates adjacent wildcards so a year boundary still sorts correctly under sort -V (#248 R2)" {
+    date() { if [ "$*" = "-u +%Y.%-m.%-d" ]; then printf '%s\n' "$FAKE_DATE"; else command date "$@"; fi; }
+    FAKE_DATE=2026.12.31
+    dec31=$(release_tag_for_pattern 'v1.**')
+    FAKE_DATE=2027.1.1
+    jan1=$(release_tag_for_pattern 'v1.**')
+    [ "$dec31" = "v1.2026.12.31" ]
+    [ "$jan1" = "v1.2027.1.1" ]
+    [ "$(printf '%s\n%s\n' "$dec31" "$jan1" | sort -V | tail -n1)" = "$jan1" ]
+}
+
 @test "release_tag_for_pattern returns a literal, wildcard-free pattern unchanged (#248 R3)" {
     [ "$(release_tag_for_pattern 'stable')" = "stable" ]
 }
@@ -712,6 +733,23 @@ YML
     release_lag_check proj
     [ ! -e "$(marker proj)" ]
     [ "$(ntfys)" = 0 ]
+}
+
+@test "a dispatch-only release workflow's since-commits read failing leaves an existing marker untouched (#248 R3)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  workflow_dispatch:
+YML
+    last_run proj "$(iso $((T0 - 100 * 3600)))"
+    since_commits proj 2 "$(iso $((T0 - 50 * 3600)))"
+    release_lag_check proj
+    before=$(cat "$(marker proj)")
+    # The run lookup still succeeds (last_run's fixture is untouched); only
+    # the second read — commits since that run — fails this time.
+    rm "$T/gh/proj/since-commits"
+    export RELEASE_NOW=$((T0 + 1800))
+    release_lag_check proj
+    [ "$(cat "$(marker proj)")" = "$before" ]
 }
 
 @test "a failed read leaves an existing marker untouched" {

@@ -87,6 +87,7 @@ _release_trigger_shape() {
 import fnmatch, re, sys
 
 Q = chr(34) + chr(39)
+PUSH_FILTER_KEYS = ("branches-ignore", "branches", "tags", "tags-ignore")
 lines = [re.sub(r"\s+#.*$", "", l.rstrip()) for l in sys.stdin.read().splitlines()]
 lines = [l for l in lines if l.strip() and not l.lstrip().startswith("#")]
 
@@ -160,7 +161,7 @@ for i, l in enumerate(lines):
                     continue
                 v, filt = v.strip(), {}
                 if v.startswith("{"):
-                    for k in ("branches-ignore", "branches", "tags"):
+                    for k in PUSH_FILTER_KEYS:
                         mm = re.search(r"(^|[{,\s])" + k + r"\s*:\s*\[([^\]]*)\]", v)
                         if mm:
                             filt[k] = items(mm.group(2))
@@ -197,7 +198,7 @@ for i, l in enumerate(lines):
             continue
         v, filt = v.strip(), {}
         if v.startswith("{"):
-            for k in ("branches-ignore", "branches", "tags"):
+            for k in PUSH_FILTER_KEYS:
                 mm = re.search(r"(^|[{,\s])" + k + r"\s*:\s*\[([^\]]*)\]", v)
                 if mm:
                     filt[k] = items(mm.group(2))
@@ -345,6 +346,12 @@ release_tag_for_pattern() {
       out=""
       while [[ "$rest" == *'*'* ]]; do
         seg="${rest%%\**}"
+        # Two "*" with no literal text between them (adjacent wildcards)
+        # would otherwise splice their date components back to back with no
+        # separator, letting sort -V compare the wrong digit runs across a
+        # year boundary (#248 R2) — insert one so each spliced value stays
+        # its own digit run.
+        [ "$i" -gt 0 ] && [ -z "$seg" ] && out+="."
         out+="$seg${assign[i]}"
         i=$((i + 1))
         rest="${rest#*\*}"
