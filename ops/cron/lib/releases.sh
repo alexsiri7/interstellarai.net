@@ -12,11 +12,9 @@
 #   source "$SCRIPT_DIR/lib/releases.sh"
 #   release_opted_out <project>      # listed in DAILY_RELEASE_OPT_OUT
 #                                    # (env or DAILY_RELEASE_OPT_OUT_FILE)
-#   release_push_workflow <project>  # 0 + path: a release*.yml runs on push
-#                                    # to main; 1: it has release*.yml, but
-#                                    # none runs on push; 2: read failed;
-#                                    # 3: no release*.yml at all
-#   release_classify <project>       # release_push_workflow, plus how a
+#   release_classify <project>       # 0 + "push <path>": a release*.yml runs
+#                                    # on push to main; 2: read failed; 3: no
+#                                    # release*.yml at all; else 1, and how a
 #                                    # non-push release*.yml wants releasing:
 #                                    # rc 1 echoes "tag <path> <pattern>" (its
 #                                    # push trigger has a tags pattern),
@@ -227,14 +225,14 @@ sys.exit(0)
 '
 }
 
-# release_classify <project> — scans every release*.yml|yaml on main (same
-# file set as release_push_workflow) and reports the best trigger shape
-# found. On stdout: "push <path>" (rc 0) for the first file that runs on push
-# to main; else, for the first file offering one, "tag <path> <pattern>" (rc
-# 1, a push:tags pattern — preferred, per #248) or "dispatch <path>" (rc 1,
-# a workflow_dispatch trigger and no tag-pattern file); else "none <path>"
-# (rc 1, release*.yml exists but no file's trigger is usable). rc 2: a read
-# failed. rc 3: no release*.yml at all.
+# release_classify <project> — scans every release*.yml|yaml on main and
+# reports the best trigger shape found. On stdout: "push <path>" (rc 0) for
+# the first file that runs on push to main; else, for the first file
+# offering one, "tag <path> <pattern>" (rc 1, a push:tags pattern —
+# preferred, per #248) or "dispatch <path>" (rc 1, a workflow_dispatch
+# trigger and no tag-pattern file); else "none <path>" (rc 1, release*.yml
+# exists but no file's trigger is usable). rc 2: a read failed. rc 3: no
+# release*.yml at all.
 release_classify() {
   local project="$1" paths path content shape pattern first_path=""
   local best_mode="none" best_path="" best_pattern=""
@@ -269,13 +267,6 @@ release_classify() {
   return 1
 }
 
-release_push_workflow() {
-  local project="$1" mode path pattern rc=0
-  release_mode "$project" || rc=$?
-  [ "$mode" = push ] && echo "$path"
-  return "$rc"
-}
-
 # release_mode <project> — the shared decode of release_classify's rc/stdout
 # protocol (#248 / seam R5): sets mode ("push", "tag", "dispatch" or "none"),
 # path (the release*.yml that won, or "" when rc is 2 or 3) and pattern (its
@@ -302,37 +293,59 @@ release_latest_tag_by_name() {
 }
 
 # _release_glob_prefix <pattern> — the literal text before <pattern>'s first
-# "*", for the matching-refs prefix search (e.g. "v*" -> "v").
+# glob metacharacter ("*", "?" or "[..]"), for the matching-refs prefix search
+# (e.g. "v*" -> "v", "v[0-9].0" -> "v").
 _release_glob_prefix() {
   local p="$1"
-  printf '%s' "${p%%\**}"
+  printf '%s' "${p%%[*?[]*}"
 }
 
 # release_tag_for_pattern <pattern> — a new tag matching <pattern> for today
 # (e.g. "v*" -> "v2026.11.1", "v*.*.*" -> "v2026.11.1"): each "*" in <pattern>
 # spliced with the matching dotted component of today's date, in order (year,
-# month, day; a pattern with more than three "*" repeats the day for the
-# rest). A pattern with no "*" is used as-is (daily-release-cron.sh then skips
-# it once it exists, like any other already-released tag). Prints nothing and
-# returns 1 when <pattern> uses glob syntax no concrete git ref can satisfy
-# ("?", "[...]"): the caller falls back to the dated release-YYYY-MM-DD path.
+# month, day), except the last "*" gets any date components the earlier ones
+# didn't consume (so one or two "*" still produce a tag unique to the day,
+# e.g. "v*.*" -> "v2026.11.1"); a pattern with more than three "*" repeats the
+# day for the rest. A pattern with no "*" is used as-is (daily-release-cron.sh
+# then skips it once it exists, like any other already-released tag).
+#
+# When that primary candidate uses glob syntax no git ref can contain ("?",
+# "[...]"), falls back to <pattern>'s literal prefix (_release_glob_prefix)
+# plus today's full date, accepted only if it still satisfies <pattern> under
+# the same glob rules release_lag_check matches tags with — e.g. "v[0-9]*" ->
+# "v2026.11.1" (the splice "v[0-9]2026.11.1" is rejected by git, but the
+# prefix candidate both is a valid ref and matches the pattern). Prints
+# nothing and returns 1 when neither candidate satisfies <pattern>: the
+# caller falls back to the dated release-YYYY-MM-DD path.
 release_tag_for_pattern() {
   local pattern="$1" out
   case "$pattern" in
     *'*'*)
       local rest="$pattern" rest2="$pattern" seg n=0
       while [[ "$rest2" == *'*'* ]]; do n=$((n + 1)); rest2="${rest2#*\*}"; done
-      local -a parts
-      if [ "$n" -eq 1 ]; then
-        parts=("$(date -u +%Y.%-m.%-d)")
-      else
-        IFS=. read -r -a parts <<< "$(date -u +%Y.%-m.%-d)"
-      fi
-      local i=0 last=$((${#parts[@]} - 1))
+      local -a date_parts
+      IFS=. read -r -a date_parts <<< "$(date -u +%Y.%-m.%-d)"
+      local total=${#date_parts[@]} i j joined
+      local -a assign=()
+      for ((i = 0; i < n; i++)); do
+        if [ "$n" -le "$total" ] && [ "$i" -eq "$((n - 1))" ]; then
+          joined=""
+          for ((j = i; j < total; j++)); do
+            [ "$j" -gt "$i" ] && joined+="."
+            joined+="${date_parts[j]}"
+          done
+          assign[i]="$joined"
+        elif [ "$i" -lt "$((total - 1))" ]; then
+          assign[i]="${date_parts[i]}"
+        else
+          assign[i]="${date_parts[$((total - 1))]}"
+        fi
+      done
+      i=0
       out=""
       while [[ "$rest" == *'*'* ]]; do
         seg="${rest%%\**}"
-        out+="$seg${parts[i<last ? i : last]}"
+        out+="$seg${assign[i]}"
         i=$((i + 1))
         rest="${rest#*\*}"
       done
@@ -340,8 +353,19 @@ release_tag_for_pattern() {
       ;;
     *) out="$pattern" ;;
   esac
-  git check-ref-format "refs/tags/$out" 2>/dev/null || return 1
-  printf '%s' "$out"
+  if git check-ref-format "refs/tags/$out" 2>/dev/null; then
+    printf '%s' "$out"
+    return 0
+  fi
+  local fallback
+  fallback="$(_release_glob_prefix "$pattern")$(date -u +%Y.%-m.%-d)"
+  git check-ref-format "refs/tags/$fallback" 2>/dev/null || return 1
+  # shellcheck disable=SC2254  # $pattern is a glob here, matched the same
+  # way git's own "git tag -l" matches it (#248 / seam R2)
+  case "$fallback" in
+    $pattern) printf '%s' "$fallback" ;;
+    *) return 1 ;;
+  esac
 }
 
 # release_lag_check <project> — commits on main not yet covered by real

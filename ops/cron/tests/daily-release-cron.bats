@@ -207,7 +207,7 @@ YML
     [ "$(git -C "$TEST_TMP/origins/punland.git" tag -l 'v*' | wc -l)" -eq 1 ]
 }
 
-@test "a tag pattern no concrete git ref can satisfy falls back to the dated release instead of never releasing (#248 / seam R3)" {
+@test "a satisfiable bracket-class tag pattern gets its own matching tag, not the dated fallback (#248 / seam R2)" {
     project punland
     workflow punland .github/workflows/release.yml <<'YML'
 on:
@@ -216,7 +216,21 @@ on:
 YML
     run "$SCRIPT"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"punland: unsupported tag pattern v[0-9]*, falling back to release-$TODAY"* ]]
+    [[ "$output" == *"punland: tagging v$(date -u +%Y.%-m.%-d) to match v[0-9]*"* ]]
+    tagged punland 'v[0-9]*'
+    ! released punland || false
+}
+
+@test "a tag pattern no concrete candidate can satisfy falls back to the dated release instead of never releasing (#248 / seam R3)" {
+    project punland
+    workflow punland .github/workflows/release.yml <<'YML'
+on:
+  push:
+    tags: ['v?.0']
+YML
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"punland: unsupported tag pattern v?.0, falling back to release-$TODAY"* ]]
     released punland
 }
 

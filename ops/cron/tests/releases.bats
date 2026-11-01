@@ -31,7 +31,7 @@ setup() {
     # ignored here — RELEASE_OWNER's own test asserts it from the raw call
     # log instead (#248 R3).
     gh() {
-        local url="" filter="" a p prev=""
+        local url="" filter="" a p prev="" reqprefix t
         printf '%s\n' "$*" >> "$T/gh-calls"
         for a in "$@"; do
             case "$a" in repos/*) url="$a" ;; esac
@@ -46,7 +46,17 @@ setup() {
             */contents/*) [ -z "${CONTENT_FAIL:-}" ] || return 1
                           a="${url#*/contents/}"; a="${a%%\?*}"
                           base64 "$T/gh/$p/files/$a" 2>/dev/null ;;
-            */matching-refs/*) cat "$T/gh/$p/tags" 2>/dev/null ;;
+            */matching-refs/tags/*)
+                # Mirrors GitHub's own matching-refs semantics: only refs
+                # whose name literally starts with the requested prefix come
+                # back, so a caller that asks with an unstripped glob
+                # metacharacter in the prefix (#248 / seam R3) gets nothing.
+                reqprefix="${url#*/git/matching-refs/tags/}"
+                [ -f "$T/gh/$p/tags" ] || return 1
+                while IFS= read -r t; do
+                    case "$t" in "refs/tags/$reqprefix"*) printf '%s\n' "$t" ;; esac
+                done < "$T/gh/$p/tags"
+                ;;
             # compare and runs carry raw API JSON; the real --jq filter runs
             # against it here, same as the tree filter above (#248 / seam R5).
             */compare/*) [ -f "$T/gh/$p/compare" ] || return 1
@@ -121,7 +131,7 @@ since_commits() {
     fi
 }
 
-# ── release_push_workflow ────────────────────────────────────────────────────
+# ── release_classify: push detection ─────────────────────────────────────────
 
 @test "an un-reminder-shaped release.yml (push to main + tags) releases on push" {
     workflow proj .github/workflows/release.yml <<'YML'
@@ -132,12 +142,12 @@ on:
     tags: ['v*']
 jobs: {}
 YML
-    run release_push_workflow proj
+    run release_classify proj
     [ "$status" -eq 0 ]
-    [ "$output" = .github/workflows/release.yml ]
+    [ "$output" = "push .github/workflows/release.yml" ]
 }
 
-@test "a catscape-watchface-shaped release.yml (dispatch + push.tags) does not" {
+@test "a catscape-watchface-shaped release.yml (dispatch + push.tags) does not run on push" {
     workflow proj .github/workflows/release.yml <<'YML'
 on:
   workflow_dispatch:
@@ -148,8 +158,9 @@ on:
     tags:
       - 'v*'
 YML
-    run release_push_workflow proj
+    run release_classify proj
     [ "$status" -eq 1 ]
+    [ "$output" = "tag .github/workflows/release.yml v*" ]
 }
 
 @test "a push-to-main ci.yml is not a release workflow" {
@@ -158,7 +169,7 @@ on:
   push:
     branches: [main]
 YML
-    run release_push_workflow proj
+    run release_classify proj
     [ "$status" -eq 3 ]
 }
 
@@ -166,9 +177,9 @@ YML
     workflow proj .github/workflows/release.yaml <<'YML'
 on: push
 YML
-    run release_push_workflow proj
+    run release_classify proj
     [ "$status" -eq 0 ]
-    [ "$output" = .github/workflows/release.yaml ]
+    [ "$output" = "push .github/workflows/release.yaml" ]
 }
 
 @test "a quoted \"on\": key classifies the same as the bare key (#248 / seam R3)" {
@@ -179,20 +190,21 @@ YML
     tags: ['v*']
 jobs: {}
 YML
-    run release_push_workflow proj
+    run release_classify proj
     [ "$status" -eq 0 ]
-    [ "$output" = .github/workflows/release.yml ]
+    [ "$output" = "push .github/workflows/release.yml" ]
 }
 
-@test "a push limited to develop does not" {
+@test "a push limited to develop does not run on push" {
     workflow proj .github/workflows/release.yml <<'YML'
 on:
   push:
     branches:
       - develop
 YML
-    run release_push_workflow proj
+    run release_classify proj
     [ "$status" -eq 1 ]
+    [ "$output" = "none .github/workflows/release.yml" ]
 }
 
 @test "a push with branches-ignore that leaves main in releases on push" {
@@ -201,19 +213,20 @@ on:
   push:
     branches-ignore: [docs]
 YML
-    run release_push_workflow proj
+    run release_classify proj
     [ "$status" -eq 0 ]
 }
 
-@test "a push with branches-ignore listing main does not" {
+@test "a push with branches-ignore listing main does not run on push" {
     workflow proj .github/workflows/release.yml <<'YML'
 on:
   push:
     branches-ignore:
       - main
 YML
-    run release_push_workflow proj
+    run release_classify proj
     [ "$status" -eq 1 ]
+    [ "$output" = "none .github/workflows/release.yml" ]
 }
 
 @test "a push with only a tags-ignore filter never hits main, so it does not run on push (#248 R1)" {
@@ -222,8 +235,9 @@ on:
   push:
     tags-ignore: ['nightly-*']
 YML
-    run release_push_workflow proj
+    run release_classify proj
     [ "$status" -eq 1 ]
+    [ "$output" = "none .github/workflows/release.yml" ]
 }
 
 @test "branches-ignore: ['**'] excludes every branch, so a tags push trigger does not run on push to main (#248 R1)" {
@@ -244,29 +258,29 @@ on:
   push:
     branches: ['ma*']
 YML
-    run release_push_workflow proj
+    run release_classify proj
     [ "$status" -eq 0 ]
 }
 
 @test "a failed tree read is 2" {
     workflow proj .github/workflows/release.yml <<< 'on: push'
-    TREE_FAIL=1 run release_push_workflow proj
+    TREE_FAIL=1 run release_classify proj
     [ "$status" -eq 2 ]
 }
 
 @test "a failed content read is 2" {
     workflow proj .github/workflows/release.yml <<< 'on: push'
-    CONTENT_FAIL=1 run release_push_workflow proj
+    CONTENT_FAIL=1 run release_classify proj
     [ "$status" -eq 2 ]
 }
 
 @test "no release*.yml at all is 3, distinct from one that just doesn't run on push" {
     no_workflows proj
-    run release_push_workflow proj
+    run release_classify proj
     [ "$status" -eq 3 ]
 }
 
-@test "release_push_workflow scans every release*.yml file, not just the first" {
+@test "release_classify scans every release*.yml file, not just the first" {
     workflow proj .github/workflows/release-notes.yml <<'YML'
 on:
   pull_request:
@@ -276,9 +290,9 @@ on:
   push:
     branches: [main]
 YML
-    run release_push_workflow proj
+    run release_classify proj
     [ "$status" -eq 0 ]
-    [ "$output" = .github/workflows/release.yml ]
+    [ "$output" = "push .github/workflows/release.yml" ]
 }
 
 @test "RELEASE_OWNER overrides the hardcoded alexsiri7 owner in gh calls (#248 R3)" {
@@ -462,14 +476,22 @@ YML
     [ "$(release_tag_for_pattern 'v*.*.*')" = "v$y.$m.$d" ]
 }
 
+@test "release_tag_for_pattern folds the day into the last of exactly two wildcards, so the tag stays unique per day (#248 R1)" {
+    local y m d
+    IFS=. read -r y m d <<< "$(date -u +%Y.%-m.%-d)"
+    [ "$(release_tag_for_pattern 'v*.*')" = "v$y.$m.$d" ]
+    [ "$(release_tag_for_pattern 'v*-*')" = "v$y-$m.$d" ]
+}
+
 @test "release_tag_for_pattern returns a literal, wildcard-free pattern unchanged (#248 R3)" {
     [ "$(release_tag_for_pattern 'stable')" = "stable" ]
 }
 
-@test "release_tag_for_pattern fails, printing nothing, for glob syntax no git ref can satisfy (#248 / seam R3)" {
-    run release_tag_for_pattern 'v[0-9]*'
-    [ "$status" -eq 1 ]
-    [ -z "$output" ]
+@test "release_tag_for_pattern falls back to the literal prefix plus today's date when a satisfiable bracket-class splice is rejected by git (#248 / seam R2)" {
+    [ "$(release_tag_for_pattern 'v[0-9]*')" = "v$(date -u +%Y.%-m.%-d)" ]
+}
+
+@test "release_tag_for_pattern fails, printing nothing, when neither candidate satisfies the pattern (#248 / seam R3)" {
     run release_tag_for_pattern 'v?.0'
     [ "$status" -eq 1 ]
     [ -z "$output" ]
