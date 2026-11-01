@@ -34,12 +34,12 @@
 # daily-release-cron.sh reads the same file's trigger shape (#248): a
 # `push: tags` pattern means create a tag matching it; a `workflow_dispatch`
 # trigger means dispatch the workflow with its defaults; neither means fall
-# back to its own dated release-* tag. That fallback tag is a changelog
-# marker, not evidence the project's own release channel ran, so below, a
-# project with a tag-pattern or dispatch release*.yml is tracked by real
-# release evidence (the newest tag matching its pattern, or its newest
-# successful dispatch run) instead of that tag; one with neither is still
-# tracked by commit age, same as a project with no release*.yml at all.
+# back to its own dated release-* tag — the same fallback tag used when there
+# is no release*.yml at all. Below, a project with a tag-pattern or dispatch
+# release*.yml is tracked by real release evidence (the newest tag matching
+# its pattern, or its newest successful dispatch run) instead of that tag;
+# one with neither, or no release*.yml at all, is tracked by that fallback
+# release-* tag.
 #
 # One marker per lagging project in RELEASE_LAG_STATE_DIR/<project>, key=value
 # lines (since, tag, ahead, oldest, notified), cleared once main is released
@@ -217,12 +217,29 @@ release_push_workflow() {
   return "$rc"
 }
 
+# release_mode <project> — the shared decode of release_classify's rc/stdout
+# protocol (#248 / seam R5): sets mode ("push", "tag", "dispatch" or "none"),
+# path (the release*.yml that won, or "" when rc is 2 or 3) and pattern (its
+# push:tags pattern, mode "tag" only) in the caller's scope — the caller must
+# declare them `local` first — and returns release_classify's rc unchanged.
+release_mode() {
+  local project="$1" line rc=0
+  line=$(release_classify "$project") || rc=$?
+  mode=none; path=""; pattern=""
+  case "$rc" in
+    0) mode=push; path="${line#push }" ;;
+    1) read -r mode path pattern <<< "$line" ;;
+  esac
+  return "$rc"
+}
+
 # release_latest_tag_by_name <tag...> on stdin, one per line — the newest by
-# name (lexicographic, matching `git tag -l --sort=-refname`). The one shared
-# rule daily-release-cron.sh and release_lag_check both need to agree on which
-# tag is "the last release" (#248 / seam R4).
+# name (version sort, so "v2026.11.10" outranks "v2026.11.9" the same way
+# zero-padded "release-2026-11-10" outranks "release-2026-11-09"). The one
+# shared rule daily-release-cron.sh and release_lag_check both need to agree
+# on which tag is "the last release" (#248 / seam R4).
 release_latest_tag_by_name() {
-  LC_ALL=C sort | tail -n1
+  sort -V | tail -n1
 }
 
 # _release_glob_regex <pattern> — <pattern> (e.g. "v*") as an anchored ERE,
@@ -261,25 +278,22 @@ release_tag_for_pattern() {
 # on a project the cron would release. The evidence depends on release_classify:
 #   tag       newest tag matching the workflow's own push:tags pattern
 #   dispatch  the workflow's newest successful run
-#   none      no release*.yml at all: the newest release-* tag daily-release-
-#             cron.sh itself creates (a repo with no tag: any commit that old)
-# A release*.yml with neither a tag-pattern nor a dispatch trigger (mode none,
-# rc 1) ignores release-* tags: that tag is a changelog fallback, not evidence
-# the project's real release channel ran, and it has no other channel either.
+#   none      no usable trigger at all (no release*.yml, or one with neither
+#             a tag-pattern nor a dispatch trigger): the newest release-* tag
+#             daily-release-cron.sh itself creates (a repo with no tag: any
+#             commit that old)
 # Needs log and notify_checked from the caller.
 release_lag_check() {
-  local project="$1" now cutoff refs tag="" out ahead oldest f rc=0 line mode path pattern
+  local project="$1" now cutoff refs tag="" out ahead oldest f rc=0 mode path pattern
   now=$(release_now)
   cutoff=$(date -u -d "@$((now - RELEASE_LAG_SECONDS))" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null) || return 0
   f="$RELEASE_LAG_STATE_DIR/$project"
 
-  line=$(release_classify "$project") || rc=$?
+  release_mode "$project" || rc=$?
   case "$rc" in
-    0) _release_lag_clear "$project" "${line#push } releases on push to main"; return 0 ;;
+    0) _release_lag_clear "$project" "$path releases on push to main"; return 0 ;;
     2) log "release-lag: $project — could not read release workflows, skipping"; return 0 ;;
   esac
-  mode=none; path=""; pattern=""
-  [ "$rc" = 1 ] && read -r mode path pattern <<< "$line"
 
   case "$mode" in
     tag)
@@ -298,20 +312,18 @@ release_lag_check() {
       fi
       ;;
     none)
-      if [ "$rc" = 3 ]; then
-        if ! refs=$(gh api --paginate "repos/$RELEASE_OWNER/$project/git/matching-refs/tags/release-" \
-              --jq '.[].ref' 2>/dev/null); then
-          log "release-lag: $project — could not list release tags, skipping"
-          return 0
-        fi
-        tag=$(printf '%s\n' "$refs" | sed -n 's#^refs/tags/##p' | release_latest_tag_by_name)
+      if ! refs=$(gh api --paginate "repos/$RELEASE_OWNER/$project/git/matching-refs/tags/release-" \
+            --jq '.[].ref' 2>/dev/null); then
+        log "release-lag: $project — could not list release tags, skipping"
+        return 0
       fi
+      tag=$(printf '%s\n' "$refs" | sed -n 's#^refs/tags/##p' | release_latest_tag_by_name)
       ;;
   esac
   if [ -n "$tag" ]; then
     if [ "$mode" = dispatch ]; then
-      out=$(gh api "repos/$RELEASE_OWNER/$project/commits?sha=main&since=$tag" \
-        --jq '[.[].commit.committer.date] as $d | "\($d|length) \($d|min // "")"' 2>/dev/null) || out=""
+      out=$(gh api --paginate --slurp "repos/$RELEASE_OWNER/$project/commits?sha=main&since=$tag" \
+        --jq '[.[][].commit.committer.date] as $d | "\($d|length) \($d|min // "")"' 2>/dev/null) || out=""
     else
       out=$(gh api "repos/$RELEASE_OWNER/$project/compare/$tag...main" \
         --jq '"\(.ahead_by) \([.commits[].commit.committer.date] | min // "")"' 2>/dev/null) || out=""

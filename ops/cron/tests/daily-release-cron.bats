@@ -137,6 +137,17 @@ YML
     [[ "$output" == *"zoomies: no new commits since release-2026-01-01, skipping"* ]]
 }
 
+@test "a project with a release.yml that has neither a tag nor a dispatch trigger still gets the plain fallback release" {
+    project reli
+    workflow reli .github/workflows/release.yml <<'YML'
+on:
+  pull_request:
+YML
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    released reli
+}
+
 @test "a dispatch-only release workflow is dispatched, not released as a GitHub release" {
     project punland
     workflow punland .github/workflows/release.yml <<'YML'

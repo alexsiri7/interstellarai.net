@@ -29,7 +29,6 @@ source "$SCRIPT_DIR/lib/releases.sh"
 
 load_archon_projects PROJECTS
 BASE_DIR="${BASE_DIR:-/mnt/ext-fast}"
-OWNER="alexsiri7"
 LOG_PREFIX="[daily-release]"
 TODAY="$(date +%Y-%m-%d)"
 
@@ -120,7 +119,7 @@ release_one_tag() {
 # defaults, unless nothing's new since its newest successful run.
 release_one_dispatch() {
   local project="$1" head_sha="$2" path="$3" since commit_count
-  if ! since=$(gh api "repos/$OWNER/$project/actions/workflows/${path##*/}/runs?event=workflow_dispatch" \
+  if ! since=$(gh api "repos/$RELEASE_OWNER/$project/actions/workflows/${path##*/}/runs?event=workflow_dispatch" \
         --jq '[.workflow_runs[] | select(.status=="completed" and .conclusion=="success")][0].created_at // ""' 2>/dev/null); then
     log "$project: could not read $path's runs, skipping"
     return
@@ -136,7 +135,7 @@ release_one_dispatch() {
   fi
 
   log "$project: dispatching $path ($commit_count commits since ${since:-repo start})"
-  if ! gh workflow run "${path##*/}" --repo "$OWNER/$project" --ref main 2>&1 | sed "s/^/    /"; then
+  if ! gh workflow run "${path##*/}" --repo "$RELEASE_OWNER/$project" --ref main 2>&1 | sed "s/^/    /"; then
     log "$project: workflow dispatch failed"
     return
   fi
@@ -175,7 +174,7 @@ release_one_fallback() {
   log "$project: releasing $tag ($commit_count commits since ${prev_tag:-repo start})"
 
   if ! gh release create "$tag" \
-        --repo "$OWNER/$project" \
+        --repo "$RELEASE_OWNER/$project" \
         --target "$head_sha" \
         --title "$tag" \
         --generate-notes 2>&1 | sed "s/^/    /"; then
@@ -186,7 +185,7 @@ release_one_fallback() {
   log "$project: released $tag — generating summary"
 
   local body summary new_body
-  body=$(gh release view "$tag" --repo "$OWNER/$project" --json body --jq '.body' 2>/dev/null) || body=""
+  body=$(gh release view "$tag" --repo "$RELEASE_OWNER/$project" --json body --jq '.body' 2>/dev/null) || body=""
   if [ -n "$body" ] && summary=$(summarize_release "$project" "$body"); then
     new_body="## Highlights
 
@@ -195,7 +194,7 @@ $summary
 ---
 
 $body"
-    if gh release edit "$tag" --repo "$OWNER/$project" --notes "$new_body" >/dev/null 2>&1; then
+    if gh release edit "$tag" --repo "$RELEASE_OWNER/$project" --notes "$new_body" >/dev/null 2>&1; then
       log "$project: summary attached to $tag"
     else
       log "$project: summary generated but gh release edit failed"
@@ -233,14 +232,12 @@ release_one() {
     return
   }
 
-  local line rc=0 mode path pattern
-  line=$(release_classify "$project") || rc=$?
+  local rc=0 mode path pattern
+  release_mode "$project" || rc=$?
   case "$rc" in
-    0) log "$project: ${line#push } already releases on push to main, skipping"; return ;;
+    0) log "$project: $path already releases on push to main, skipping"; return ;;
     2) log "$project: could not read release workflows, skipping"; return ;;
   esac
-  mode=none; path=""; pattern=""
-  [ "$rc" = 1 ] && read -r mode path pattern <<< "$line"
 
   case "$mode" in
     tag) release_one_tag "$project" "$head_sha" "$pattern"; return ;;

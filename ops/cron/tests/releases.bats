@@ -243,6 +243,21 @@ YML
     [ "$output" = "push .github/workflows/release.yml" ]
 }
 
+@test "release_classify prefers a tag-pattern file over an earlier, separate dispatch-only file" {
+    workflow proj .github/workflows/release-notes.yml <<'YML'
+on:
+  workflow_dispatch:
+YML
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  push:
+    tags: ['v*']
+YML
+    run release_classify proj
+    [ "$status" -eq 1 ]
+    [ "$output" = "tag .github/workflows/release.yml v*" ]
+}
+
 # ── release_opted_out ────────────────────────────────────────────────────────
 
 @test "release_opted_out matches a listed slug only" {
@@ -250,6 +265,25 @@ YML
     DAILY_RELEASE_OPT_OUT="reli kith" run ! release_opted_out ki
     DAILY_RELEASE_OPT_OUT="reli kith" run ! release_opted_out zoomies
     DAILY_RELEASE_OPT_OUT="" run ! release_opted_out kith
+}
+
+# ── release_latest_tag_by_name ───────────────────────────────────────────────
+
+@test "release_latest_tag_by_name picks the double-digit day over the single-digit one" {
+    result=$(printf 'v2026.11.1\nv2026.11.2\nv2026.11.9\nv2026.11.10\n' | release_latest_tag_by_name)
+    [ "$result" = "v2026.11.10" ]
+}
+
+@test "release_latest_tag_by_name picks the later month across a month/day digit-width change" {
+    result=$(printf 'v2026.9.30\nv2026.10.1\n' | release_latest_tag_by_name)
+    [ "$result" = "v2026.10.1" ]
+}
+
+# ── release_tag_for_pattern ──────────────────────────────────────────────────
+
+@test "release_tag_for_pattern splices today's date around the wildcard, no leading zeros" {
+    [ "$(release_tag_for_pattern 'v*')" = "v$(date -u +%Y.%-m.%-d)" ]
+    [ "$(release_tag_for_pattern 'rel-*-stable')" = "rel-$(date -u +%Y.%-m.%-d)-stable" ]
 }
 
 # ── release_lag_check ────────────────────────────────────────────────────────
@@ -319,6 +353,22 @@ YML
     release_lag_check proj
     [ ! -e "$(marker proj)" ]
     [ "$(ntfys)" = 0 ]
+}
+
+@test "a release.yml with neither a tag nor a dispatch trigger (mode none) is tracked by the cron's own fallback tag, same as a project with no release.yml, and clears once released" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  pull_request:
+YML
+    lagging proj 3 $((T0 - 50 * 3600))
+    release_lag_check proj
+    [ -f "$(marker proj)" ]
+    grep -q 'since release-2026-01-01' "$T/notified"
+
+    echo "0 " > "$T/gh/proj/compare"
+    release_lag_check proj
+    [ ! -e "$(marker proj)" ]
+    grep -q 'proj — released again' "$T/log"
 }
 
 @test "a project with its own non-push release workflow stays flagged after the cron's own fallback tag clears ahead_by" {
