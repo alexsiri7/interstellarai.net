@@ -29,9 +29,10 @@
 #                            SAFE_REBOOT_JOB_MAX_H (12) hours (`ps -o etimes=`):
 #                            these take minutes to an hour, so it looks stuck
 # Lameduck: while a reboot is pending, from SAFE_REBOOT_PREDRAIN_MIN (60)
-# minutes before the window opens until it closes -- and at any hour once the
-# reboot is past the deadline -- the gate sets the run-as flag to drain, so the
-# factory launches nothing new and its running work finishes before the window
+# minutes before the window opens until it closes (deadline or not: the forced
+# reboot only happens in the window anyway), the gate sets the run-as flag to
+# drain, so the factory launches nothing new and its running work finishes
+# before the window
 # (until 2026-11 the flag was drained only at the moment of rebooting, and the
 # factory kept the host busy every night until the 72h deadline). The previous
 # value is kept in $STATE/lameduck and put back when the window closes without a
@@ -340,18 +341,20 @@ lameduck_end() {
     rm -f "$LD_FILE"
 }
 
-# lameduck_tick <since> <overdue> — start, keep or end the pre-drain.
+# lameduck_tick <since> — start, keep or end the pre-drain. Only from
+# PREDRAIN_MIN before the window to its end, past the deadline too: the forced
+# reboot happens only in the window, so draining earlier only idles the factory.
 lameduck_tick() {
-    local since=$1 overdue=$2 flag why=""
+    local since=$1 flag why=""
     if [ -e "$LD_FILE" ] && [ "$(ld_get boot_id)" != "$(boot_id)" ]; then
         lameduck_end "left over from an earlier boot"
     fi
     if [ "$LAMEDUCK" != 1 ]; then why="off (SAFE_REBOOT_LAMEDUCK=$LAMEDUCK)"
     elif [ -e "$HOLD" ]; then why="hold file"
-    elif [ "$overdue" -eq 0 ] && ! in_window && ! predrain_now; then why="window closed"; fi
+    elif ! in_window && ! predrain_now; then why="window closed"; fi
     if [ -n "$why" ]; then
         if [ -e "$LD_FILE" ]; then lameduck_end "$why"
-        elif [ "$LAMEDUCK" = 1 ] && [ "$why" = "window closed" ]; then line "lameduck: starts at $(lameduck_start_hm) (${PREDRAIN_MIN}m before the window $WINDOW), or at once past the ${DEADLINE_H}h deadline"
+        elif [ "$LAMEDUCK" = 1 ] && [ "$why" = "window closed" ]; then line "lameduck: starts at $(lameduck_start_hm) (${PREDRAIN_MIN}m before the window $WINDOW)"
         else line "lameduck: $why"; fi
         return 0
     fi
@@ -366,7 +369,7 @@ lameduck_tick() {
         unknown) line "lameduck: cannot read $FLAG_FILE — not draining"; return 0 ;;
         drain)   line "lameduck: flag already drain (not set by the lameduck) — left alone"; return 0 ;;
     esac
-    local when; when=$( [ "$overdue" -eq 1 ] && echo "past the ${DEADLINE_H}h deadline" || echo "window $WINDOW" )
+    local when="window $WINDOW"
     if [ "$DRY" -eq 1 ]; then line "lameduck: would set ARCHON_RUN_AS=drain now (was $flag; $when)"; return 0; fi
     # The state file before the flag: whatever happens next, the old value is on disk.
     printf 'boot_id=%s\nat=%s\nflag_prev=%s\n' "$(boot_id)" "$NOW" "$flag" > "$LD_FILE"
@@ -551,7 +554,7 @@ cmd_gate() {
     pkgs=$( [ -r "$REBOOT_REQUIRED.pkgs" ] && sort -u "$REBOOT_REQUIRED.pkgs" | paste -sd' ' )
     log "reboot pending since $(fmt_ts "$since") ($(( age / 3600 ))h; deadline ${DEADLINE_H}h; mode $(reboot_mode)${pkgs:+; $pkgs})"
 
-    lameduck_tick "$since" "$overdue"
+    lameduck_tick "$since"
     evaluate
     local hard soft
     hard=$(reasons_of hard); soft=$(reasons_of soft)

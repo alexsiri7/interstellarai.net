@@ -188,10 +188,11 @@ window **02:30–06:30**. Then it reboots unless something is busy:
 Resumable long jobs (the NAS mirror, rclone) never block: they are restarted afterwards.
 
 **Lameduck (pre-drain).** While a reboot is pending, from `SAFE_REBOOT_PREDRAIN_MIN`
-(60) minutes before the window opens (01:30) until it closes (06:30), and at any hour
-once the reboot is past the 72h deadline, the gate sets the run-as flag to `drain`
-(same write as below, `safe-reboot lameduck` in the comment line; the previous value
-is kept in `/var/lib/safe-reboot/lameduck`). The cron scripts then launch nothing new
+(60) minutes before the window opens (01:30) until it closes (06:30), the gate sets
+the run-as flag to `drain` (past the 72h deadline too, but no earlier: the forced
+reboot only happens inside the window, so draining all day would only idle the factory).
+It is the same write as below, with `safe-reboot lameduck` in the comment line; the
+previous value is kept in `/var/lib/safe-reboot/lameduck`. The cron scripts then launch nothing new
 and running work finishes before the window. Why: a kernel update set
 `reboot-required` on Wed 28 Oct 06:39, and on the nights of Oct 28–31 every tick
 found the factory busy (a paused run on nearly every tick, running runs and
@@ -215,7 +216,7 @@ the flag was drained only at the moment of rebooting.
   `archon-update.sh` would restart asiri's user `archon-serve` rather than the system
   unit). The factory's own running runs (system `archon-serve`, User=archon) are not
   affected, and the gate itself asks archon's DB (the saved flag). Before 2026-11 the
-  drain lasted seconds; now it lasts the window (and all day past the deadline).
+  drain lasted seconds; now it lasts at most the pre-drain plus the window (~5h a night).
 
 When nothing blocks it:
 1. writes `/var/lib/safe-reboot/restore/meta` (boot id, previous flag), then sets the

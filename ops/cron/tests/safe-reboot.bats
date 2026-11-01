@@ -477,14 +477,16 @@ PROCS
     [ "$(flag)" = drain ]
 }
 
-@test "lameduck: at any hour once the pending reboot is past the deadline" {
+@test "lameduck: past the deadline it still waits for the pre-drain, not all day" {
     pending
     at 'today 14:00'
-    run "$SCRIPT" gate
-    [ "$(flag)" = asiri ]
     printf '%s boot-1\n' "$(( SAFE_REBOOT_NOW - 73 * 3600 ))" > "$T/state/pending-since"
     run "$SCRIPT" gate
     [[ "$output" == *"outside the window"* ]]
+    [[ "$output" == *"lameduck: starts at 01:30"* ]]
+    [ "$(flag)" = asiri ] && [ ! -e "$T/state/lameduck" ]
+    at 'tomorrow 01:30'
+    run "$SCRIPT" gate
     [ "$(flag)" = drain ]
     [ ! -e "$T/reboot.log" ]
 }
