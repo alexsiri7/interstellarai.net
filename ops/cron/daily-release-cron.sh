@@ -81,7 +81,10 @@ ${titles}"
 
 # release_one_tag <project> <head_sha> <pattern> — a project whose own
 # release*.yml wants a tag matching <pattern> (#248): tag main to match it,
-# unless nothing's new since the last tag that already matches.
+# unless nothing's new since the last tag that already matches. <pattern>'s
+# glob syntax ("?", "[...]") can produce a pattern no concrete git ref can
+# satisfy; release_tag_for_pattern fails in that case, and this falls back to
+# the dated release-YYYY-MM-DD path instead of never releasing the project.
 release_one_tag() {
   local project="$1" head_sha="$2" pattern="$3" prev_tag commit_count new_tag
   prev_tag=$(git tag -l "$pattern" | release_latest_tag_by_name)
@@ -95,7 +98,11 @@ release_one_tag() {
     return
   fi
 
-  new_tag=$(release_tag_for_pattern "$pattern")
+  if ! new_tag=$(release_tag_for_pattern "$pattern"); then
+    log "$project: unsupported tag pattern $pattern, falling back to release-$TODAY"
+    release_one_fallback "$project" "$head_sha" "release-$TODAY"
+    return
+  fi
   if git ls-remote --tags origin "refs/tags/$new_tag" 2>/dev/null | grep -q "$new_tag"; then
     log "$project: tag $new_tag already exists, skipping"
     return

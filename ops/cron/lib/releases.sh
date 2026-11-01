@@ -11,6 +11,7 @@
 #
 #   source "$SCRIPT_DIR/lib/releases.sh"
 #   release_opted_out <project>      # listed in DAILY_RELEASE_OPT_OUT
+#                                    # (env or DAILY_RELEASE_OPT_OUT_FILE)
 #   release_push_workflow <project>  # 0 + path: a release*.yml runs on push
 #                                    # to main; 1: it has release*.yml, but
 #                                    # none runs on push; 2: read failed;
@@ -53,8 +54,18 @@ _ARCHON_RELEASES_SH=1
 source "$(dirname "${BASH_SOURCE[0]}")/deadlines.sh"
 
 RELEASE_OWNER="${RELEASE_OWNER:-alexsiri7}"
-# Space-separated slugs daily-release-cron.sh must never release.
+# Space-separated slugs daily-release-cron.sh must never release, from the
+# environment or $DAILY_RELEASE_OPT_OUT_FILE (default
+# ~/.config/archon-cron/daily-release.env, sourced when present, values there
+# win — same shape as lib/trust.sh's trust.env). The scheduled cron starts
+# with none of an interactive shell's exported variables, so an opt-out only
+# ever exported by hand never reaches the 08:00 run; the file does.
 DAILY_RELEASE_OPT_OUT="${DAILY_RELEASE_OPT_OUT:-}"
+DAILY_RELEASE_OPT_OUT_FILE="${DAILY_RELEASE_OPT_OUT_FILE:-$HOME/.config/archon-cron/daily-release.env}"
+if [ -r "$DAILY_RELEASE_OPT_OUT_FILE" ]; then
+  # shellcheck source=/dev/null
+  . "$DAILY_RELEASE_OPT_OUT_FILE"
+fi
 RELEASE_LAG_STATE_DIR="${RELEASE_LAG_STATE_DIR:-$HOME/.archon/state/unreleased}"
 RELEASE_LAG_SECONDS="${RELEASE_LAG_SECONDS:-172800}"
 
@@ -111,8 +122,16 @@ for i, l in enumerate(lines):
         continue
     val = m.group(2)
     if val:
-        hit = not val.startswith("{") and "push" in items(val)
-        print("push" if hit else "none")
+        if val.startswith("{"):
+            print("none")
+        else:
+            vals = items(val)
+            if "push" in vals:
+                print("push")
+            elif "workflow_dispatch" in vals:
+                print("dispatch")
+            else:
+                print("none")
         sys.exit(0)
     body = children(i + 1, 0)
     if not body:
@@ -242,16 +261,6 @@ release_latest_tag_by_name() {
   sort -V | tail -n1
 }
 
-# _release_glob_regex <pattern> — <pattern> (e.g. "v*") as an anchored ERE,
-# for filtering a tag list client-side (the matching-refs prefix search below
-# is a prefix match, not a full glob).
-_release_glob_regex() {
-  python3 -c '
-import re, sys
-print("".join(".*" if c == "*" else re.escape(c) for c in sys.argv[1]))
-' "$1"
-}
-
 # _release_glob_prefix <pattern> — the literal text before <pattern>'s first
 # "*", for the matching-refs prefix search (e.g. "v*" -> "v").
 _release_glob_prefix() {
@@ -260,17 +269,39 @@ _release_glob_prefix() {
 }
 
 # release_tag_for_pattern <pattern> — a new tag matching <pattern> for today
-# (e.g. "v*" -> "v2026.11.1"): the text around <pattern>'s first "*" with
-# today's date (no leading zeros) spliced in. A pattern with no "*" is used
-# as-is (daily-release-cron.sh then skips it once it exists, like any other
-# already-released tag).
+# (e.g. "v*" -> "v2026.11.1", "v*.*.*" -> "v2026.11.1"): each "*" in <pattern>
+# spliced with the matching dotted component of today's date, in order (year,
+# month, day; a pattern with more than three "*" repeats the day for the
+# rest). A pattern with no "*" is used as-is (daily-release-cron.sh then skips
+# it once it exists, like any other already-released tag). Prints nothing and
+# returns 1 when <pattern> uses glob syntax no concrete git ref can satisfy
+# ("?", "[...]"): the caller falls back to the dated release-YYYY-MM-DD path.
 release_tag_for_pattern() {
-  local pattern="$1" prefix suffix
+  local pattern="$1" out
   case "$pattern" in
-    *'*'*) prefix="${pattern%%\**}"; suffix="${pattern#*\*}" ;;
-    *) printf '%s' "$pattern"; return ;;
+    *'*'*)
+      local rest="$pattern" rest2="$pattern" seg n=0
+      while [[ "$rest2" == *'*'* ]]; do n=$((n + 1)); rest2="${rest2#*\*}"; done
+      local -a parts
+      if [ "$n" -eq 1 ]; then
+        parts=("$(date -u +%Y.%-m.%-d)")
+      else
+        IFS=. read -r -a parts <<< "$(date -u +%Y.%-m.%-d)"
+      fi
+      local i=0 last=$((${#parts[@]} - 1))
+      out=""
+      while [[ "$rest" == *'*'* ]]; do
+        seg="${rest%%\**}"
+        out+="$seg${parts[i<last ? i : last]}"
+        i=$((i + 1))
+        rest="${rest#*\*}"
+      done
+      out+="$rest"
+      ;;
+    *) out="$pattern" ;;
   esac
-  printf '%s%s%s' "$prefix" "$(date -u +%Y.%-m.%-d)" "$suffix"
+  git check-ref-format "refs/tags/$out" 2>/dev/null || return 1
+  printf '%s' "$out"
 }
 
 # release_lag_check <project> — commits on main not yet covered by real
@@ -302,7 +333,11 @@ release_lag_check() {
         log "release-lag: $project — could not list $pattern tags, skipping"
         return 0
       fi
-      tag=$(printf '%s\n' "$refs" | sed -n 's#^refs/tags/##p' | grep -xE "$(_release_glob_regex "$pattern")" | release_latest_tag_by_name)
+      tag=$(printf '%s\n' "$refs" | sed -n 's#^refs/tags/##p' | while IFS= read -r t; do
+              # shellcheck disable=SC2254  # $pattern is a glob here, matched
+              # the same way git's own "git tag -l" matches it (#248 / seam R4)
+              case "$t" in $pattern) printf '%s\n' "$t" ;; esac
+            done | release_latest_tag_by_name)
       ;;
     dispatch)
       if ! tag=$(gh api "repos/$RELEASE_OWNER/$project/actions/workflows/${path##*/}/runs?event=workflow_dispatch" \
@@ -322,8 +357,13 @@ release_lag_check() {
   esac
   if [ -n "$tag" ]; then
     if [ "$mode" = dispatch ]; then
-      out=$(gh api --paginate --slurp "repos/$RELEASE_OWNER/$project/commits?sha=main&since=$tag" \
-        --jq '[.[][].commit.committer.date] as $d | "\($d|length) \($d|min // "")"' 2>/dev/null) || out=""
+      local raw
+      if raw=$(gh api --paginate --slurp "repos/$RELEASE_OWNER/$project/commits?sha=main&since=$tag" 2>/dev/null); then
+        out=$(printf '%s' "$raw" \
+          | jq -r '[.[][].commit.committer.date] as $d | "\($d|length) \($d|min // "")"' 2>/dev/null) || out=""
+      else
+        out=""
+      fi
     else
       out=$(gh api "repos/$RELEASE_OWNER/$project/compare/$tag...main" \
         --jq '"\(.ahead_by) \([.commits[].commit.committer.date] | min // "")"' 2>/dev/null) || out=""

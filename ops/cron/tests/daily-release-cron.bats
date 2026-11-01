@@ -29,12 +29,24 @@ setup() {
     cat > "$HOME/.local/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 echo "$*" >> "$GH_CALLS"
-url=""; for a in "$@"; do case "$a" in repos/*) url="$a" ;; esac; done
+url=""; filter=""; prev=""
+for a in "$@"; do
+  case "$a" in repos/*) url="$a" ;; esac
+  [ "$prev" = --jq ] && filter="$a"
+  prev="$a"
+done
 p="${url#repos/alexsiri7/}"; p="${p%%/*}"
 case "$1 $url" in
   "api "*/git/trees/main*) cat "$WORKFLOWS/$p/tree" 2>/dev/null ;;
   "api "*/contents/*) f="${url#*/contents/}"; base64 "$WORKFLOWS/$p/files/${f%%\?*}" 2>/dev/null ;;
-  "api "*/actions/workflows/*/runs*) cat "$DISPATCH_RUNS/$p" 2>/dev/null; true ;;
+  # Raw /actions/workflows/.../runs JSON; the real --jq filter runs against
+  # it here, not a pre-filtered fixture (#248 / seam R5).
+  "api "*/actions/workflows/*/runs*)
+    f="$DISPATCH_RUNS/$p"
+    [ -f "$f" ] || f=<(echo '{"workflow_runs": []}')
+    jq -r "$filter" "$f" 2>/dev/null
+    true
+    ;;
   "workflow "*) exit 0 ;;
   "release "*) exit 0 ;;
   *) exit 1 ;;
@@ -71,8 +83,21 @@ workflow() {
 released() { grep -q "^release create release-$TODAY --repo alexsiri7/$1 " "$GH_CALLS"; }
 # tagged <slug> <glob> — origin carries a tag matching <glob> (e.g. 'v*').
 tagged() { git -C "$TEST_TMP/origins/$1.git" tag -l "$2" | grep -q .; }
-# dispatch_ran <slug> <iso> — the slug's release workflow last succeeded then.
-dispatch_ran() { mkdir -p "$DISPATCH_RUNS"; printf '%s' "$2" > "$DISPATCH_RUNS/$1"; }
+# dispatch_ran <slug> <iso> — the slug's release workflow last succeeded
+# then, as raw /actions/workflows/.../runs JSON (#248 / seam R5).
+dispatch_ran() {
+  mkdir -p "$DISPATCH_RUNS"
+  jq -n --arg d "$2" \
+    '{workflow_runs: [{status: "completed", conclusion: "success", created_at: $d}]}' \
+    > "$DISPATCH_RUNS/$1"
+}
+# reject_pushes <slug> — a pre-receive hook on the slug's bare origin that
+# rejects every push (fetch and clone still work).
+reject_pushes() {
+  local hook="$TEST_TMP/origins/$1.git/hooks/pre-receive"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$hook"
+  chmod +x "$hook"
+}
 
 @test "every project in archon-projects.txt is released, including ones the old list lacked" {
     project reli; project zoomies; project catscape-watchface
@@ -172,6 +197,40 @@ YML
     run "$SCRIPT"
     [ "$status" -eq 0 ]
     [[ "$output" == *"punland: no new commits since v2026.1.1 (v*), skipping"* ]]
+    [ "$(git -C "$TEST_TMP/origins/punland.git" tag -l 'v*' | wc -l)" -eq 1 ]
+}
+
+@test "a tag pattern no concrete git ref can satisfy falls back to the dated release instead of never releasing (#248 / seam R3)" {
+    project punland
+    workflow punland .github/workflows/release.yml <<'YML'
+on:
+  push:
+    tags: ['v[0-9]*']
+YML
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"punland: unsupported tag pattern v[0-9]*, falling back to release-$TODAY"* ]]
+    released punland
+}
+
+@test "a failed tag push rolls back the local tag, and a later successful push creates it (#248 / seam R6)" {
+    project punland
+    workflow punland .github/workflows/release.yml <<'YML'
+on:
+  push:
+    tags: ['v*']
+YML
+    reject_pushes punland
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"punland: tag push failed"* ]]
+    [ -z "$(git -C "$BASE_DIR/punland" tag -l 'v*')" ]
+    ! tagged punland 'v*' || false
+
+    rm "$TEST_TMP/origins/punland.git/hooks/pre-receive"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    tagged punland 'v*'
     [ "$(git -C "$TEST_TMP/origins/punland.git" tag -l 'v*' | wc -l)" -eq 1 ]
 }
 

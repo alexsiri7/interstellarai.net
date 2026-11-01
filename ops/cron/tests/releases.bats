@@ -17,6 +17,9 @@ setup() {
     CRON_DIR="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
     mkdir -p "$T/gh"
     export RELEASE_LAG_STATE_DIR="$T/unreleased" DEADLINE_STATE_DIR="$T/deadlines"
+    # A nonexistent path: the real ~/.config/archon-cron/daily-release.env must
+    # never leak into these tests.
+    export DAILY_RELEASE_OPT_OUT_FILE="$T/no-opt-out.env"
     unset _ARCHON_RELEASES_SH _ARCHON_DEADLINES_SH RELEASE_NOW DAILY_RELEASE_OPT_OUT
     : > "$T/log"; : > "$T/notified"
 
@@ -39,10 +42,14 @@ setup() {
                           a="${url#*/contents/}"; a="${a%%\?*}"
                           base64 "$T/gh/$p/files/$a" 2>/dev/null ;;
             */matching-refs/*) cat "$T/gh/$p/tags" 2>/dev/null ;;
-            */compare/*) cat "$T/gh/$p/compare" 2>/dev/null ;;
+            # compare and runs carry raw API JSON; the real --jq filter runs
+            # against it here, same as the tree filter above (#248 / seam R5).
+            */compare/*) [ -f "$T/gh/$p/compare" ] || return 1
+                         jq -r "$filter" "$T/gh/$p/compare" ;;
             */commits*since=*) cat "$T/gh/$p/since-commits" 2>/dev/null ;;
             */commits*) cat "$T/gh/$p/old-commits" 2>/dev/null ;;
-            */actions/workflows/*/runs*) cat "$T/gh/$p/runs" 2>/dev/null ;;
+            */actions/workflows/*/runs*) [ -f "$T/gh/$p/runs" ] || return 1
+                                         jq -r "$filter" "$T/gh/$p/runs" ;;
             *) return 1 ;;
         esac
     }
@@ -64,20 +71,50 @@ workflow() {
 }
 no_workflows() { mkdir -p "$T/gh/$1"; : > "$T/gh/$1/tree"; }
 iso() { date -u -d "@$1" '+%Y-%m-%dT%H:%M:%SZ'; }
+# compare_fixture <ahead_by> <oldest-iso-or-empty> — raw /compare/... JSON,
+# the real --jq filter's input (#248 / seam R5).
+compare_fixture() {
+    if [ "$1" -eq 0 ] || [ -z "$2" ]; then
+        jq -n --argjson a "$1" '{ahead_by: $a, commits: []}'
+    else
+        jq -n --argjson a "$1" --arg d "$2" \
+          '{ahead_by: $a, commits: [range($a) | {commit: {committer: {date: $d}}}]}'
+    fi
+}
 # lagging <project> <ahead> <oldest epoch> — newest tag release-2026-01-01.
 lagging() {
     mkdir -p "$T/gh/$1"
     echo refs/tags/release-2025-12-31 > "$T/gh/$1/tags"
     echo refs/tags/release-2026-01-01 >> "$T/gh/$1/tags"
-    echo "$2 $(iso "$3")" > "$T/gh/$1/compare"
+    compare_fixture "$2" "$(iso "$3")" > "$T/gh/$1/compare"
 }
 marker() { echo "$RELEASE_LAG_STATE_DIR/$1"; }
 ntfys() { grep -c '' "$T/notified" || true; }
-# last_run <project> <iso-or-empty> — the newest successful dispatch run.
-last_run() { mkdir -p "$T/gh/$1"; printf '%s' "$2" > "$T/gh/$1/runs"; }
+# last_run <project> <iso-or-empty> — the newest successful dispatch run, raw
+# /actions/workflows/.../runs JSON (#248 / seam R5).
+last_run() {
+    mkdir -p "$T/gh/$1"
+    if [ -z "$2" ]; then
+        echo '{"workflow_runs": []}' > "$T/gh/$1/runs"
+    else
+        jq -n --arg d "$2" \
+          '{workflow_runs: [{status: "completed", conclusion: "success", created_at: $d}]}' \
+          > "$T/gh/$1/runs"
+    fi
+}
 # since_commits <project> <count> <oldest-iso-or-empty> — commits on main
-# since a dispatch run.
-since_commits() { mkdir -p "$T/gh/$1"; echo "$2 $3" > "$T/gh/$1/since-commits"; }
+# since a dispatch run, as the production code's own --paginate --slurp
+# produces (an array of pages, each page an array of commits) — release_lag_check
+# pipes this through the real jq filter directly, no gh --jq (#248 / seam R1).
+since_commits() {
+    mkdir -p "$T/gh/$1"
+    if [ "$2" -eq 0 ]; then
+        echo '[[]]' > "$T/gh/$1/since-commits"
+    else
+        jq -n --argjson n "$2" --arg d "$3" \
+          '[[range($n) | {commit: {committer: {date: $d}}}]]' > "$T/gh/$1/since-commits"
+    fi
+}
 
 # ── release_push_workflow ────────────────────────────────────────────────────
 
@@ -258,6 +295,24 @@ YML
     [ "$output" = "tag .github/workflows/release.yml v*" ]
 }
 
+@test "release_classify reports workflow_dispatch for the short scalar form, not just the block form (#248 / seam R2)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on: workflow_dispatch
+YML
+    run release_classify proj
+    [ "$status" -eq 1 ]
+    [ "$output" = "dispatch .github/workflows/release.yml" ]
+}
+
+@test "release_classify reports workflow_dispatch for the flow-list form too (#248 / seam R2)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on: [workflow_dispatch]
+YML
+    run release_classify proj
+    [ "$status" -eq 1 ]
+    [ "$output" = "dispatch .github/workflows/release.yml" ]
+}
+
 # ── release_opted_out ────────────────────────────────────────────────────────
 
 @test "release_opted_out matches a listed slug only" {
@@ -265,6 +320,15 @@ YML
     DAILY_RELEASE_OPT_OUT="reli kith" run ! release_opted_out ki
     DAILY_RELEASE_OPT_OUT="reli kith" run ! release_opted_out zoomies
     DAILY_RELEASE_OPT_OUT="" run ! release_opted_out kith
+}
+
+@test "DAILY_RELEASE_OPT_OUT_FILE is sourced when present, so the opt-out reaches the scheduled cron's bare environment (#248 / seam R7)" {
+    echo 'DAILY_RELEASE_OPT_OUT=kith' > "$T/opt-out.env"
+    unset _ARCHON_RELEASES_SH DAILY_RELEASE_OPT_OUT
+    export DAILY_RELEASE_OPT_OUT_FILE="$T/opt-out.env"
+    source "$CRON_DIR/lib/releases.sh"
+    release_opted_out kith
+    run ! release_opted_out zoomies
 }
 
 # ── release_latest_tag_by_name ───────────────────────────────────────────────
@@ -286,6 +350,21 @@ YML
     [ "$(release_tag_for_pattern 'rel-*-stable')" = "rel-$(date -u +%Y.%-m.%-d)-stable" ]
 }
 
+@test "release_tag_for_pattern distributes today's date across a multi-wildcard pattern (#248 / seam R3)" {
+    local y m d
+    IFS=. read -r y m d <<< "$(date -u +%Y.%-m.%-d)"
+    [ "$(release_tag_for_pattern 'v*.*.*')" = "v$y.$m.$d" ]
+}
+
+@test "release_tag_for_pattern fails, printing nothing, for glob syntax no git ref can satisfy (#248 / seam R3)" {
+    run release_tag_for_pattern 'v[0-9]*'
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+    run release_tag_for_pattern 'v?.0'
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+}
+
 # ── release_lag_check ────────────────────────────────────────────────────────
 
 @test "a lag over 48h writes the marker and sends one ntfy, once per episode" {
@@ -305,7 +384,7 @@ YML
 @test "ahead_by 0 on a later tick clears the marker" {
     lagging proj 3 $((T0 - 50 * 3600)); no_workflows proj
     release_lag_check proj
-    echo "0 " > "$T/gh/proj/compare"
+    compare_fixture 0 "" > "$T/gh/proj/compare"
     release_lag_check proj
     [ ! -e "$(marker proj)" ]
     grep -q 'proj — released again' "$T/log"
@@ -365,7 +444,7 @@ YML
     [ -f "$(marker proj)" ]
     grep -q 'since release-2026-01-01' "$T/notified"
 
-    echo "0 " > "$T/gh/proj/compare"
+    compare_fixture 0 "" > "$T/gh/proj/compare"
     release_lag_check proj
     [ ! -e "$(marker proj)" ]
     grep -q 'proj — released again' "$T/log"
@@ -381,7 +460,7 @@ YML
     # The cron's own daily fallback tag, sitting right at head: ahead_by 0
     # against it, which must NOT be read as "released" for this project.
     echo refs/tags/release-2026-01-01 > "$T/gh/proj/tags"
-    echo "0 $(iso $((T0 - 50 * 3600)))" > "$T/gh/proj/compare"
+    compare_fixture 0 "$(iso $((T0 - 50 * 3600)))" > "$T/gh/proj/compare"
     echo 1 > "$T/gh/proj/old-commits"
     release_lag_check proj
     [ -f "$(marker proj)" ]
@@ -395,7 +474,7 @@ on:
     tags: ['v*']
 YML
     printf 'refs/tags/release-2026-01-01\nrefs/tags/v2026-10-31\n' > "$T/gh/proj/tags"
-    echo "0 " > "$T/gh/proj/compare"
+    compare_fixture 0 "" > "$T/gh/proj/compare"
     release_lag_check proj
     [ ! -e "$(marker proj)" ]
     [ "$(ntfys)" = 0 ]
@@ -408,10 +487,41 @@ on:
     tags: ['v*']
 YML
     printf 'refs/tags/release-2026-01-01\nrefs/tags/v2026-09-01\n' > "$T/gh/proj/tags"
-    echo "4 $(iso $((T0 - 50 * 3600)))" > "$T/gh/proj/compare"
+    compare_fixture 4 "$(iso $((T0 - 50 * 3600)))" > "$T/gh/proj/compare"
     release_lag_check proj
     [ -f "$(marker proj)" ]
     grep -q 'since v2026-09-01' "$T/notified"
+}
+
+@test "a tag pattern using '?' matches via bash's own glob, agreeing with git's (#248 / seam R4)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  push:
+    tags: ['v?.0']
+YML
+    printf 'refs/tags/release-2026-01-01\nrefs/tags/v1.0\n' > "$T/gh/proj/tags"
+    # If the match against v1.0 failed, tag would resolve empty and fall
+    # through to the no-tag branch, which would read this as an old commit
+    # and flag — exactly the permanent false positive #248 R4 describes.
+    echo 1 > "$T/gh/proj/old-commits"
+    compare_fixture 0 "" > "$T/gh/proj/compare"
+    release_lag_check proj
+    [ ! -e "$(marker proj)" ]
+    [ "$(ntfys)" = 0 ]
+}
+
+@test "a tag pattern using a bracket class also matches via bash's own glob (#248 / seam R4)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  push:
+    tags: ['v[0-9].0']
+YML
+    printf 'refs/tags/release-2026-01-01\nrefs/tags/v3.0\n' > "$T/gh/proj/tags"
+    echo 1 > "$T/gh/proj/old-commits"
+    compare_fixture 0 "" > "$T/gh/proj/compare"
+    release_lag_check proj
+    [ ! -e "$(marker proj)" ]
+    [ "$(ntfys)" = 0 ]
 }
 
 @test "a dispatch-only release workflow clears when its newest successful run is fresh" {
