@@ -162,7 +162,7 @@ for i, l in enumerate(lines):
                 v, filt = v.strip(), {}
                 if v.startswith("{"):
                     for k in PUSH_FILTER_KEYS:
-                        mm = re.search(r"(^|[{,\s])" + k + r"\s*:\s*\[([^\]]*)\]", v)
+                        mm = re.search(r"(^|[{,\s])" + k + r"\s*:\s*(\[[^\]]*\]|[^,}]+)", v)
                         if mm:
                             filt[k] = items(mm.group(2))
                 push_filt = filt
@@ -199,7 +199,7 @@ for i, l in enumerate(lines):
         v, filt = v.strip(), {}
         if v.startswith("{"):
             for k in PUSH_FILTER_KEYS:
-                mm = re.search(r"(^|[{,\s])" + k + r"\s*:\s*\[([^\]]*)\]", v)
+                mm = re.search(r"(^|[{,\s])" + k + r"\s*:\s*(\[[^\]]*\]|[^,}]+)", v)
                 if mm:
                     filt[k] = items(mm.group(2))
                     v = v.replace(mm.group(0), mm.group(1))
@@ -426,6 +426,12 @@ release_lag_check() {
   cutoff=$(date -u -d "@$((now - RELEASE_LAG_SECONDS))" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null) || return 0
   f="$RELEASE_LAG_STATE_DIR/$project"
 
+  if release_opted_out "$project"; then
+    _release_lag_clear "$project" "opted out of the daily release"
+    _release_unreadable_clear "$project"
+    return 0
+  fi
+
   release_mode "$project" || rc=$?
   case "$rc" in
     2) log "release-lag: $project — could not read release workflows, skipping"
@@ -501,10 +507,6 @@ release_lag_check() {
 
   if [ "$ahead" = 0 ]; then
     _release_lag_clear "$project" "released again"
-    return 0
-  fi
-  if release_opted_out "$project"; then
-    _release_lag_clear "$project" "opted out of the daily release"
     return 0
   fi
 

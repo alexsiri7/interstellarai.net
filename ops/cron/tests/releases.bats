@@ -800,6 +800,17 @@ YML
     [ "$(ntfys)" = 1 ]
 }
 
+@test "an opted-out project with an unreadable release workflow never ntfys, even past 48h (#248 R2)" {
+    DAILY_RELEASE_OPT_OUT=proj TREE_FAIL=1 release_lag_check proj
+    [ "$(ntfys)" = 0 ]
+    [ ! -e "$(marker proj).unreadable" ]
+
+    export RELEASE_NOW=$((T0 + 50 * 3600))
+    DAILY_RELEASE_OPT_OUT=proj TREE_FAIL=1 release_lag_check proj
+    [ "$(ntfys)" = 0 ]
+    [ ! -e "$(marker proj).unreadable" ]
+}
+
 @test "a project that recovers after a long read-error episode clears the unreadable marker" {
     TREE_FAIL=1 release_lag_check proj
     export RELEASE_NOW=$((T0 + 50 * 3600))
