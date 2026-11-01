@@ -2,8 +2,9 @@
 # ops/host/safe-reboot/safe-reboot, run as a normal user against stubs
 # (SAFE_REBOOT_TEST=1 skips the root check; every path is a SAFE_REBOOT_*
 # override): the window, the busy checks (hold file, maintenance jobs, archon
-# runs, active Claude transcripts), the drain/record/reboot sequence, the
-# 72h deadline with its warning, and the restore after boot.
+# runs, active Claude transcripts), the lameduck (pre-drain before the window,
+# undone when it closes), the drain/record/reboot sequence, the 72h deadline
+# with its warning, cold mode (RTC wake + power off) and the restore after boot.
 #
 # Run: bunx bats ops/cron/tests/safe-reboot.bats
 
@@ -23,6 +24,10 @@ setup() {
     export SAFE_REBOOT_BOOT_ID_FILE="$T/boot_id"
     export SAFE_REBOOT_BUN="$T/bin/bun"
     export SAFE_REBOOT_REBOOT_CMD="$T/bin/reboot-stub"
+    export SAFE_REBOOT_POWEROFF_CMD="$T/bin/poweroff-stub"
+    export SAFE_REBOOT_RTC_WAKEALARM="$T/wakealarm"
+    export SAFE_REBOOT_CONF="$T/safe-reboot.conf"     # absent: never the host's /etc/default/safe-reboot
+    unset SAFE_REBOOT_MODE SAFE_REBOOT_WAKE_S SAFE_REBOOT_LAMEDUCK SAFE_REBOOT_PREDRAIN_MIN
     export SAFE_REBOOT_WAIT_S=2
     export SAFE_REBOOT_NOW="$(date -d 'today 03:00' +%s)"
     FLAG="$T/home/.config/archon-cron/run-as"
@@ -103,6 +108,7 @@ STUB
 echo "systemd-run \$*" >> "$T/systemd-run.log"; touch "$T/tmux.up"
 STUB
     printf '#!/usr/bin/env bash\necho reboot >> "%s/reboot.log"\nexit "${STUB_REBOOT_RC:-0}"\n' "$T" > "$T/bin/reboot-stub"
+    printf '#!/usr/bin/env bash\necho poweroff >> "%s/poweroff.log"\nexit "${STUB_POWEROFF_RC:-0}"\n' "$T" > "$T/bin/poweroff-stub"
     printf '#!/usr/bin/env bash\nexit 0\n' > "$T/bin/sync"
     chmod +x "$T"/bin/*
 }
@@ -110,6 +116,7 @@ STUB
 teardown() { rm -rf "$T"; }
 
 flag() { sed -n 's/^ARCHON_RUN_AS=//p' "$FLAG"; }
+set_flag() { printf '# Written by ops/host/archon-user/install.sh — read by ops/cron/lib/run-as.sh\nARCHON_RUN_AS=%s\n' "$1" > "$FLAG"; }
 pending() { touch "$T/reboot-required"; }
 at() { export SAFE_REBOOT_NOW="$(date -d "$1" +%s)"; }
 
@@ -263,21 +270,37 @@ PROCS
     [[ "$output" == *"hard:apt/dpkg running: 456 /usr/bin/dpkg"* ]]
 }
 
-@test "soft blockers: an active transcript, a paused archon run, an unreadable run list" {
+@test "soft blockers: an active transcript, a running archon run, a process, an unreadable run list" {
     pending
     touch "$T/home/.claude/projects/p/now.jsonl"
     run "$SCRIPT" gate
     [[ "$output" == *"Claude session active"*"now.jsonl"* ]]
     [[ "$output" == *"busy, not overdue"* ]]
     rm "$T/home/.claude/projects/p/now.jsonl"
-    echo 1 > "$T/runs.paused"
+    echo 1 > "$T/runs.running"
     run "$SCRIPT" gate
-    [[ "$output" == *"archon: 1 paused run(s)"* ]]
-    echo 0 > "$T/runs.paused"; touch "$T/bun.fail"
+    [[ "$output" == *"soft:archon: 1 running run(s)"* ]]
+    echo 0 > "$T/runs.running"; echo 2 > "$T/pgrep.runs"
+    run "$SCRIPT" gate
+    [[ "$output" == *"soft:2 'archon workflow run' process(es)"* ]]
+    rm "$T/pgrep.runs"; touch "$T/bun.fail"
     run "$SCRIPT" gate
     [[ "$output" == *"query failed"* ]]
     [ ! -e "$T/reboot.log" ]
-    [ "$(flag)" = asiri ]
+    # in the window the factory is held drained (the lameduck), not rebooted
+    [ "$(flag)" = drain ]
+}
+
+@test "paused archon runs do not block; status lists them as info" {
+    pending
+    echo 3 > "$T/runs.paused"
+    run "$SCRIPT" status
+    [[ "$output" == *"info: archon paused run(s): 3"*"not a blocker"* ]]
+    [[ "$output" != *"soft:"*"paused"* ]]
+    [[ "$output" == *"decision: reboot now"* ]]
+    run "$SCRIPT" gate
+    [[ "$output" != *"paused"* ]]
+    [ -e "$T/reboot.log" ]
 }
 
 @test "a drain someone else set is left alone and restored as drain" {
@@ -295,7 +318,8 @@ PROCS
 
 @test "archon run launched between the check and the drain: flag put back, no reboot" {
     pending
-    echo 2 > "$T/bun.busy-after"          # the two pre-drain queries are idle
+    export SAFE_REBOOT_LAMEDUCK=0         # the drain at the moment of rebooting
+    echo 1 > "$T/bun.busy-after"          # the pre-drain query is idle
     run "$SCRIPT" gate
     [[ "$output" == *"archon became busy after the drain"* ]]
     [ ! -e "$T/reboot.log" ]
@@ -305,9 +329,24 @@ PROCS
 
 @test "reboot command fails: flag put back, ntfy" {
     pending
-    STUB_REBOOT_RC=1 run "$SCRIPT" gate
+    SAFE_REBOOT_LAMEDUCK=0 STUB_REBOOT_RC=1 run "$SCRIPT" gate
     [ "$(flag)" = asiri ]
     grep -q 'Reboot FAILED' "$T/ntfy.log"
+}
+
+@test "under the lameduck an aborted or failed reboot keeps the drain for the window-close undo" {
+    pending
+    echo 1 > "$T/bun.busy-after"
+    run "$SCRIPT" gate
+    [[ "$output" == *"archon became busy after the drain"* ]]
+    [ "$(flag)" = drain ] && [ -e "$T/state/lameduck" ] && [ ! -e "$T/state/restore" ]
+    rm "$T/bun.busy-after"
+    STUB_REBOOT_RC=1 run "$SCRIPT" gate
+    [ "$(flag)" = drain ] && [ -e "$T/state/lameduck" ]
+    grep -q 'Reboot FAILED.*lameduck drain stays' "$T/ntfy.log"
+    at 'today 06:30'
+    run "$SCRIPT" gate
+    [ "$(flag)" = asiri ] && [ ! -e "$T/state/lameduck" ]
 }
 
 @test "deadline: warn first, wait the grace period, then force through soft blockers" {
@@ -405,4 +444,210 @@ PROCS
     run "$SCRIPT" restore
     [[ "$output" == *"is gone — not resuming 11111111-2222-3333-4444-555555555555"* ]]
     ! grep -q 'send-keys' "$T/tmux.log" 2>/dev/null
+}
+
+# ------------------------------------------------------------- lameduck ----
+
+@test "lameduck: starts SAFE_REBOOT_PREDRAIN_MIN before the window, one low ntfy" {
+    pending
+    at 'today 01:29'
+    run "$SCRIPT" gate
+    [[ "$output" == *"lameduck: starts at 01:30"* ]]
+    [ "$(flag)" = asiri ] && [ ! -e "$T/state/lameduck" ] && [ ! -e "$T/ntfy.log" ]
+    at 'today 01:30'
+    run "$SCRIPT" gate
+    [[ "$output" == *"outside the window"* ]]
+    [ "$(flag)" = drain ]
+    grep -q 'safe-reboot lameduck' "$FLAG"
+    [ "$(stat -c %a "$FLAG")" = 600 ]
+    grep -qx 'flag_prev=asiri' "$T/state/lameduck"
+    [ ! -e "$T/reboot.log" ]
+    [ "$(grep -c '^low|Draining the factory' "$T/ntfy.log")" -eq 1 ]
+    at 'today 02:00'
+    run "$SCRIPT" status
+    [[ "$output" == *"lameduck: active since"*"was asiri"* ]]
+    run "$SCRIPT" gate
+    [ "$(grep -c 'Draining the factory' "$T/ntfy.log")" -eq 1 ]
+    # a shorter pre-drain starts later
+    rm -f "$T/state/lameduck"; set_flag asiri
+    SAFE_REBOOT_PREDRAIN_MIN=20 run "$SCRIPT" gate
+    [ "$(flag)" = asiri ]
+    at 'today 02:10'
+    SAFE_REBOOT_PREDRAIN_MIN=20 run "$SCRIPT" gate
+    [ "$(flag)" = drain ]
+}
+
+@test "lameduck: past the deadline it still waits for the pre-drain, not all day" {
+    pending
+    at 'today 14:00'
+    printf '%s boot-1\n' "$(( SAFE_REBOOT_NOW - 73 * 3600 ))" > "$T/state/pending-since"
+    run "$SCRIPT" gate
+    [[ "$output" == *"outside the window"* ]]
+    [[ "$output" == *"lameduck: starts at 01:30"* ]]
+    [ "$(flag)" = asiri ] && [ ! -e "$T/state/lameduck" ]
+    at 'tomorrow 01:30'
+    run "$SCRIPT" gate
+    [ "$(flag)" = drain ]
+    [ ! -e "$T/reboot.log" ]
+}
+
+@test "lameduck: undone when the window closes, drained again the next night" {
+    pending
+    touch "$T/home/.claude/projects/p/now.jsonl"      # keeps the gate from rebooting
+    run "$SCRIPT" gate
+    [ "$(flag)" = drain ] && [ ! -e "$T/reboot.log" ]
+    at 'today 06:15'
+    run "$SCRIPT" gate
+    [ "$(flag)" = drain ]
+    at 'today 06:30'
+    run "$SCRIPT" gate
+    [ "$(flag)" = asiri ] && [ ! -e "$T/state/lameduck" ]
+    grep -q 'lameduck ended: window closed' "$FLAG"
+    at 'tomorrow 01:45'
+    run "$SCRIPT" gate
+    [ "$(flag)" = drain ]
+    # one ntfy for the pending reboot, not one a night
+    [ "$(grep -c 'Draining the factory' "$T/ntfy.log")" -eq 1 ]
+}
+
+@test "lameduck: a flag changed during it is left alone at window close and not re-drained" {
+    pending
+    touch "$T/home/.claude/projects/p/now.jsonl"
+    run "$SCRIPT" gate
+    [ "$(flag)" = drain ]
+    set_flag drain                                     # someone else's drain now (no safe-reboot mark)
+    cp "$FLAG" "$T/flag.before"
+    at 'today 06:30'
+    run "$SCRIPT" gate
+    cmp "$FLAG" "$T/flag.before"
+    [ ! -e "$T/state/lameduck" ]
+    # the owner flips it back by hand mid-window: not drained again that night
+    at 'tomorrow 03:00'; set_flag asiri
+    run "$SCRIPT" gate
+    [ "$(flag)" = drain ]
+    set_flag archon
+    at 'tomorrow 03:15'
+    run "$SCRIPT" gate
+    [[ "$output" == *"flag changed by hand"* ]]
+    [ "$(flag)" = archon ]
+    at 'tomorrow 06:30'
+    run "$SCRIPT" gate
+    [ "$(flag)" = archon ] && [ ! -e "$T/state/lameduck" ]
+}
+
+@test "lameduck: a drain someone else set is never taken over" {
+    pending
+    touch "$T/home/.claude/projects/p/now.jsonl"
+    set_flag drain; cp "$FLAG" "$T/flag.before"
+    run "$SCRIPT" gate
+    [[ "$output" == *"flag already drain (not set by the lameduck)"* ]]
+    [ ! -e "$T/state/lameduck" ]
+    at 'today 06:30'
+    run "$SCRIPT" gate
+    cmp "$FLAG" "$T/flag.before"
+}
+
+@test "lameduck: ends when the reboot is no longer pending or the hold file appears" {
+    pending
+    touch "$T/home/.claude/projects/p/now.jsonl"
+    run "$SCRIPT" gate
+    [ "$(flag)" = drain ]
+    mkdir -p "$T/home/.config/safe-reboot"; touch "$T/home/.config/safe-reboot/hold"
+    run "$SCRIPT" gate
+    [ "$(flag)" = asiri ] && [ ! -e "$T/state/lameduck" ]
+    rm "$T/home/.config/safe-reboot/hold"
+    run "$SCRIPT" gate
+    [ "$(flag)" = drain ]
+    rm "$T/reboot-required"
+    run "$SCRIPT" gate
+    [ "$(flag)" = asiri ] && [ ! -e "$T/state/lameduck" ]
+}
+
+@test "lameduck: the reboot carries its saved flag into the restore" {
+    pending
+    run "$SCRIPT" gate
+    [ -e "$T/reboot.log" ]
+    grep -qx 'flag_prev=asiri' "$T/state/restore/meta"
+    grep -qx 'flag_written=1' "$T/state/restore/meta"
+    grep -qx 'lameduck=1' "$T/state/restore/meta"
+    echo boot-2 > "$T/boot_id"
+    run "$SCRIPT" restore
+    [ "$(flag)" = asiri ] && [ ! -e "$T/state/lameduck" ]
+}
+
+@test "lameduck: a boot the gate did not cause puts the flag back at restore" {
+    pending
+    touch "$T/home/.claude/projects/p/now.jsonl"
+    run "$SCRIPT" gate
+    [ "$(flag)" = drain ]
+    echo boot-2 > "$T/boot_id"
+    run "$SCRIPT" restore
+    [[ "$output" == *"nothing recorded"* ]]
+    [ "$(flag)" = asiri ] && [ ! -e "$T/state/lameduck" ]
+}
+
+@test "lameduck: a recorded reboot that never happened keeps the drain inside the window" {
+    pending
+    run "$SCRIPT" gate
+    [ "$(flag)" = drain ]
+    touch -d '30 minutes ago' "$T/state/restore/meta"
+    export SAFE_REBOOT_NOW=$(date +%s)
+    # the window around the real clock, so the check above and in_window agree
+    export SAFE_REBOOT_WINDOW="$(date -d '-1 hour' +%H:%M)-$(date -d '+1 hour' +%H:%M)"
+    touch "$T/home/.claude/projects/p/now.jsonl"
+    run "$SCRIPT" gate
+    [[ "$output" == *"the lameduck drain stays until the window closes"* ]]
+    [ "$(flag)" = drain ] && [ -e "$T/state/lameduck" ] && [ ! -e "$T/state/restore" ]
+}
+
+# ------------------------------------------------------------ cold mode ----
+
+@test "cold mode: arms the RTC wake alarm, checks it, powers off instead of rebooting" {
+    pending
+    export SAFE_REBOOT_MODE=cold SAFE_REBOOT_WAKE_S=120
+    before=$(date +%s)
+    run "$SCRIPT" gate
+    [ "$status" -eq 0 ]
+    [ -e "$T/poweroff.log" ] && [ ! -e "$T/reboot.log" ]
+    w=$(cat "$T/wakealarm")
+    [ "$w" -ge $(( before + 120 )) ] && [ "$w" -le $(( $(date +%s) + 120 )) ]
+    [[ "$output" == *"RTC wake alarm set"* ]]
+    grep -qx 'mode=cold' "$T/state/restore/meta"
+    grep -q 'cold: power off + RTC wake' "$T/ntfy.log"
+}
+
+@test "cold mode: an alarm that cannot be armed or does not read back falls back to warm" {
+    pending
+    export SAFE_REBOOT_MODE=cold
+    SAFE_REBOOT_RTC_WAKEALARM="$T/no/such/dir/wakealarm" run "$SCRIPT" gate
+    [[ "$output" == *"cannot write"* ]]
+    [[ "$output" == *"falling back to a warm reboot"* ]]
+    [ -e "$T/reboot.log" ] && [ ! -e "$T/poweroff.log" ]
+    grep -qx 'mode=warm' "$T/state/restore/meta"
+    # writes accepted, nothing reads back (the RTC ignored it)
+    rm -rf "$T/state/restore" "$T/reboot.log"
+    SAFE_REBOOT_RTC_WAKEALARM=/dev/null run "$SCRIPT" gate
+    [[ "$output" == *"not armed"* ]]
+    [ -e "$T/reboot.log" ] && [ ! -e "$T/poweroff.log" ]
+}
+
+@test "cold mode: set in the config file (grepped, not sourced), reported by status" {
+    pending
+    printf '# test\nSAFE_REBOOT_MODE=cold  # attended test passed\nSAFE_REBOOT_WAKE_S=180\n' > "$T/safe-reboot.conf"
+    run "$SCRIPT" status
+    [[ "$output" == *"mode cold"* ]]
+    [[ "$output" == *"arm the RTC wake alarm ($T/wakealarm, +180s), $T/bin/poweroff-stub"* ]]
+    [ ! -e "$T/wakealarm" ] && [ ! -e "$T/poweroff.log" ]
+    # default is warm
+    rm "$T/safe-reboot.conf"
+    run "$SCRIPT" status
+    [[ "$output" == *"mode warm"* ]]
+}
+
+@test "cold mode: power-off failure clears the alarm and reports" {
+    pending
+    export SAFE_REBOOT_MODE=cold
+    STUB_POWEROFF_RC=1 run "$SCRIPT" gate
+    [ "$(cat "$T/wakealarm")" = 0 ]
+    grep -q 'Reboot FAILED' "$T/ntfy.log"
 }

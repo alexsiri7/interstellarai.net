@@ -10,6 +10,9 @@ After=network-online.target user@1000.service systemd-user-sessions.service
 
 [Service]
 Type=oneshot
+# Optional, root-owned, not installed: SAFE_REBOOT_* settings (e.g.
+# SAFE_REBOOT_MODE=cold), see ops/host/README.md "Safe reboot".
+EnvironmentFile=-/etc/default/safe-reboot
 ExecStart=/usr/local/sbin/safe-reboot restore
 TimeoutStartSec=15min
 RemainAfterExit=yes

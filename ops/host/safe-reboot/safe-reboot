@@ -18,14 +18,29 @@
 #                            a process that merely mentions the path, e.g. an
 #                            editor, `tail`, `grep` or a claude prompt, does
 #                            not count); apt, dpkg or unattended-upgrade running
-#   soft (overridden by the  archon runs running or paused (in the DB of the
-#         deadline)          user the run-as flag names); an `archon workflow
+#   soft (overridden by the  archon runs running (in the DB of the user the
+#         deadline)          run-as flag names; paused runs are durable and
+#                            resumable after boot, so they do not block --
+#                            `status` lists them as info); an `archon workflow
 #                            run` process; a Claude transcript (.jsonl under any
 #                            user's ~/.claude/projects) written in the last
 #                            SAFE_REBOOT_ACTIVE_MIN (30) minutes; a maintenance
 #                            job or apt/dpkg process running for longer than
 #                            SAFE_REBOOT_JOB_MAX_H (12) hours (`ps -o etimes=`):
 #                            these take minutes to an hour, so it looks stuck
+# Lameduck: while a reboot is pending, from SAFE_REBOOT_PREDRAIN_MIN (60)
+# minutes before the window opens until it closes (deadline or not: the forced
+# reboot only happens in the window anyway), the gate sets the run-as flag to
+# drain, so the factory launches nothing new and its running work finishes
+# before the window
+# (until 2026-11 the flag was drained only at the moment of rebooting, and the
+# factory kept the host busy every night until the 72h deadline). The previous
+# value is kept in $STATE/lameduck and put back when the window closes without a
+# reboot (only if the flag is still our drain), when the reboot stops being
+# pending or the hold file appears, or by the restore after the reboot. A drain
+# someone else set is never touched; a flag changed by hand during the lameduck
+# is left alone until the next night. One low-priority ntfy per pending reboot.
+# SAFE_REBOOT_LAMEDUCK=0 turns it off (drain only at the moment of rebooting).
 # Before rebooting it saves the run-as flag and sets it to drain (never
 # overwriting a drain someone else set), re-checks archon, records the owner's
 # running user services and interactive Claude sessions (cwd, session id, tmux
@@ -34,6 +49,18 @@
 # urgent warning ntfy, then the reboot on the next tick at least 10 minutes
 # later (touch the hold file in between to veto). While a reboot is pending and
 # has not happened, one ntfy a day (from 07:00) says since when and why.
+#
+# SAFE_REBOOT_MODE=warm|cold (default warm). cold: after the sync, arm the RTC
+# wake alarm for now + SAFE_REBOOT_WAKE_S (120) seconds through
+# SAFE_REBOOT_RTC_WAKEALARM (/sys/class/rtc/rtc0/wakealarm), read it back, and
+# power off (SAFE_REBOOT_POWEROFF_CMD, systemctl poweroff) instead of a warm
+# reboot: this board (MSI Z370-A PRO, BIOS 2.D0) hangs in firmware/POST on
+# unattended warm reboots after 5+ days up (Sep 25, Oct 5, Oct 15, Nov 1; the
+# iTCO watchdog did not recover it), and only a power cycle clears that. If the
+# alarm cannot be armed or does not read back, it logs that and reboots warm.
+# Set it in /etc/default/safe-reboot (SAFE_REBOOT_CONF; root-owned, read by the
+# units as an EnvironmentFile and grepped -- never sourced -- by `status`), and
+# only after an attended test showed the host powers back on by itself.
 #
 # restore: puts the flag back, makes sure the right archon-serve unit (system
 # unit under ARCHON_RUN_AS=archon, the owner's user unit otherwise) answers,
@@ -87,6 +114,23 @@ APT_RE="${SAFE_REBOOT_APT_RE:-^(/usr/bin/)?(dpkg|apt|apt-get|aptitude)( |$)|/usr
 RUNS_PROC_RE='archon workflow run |cli\.ts workflow run '
 # A maintenance job / apt process older than this is stuck: soft, not hard.
 JOB_MAX_H="${SAFE_REBOOT_JOB_MAX_H:-12}"
+
+# Lameduck (pre-drain): 1 = on; minutes before the window opens it starts.
+LAMEDUCK="${SAFE_REBOOT_LAMEDUCK:-1}"
+PREDRAIN_MIN="${SAFE_REBOOT_PREDRAIN_MIN:-60}"
+LD_FILE="$STATE/lameduck"
+# Reboot mode. The units read $CONF as an EnvironmentFile; for a run by hand
+# (`status`) the two mode settings are grepped out of it, never sourced.
+CONF="${SAFE_REBOOT_CONF:-/etc/default/safe-reboot}"
+conf_get() {
+    [ -r "$CONF" ] || return 0
+    sed -nE "s/^[[:space:]]*$1=[\"']?([A-Za-z0-9_.-]*)[\"']?[[:space:]]*(#.*)?\$/\\1/p" "$CONF" | tail -n 1
+}
+MODE="${SAFE_REBOOT_MODE:-$(conf_get SAFE_REBOOT_MODE)}"; MODE="${MODE:-warm}"
+WAKE_S="${SAFE_REBOOT_WAKE_S:-$(conf_get SAFE_REBOOT_WAKE_S)}"; WAKE_S="${WAKE_S:-120}"
+[[ "$WAKE_S" =~ ^[0-9]+$ ]] && [ "$WAKE_S" -ge 30 ] || WAKE_S=120
+RTC_WAKEALARM="${SAFE_REBOOT_RTC_WAKEALARM:-/sys/class/rtc/rtc0/wakealarm}"
+POWEROFF_CMD="${SAFE_REBOOT_POWEROFF_CMD:-systemctl poweroff}"
 
 TOOL="${SAFE_REBOOT_TOOL:-safe-reboot}"
 NOW="${SAFE_REBOOT_NOW:-$(date +%s)}"
@@ -219,12 +263,11 @@ runs_count() {
 check_archon() {
     local flag="$1" who st n p
     case "$flag" in archon) who="$FACTORY_USER" ;; unknown) add "soft:run-as flag $FLAG_FILE unreadable"; return 0 ;; *) who="$OWNER" ;; esac
-    for st in running paused; do
-        n=$(runs_count "$st" "$flag")
-        [ "$n" = 0 ] && continue
-        if [ "$n" = unknown ]; then add "soft:archon $st runs in $who's DB: unknown (query failed)"
-        else add "soft:archon: $n $st run(s) in $who's DB"; fi
-    done
+    # Only running runs: a paused run is durable in the DB and resumable after
+    # boot, and it never finishes by itself (it blocked every tick of Oct 28-31).
+    n=$(runs_count running "$flag")
+    if [ "$n" = unknown ]; then add "soft:archon running runs in $who's DB: unknown (query failed)"
+    elif [ "$n" != 0 ]; then add "soft:archon: $n running run(s) in $who's DB"; fi
     p=$(pgrep -fc -- "$RUNS_PROC_RE" 2>/dev/null || true)
     [ "${p:-0}" -gt 0 ] && add "soft:$p 'archon workflow run' process(es)"
     return 0
@@ -251,7 +294,7 @@ evaluate() {  # fills REASONS
     REASONS=""; UNREAD_NOTE=""
     check_hold
     check_jobs
-    check_archon "$(flag_read)"
+    check_archon "$(archon_flag)"
     check_claude
 }
 reasons_of() { grep "^$1:" <<<"$REASONS" | cut -d: -f2-; }
@@ -262,6 +305,83 @@ in_window() {
     s=$(hm_to_min "${WINDOW%-*}"); e=$(hm_to_min "${WINDOW#*-}"); n=$(hm_to_min "$(date -d "@$NOW" +%H:%M)")
     if [ "$s" -le "$e" ]; then [ "$n" -ge "$s" ] && [ "$n" -lt "$e" ]
     else [ "$n" -ge "$s" ] || [ "$n" -lt "$e" ]; fi
+}
+
+# ------------------------------------------------------------- lameduck ----
+# $LD_FILE (boot_id, at, flag_prev) exists while the gate holds the factory
+# drained ahead of / during the window. The drain is ours only while the flag
+# still says drain with our mark in it.
+ld_get() { sed -n "s/^$1=//p" "$LD_FILE" 2>/dev/null; }
+lameduck_on() { [ -r "$LD_FILE" ] && [ "$(ld_get boot_id)" = "$(boot_id)" ] && [ "$(flag_read)" = drain ] && flag_ours; }
+# archon_flag — whose run DB to ask: under our lameduck drain, the user the
+# flag named before it (archon after the cutover), else the flag itself.
+archon_flag() { if lameduck_on; then ld_get flag_prev; else flag_read; fi; }
+
+# predrain_now — within PREDRAIN_MIN minutes before the window opens.
+predrain_now() {
+    local s n d
+    s=$(hm_to_min "${WINDOW%-*}"); n=$(hm_to_min "$(date -d "@$NOW" +%H:%M)")
+    d=$(( (s - n + 1440) % 1440 ))
+    [ "$d" -gt 0 ] && [ "$d" -le "$PREDRAIN_MIN" ]
+}
+lameduck_start_hm() { local s=$(( ($(hm_to_min "${WINDOW%-*}") - PREDRAIN_MIN + 1440) % 1440 )); printf '%02d:%02d' $(( s / 60 )) $(( s % 60 )); }
+
+# lameduck_end <reason> — put the flag back (only if it is still our drain).
+lameduck_end() {
+    [ -e "$LD_FILE" ] || return 0
+    local prev; prev=$(ld_get flag_prev)
+    if [ "$DRY" -eq 1 ]; then line "lameduck: would end ($1) and put ARCHON_RUN_AS=$prev back"; return 0; fi
+    if [ "$(flag_read)" = drain ] && flag_ours; then
+        if flag_write "$prev" "# Written by $FLAG_MARK (lameduck ended: $1) — read by ops/cron/lib/run-as.sh"; then
+            log "lameduck ended ($1): flag back to ARCHON_RUN_AS=$prev"
+        else log "WARNING: lameduck ended ($1) but the flag could not be put back to $prev"; return 1; fi
+    else
+        log "lameduck ended ($1): flag changed since ($(flag_read)) — left alone"
+    fi
+    rm -f "$LD_FILE"
+}
+
+# lameduck_tick <since> — start, keep or end the pre-drain. Only from
+# PREDRAIN_MIN before the window to its end, past the deadline too: the forced
+# reboot happens only in the window, so draining earlier only idles the factory.
+lameduck_tick() {
+    local since=$1 flag why=""
+    if [ -e "$LD_FILE" ] && [ "$(ld_get boot_id)" != "$(boot_id)" ]; then
+        lameduck_end "left over from an earlier boot"
+    fi
+    if [ "$LAMEDUCK" != 1 ]; then why="off (SAFE_REBOOT_LAMEDUCK=$LAMEDUCK)"
+    elif [ -e "$HOLD" ]; then why="hold file"
+    elif ! in_window && ! predrain_now; then why="window closed"; fi
+    if [ -n "$why" ]; then
+        if [ -e "$LD_FILE" ]; then lameduck_end "$why"
+        elif [ "$LAMEDUCK" = 1 ] && [ "$why" = "window closed" ]; then line "lameduck: starts at $(lameduck_start_hm) (${PREDRAIN_MIN}m before the window $WINDOW)"
+        else line "lameduck: $why"; fi
+        return 0
+    fi
+    # Due now.
+    flag=$(flag_read)
+    if [ -e "$LD_FILE" ]; then
+        if lameduck_on; then line "lameduck: active since $(fmt_ts "$(ld_get at)") — ARCHON_RUN_AS=drain (was $(ld_get flag_prev); put back when the window closes or after the reboot)"
+        else line "lameduck: flag changed by hand since $(fmt_ts "$(ld_get at)") (now $flag) — not draining again until the next window"; fi
+        return 0
+    fi
+    case "$flag" in
+        unknown) line "lameduck: cannot read $FLAG_FILE — not draining"; return 0 ;;
+        drain)   line "lameduck: flag already drain (not set by the lameduck) — left alone"; return 0 ;;
+    esac
+    local when="window $WINDOW"
+    if [ "$DRY" -eq 1 ]; then line "lameduck: would set ARCHON_RUN_AS=drain now (was $flag; $when)"; return 0; fi
+    # The state file before the flag: whatever happens next, the old value is on disk.
+    printf 'boot_id=%s\nat=%s\nflag_prev=%s\n' "$(boot_id)" "$NOW" "$flag" > "$LD_FILE"
+    if ! flag_write drain "# Written by $FLAG_MARK lameduck: reboot pending (was ARCHON_RUN_AS=$flag; put back when the window closes or after the reboot) — read by ops/cron/lib/run-as.sh"; then
+        log "WARNING: lameduck: could not set the flag to drain"; rm -f "$LD_FILE"; return 0
+    fi
+    log "lameduck: flag ARCHON_RUN_AS=drain (was $flag; $when) — no new archon work until the reboot"
+    if [ "$(cat "$STATE/lameduck-notified" 2>/dev/null)" != "$since" ]; then
+        notify "Draining the factory on $(hostname) for a reboot" \
+            "Reboot pending since $(fmt_ts "$since"); ARCHON_RUN_AS=drain (was $flag) so running work finishes before the window $WINDOW. Put back when the window closes without a reboot, or after it. Veto: touch $HOLD" low arrows_counterclockwise
+        echo "$since" > "$STATE/lameduck-notified"
+    fi
 }
 
 # pending_since — epoch this boot first saw reboot-required. Persisted in
@@ -370,7 +490,8 @@ PY
 # --------------------------------------------------------------- the gate ---
 ABORT_FLAG_PREV=""
 restore_flag_on_abort() {
-    [ -n "$ABORT_FLAG_PREV" ] || return 0
+    # Always drop the record: a reboot that did not go ahead is not pending.
+    [ -n "$ABORT_FLAG_PREV" ] || { rm -rf "$STATE/restore"; return 0; }
     if flag_ours; then
         flag_write "$ABORT_FLAG_PREV" "# Written by safe-reboot (reboot aborted, flag put back) — read by ops/cron/lib/run-as.sh" \
             && log "flag put back to ARCHON_RUN_AS=$ABORT_FLAG_PREV (reboot aborted)"
@@ -390,7 +511,13 @@ cmd_gate() {
        && [ $(( NOW - $(stat -c %Y "$STATE/restore/meta") )) -gt 1200 ]; then
         ABORT_FLAG_PREV=$(sed -n 's/^flag_prev=//p' "$STATE/restore/meta")
         [ "$(sed -n 's/^flag_written=//p' "$STATE/restore/meta")" = 1 ] || ABORT_FLAG_PREV=""
-        log "a reboot recorded 20+ minutes ago on this boot never happened — undoing the drain"
+        if [ "$(sed -n 's/^lameduck=//p' "$STATE/restore/meta")" = 1 ]; then
+            # The drain is the lameduck's: it ends when the window closes.
+            ABORT_FLAG_PREV=""
+            log "a reboot recorded 20+ minutes ago on this boot never happened — the lameduck drain stays until the window closes"
+        else
+            log "a reboot recorded 20+ minutes ago on this boot never happened — undoing the drain"
+        fi
         restore_flag_on_abort; rm -rf "$STATE/restore"
         notify "Reboot did not happen on $(hostname)" "safe-reboot recorded a reboot on this boot that never took place; the archon flag was put back. Check: journalctl -u safe-reboot.service" high warning
     fi
@@ -408,14 +535,15 @@ cmd_gate() {
             flag_write "$p" "# Written by $FLAG_MARK (restore had not run after the reboot) — read by ops/cron/lib/run-as.sh" \
                 && log "flag back to ARCHON_RUN_AS=$p"
         fi
-        rm -rf "$STATE/restored.last"; mv "$STATE/restore" "$STATE/restored.last"
+        rm -rf "$STATE/restored.last"; mv "$STATE/restore" "$STATE/restored.last"; rm -f "$LD_FILE"
         notify "safe-reboot restore did not run on $(hostname)" \
             "The state recorded before the last reboot was never restored (journalctl -u safe-reboot-restore.service -b -1). Flag: $(flag_read). Services and Claude sessions were NOT restarted: see $STATE/restored.last." high warning
     fi
 
     if [ ! -e "$REBOOT_REQUIRED" ]; then
         log "no reboot pending ($REBOOT_REQUIRED absent)"
-        if [ "$DRY" -eq 0 ]; then rm -f "$STATE/pending-since" "$STATE/force-warned" "$STATE/last-blocked"; return 0; fi
+        lameduck_end "no reboot pending"
+        if [ "$DRY" -eq 0 ]; then rm -f "$STATE/pending-since" "$STATE/force-warned" "$STATE/last-blocked" "$STATE/lameduck-notified"; return 0; fi
         line "(status: evaluating as if one had just become pending)"
         since=$NOW
     else
@@ -424,13 +552,21 @@ cmd_gate() {
     age=$(( NOW - since ))
     [ "$age" -gt $(( DEADLINE_H * 3600 )) ] && overdue=1
     pkgs=$( [ -r "$REBOOT_REQUIRED.pkgs" ] && sort -u "$REBOOT_REQUIRED.pkgs" | paste -sd' ' )
-    log "reboot pending since $(fmt_ts "$since") ($(( age / 3600 ))h; deadline ${DEADLINE_H}h${pkgs:+; $pkgs})"
+    log "reboot pending since $(fmt_ts "$since") ($(( age / 3600 ))h; deadline ${DEADLINE_H}h; mode $(reboot_mode)${pkgs:+; $pkgs})"
 
+    lameduck_tick "$since"
     evaluate
     local hard soft
     hard=$(reasons_of hard); soft=$(reasons_of soft)
     [ -n "$UNREAD_NOTE" ] && line "note: $UNREAD_NOTE"
     if [ -n "$REASONS" ]; then line "busy:"; grep -v '^$' <<<"$REASONS" | sed 's/^/      - /'; else line "idle: nothing blocks a reboot"; fi
+    if [ "$DRY" -eq 1 ]; then
+        local af np; af=$(archon_flag)
+        if [ "$af" != unknown ]; then
+            np=$(runs_count paused "$af")
+            [ "$np" != 0 ] && line "info: archon paused run(s): $np — durable in the DB, resumable after boot; not a blocker"
+        fi
+    fi
 
     if ! in_window; then
         line "outside the window $WINDOW — no reboot now"
@@ -480,23 +616,58 @@ daily_ntfy() {  # since overdue
 
 dry_reboot_plan() {
     local flag tmp; flag=$(flag_read); tmp=$(mktemp -d)
-    line "would: save ARCHON_RUN_AS=$flag$( [ "$flag" = drain ] && echo ' (already drain: left as is, restored as drain)' || echo ', set drain')"
-    line "would: re-check archon runs, record, ntfy, sync, $REBOOT_CMD"
+    if lameduck_on; then line "would: keep the lameduck drain, restored as ARCHON_RUN_AS=$(ld_get flag_prev) after boot"
+    else line "would: save ARCHON_RUN_AS=$flag$( [ "$flag" = drain ] && echo ' (already drain: left as is, restored as drain)' || echo ', set drain')"; fi
+    line "would: re-check archon runs, record, ntfy, sync, $( [ "$(reboot_mode)" = cold ] && echo "arm the RTC wake alarm ($RTC_WAKEALARM, +${WAKE_S}s), $POWEROFF_CMD (cold; warm $REBOOT_CMD if the alarm does not arm)" || echo "$REBOOT_CMD" )"
     record_services "$tmp/s" 2>/dev/null; record_sessions "$tmp/c" 2>/dev/null
     line "would restore user services after boot:"; sed 's/^/      - /' "$tmp/s"; [ -s "$tmp/s" ] || line "  (none)"
     line "would resume Claude sessions after boot:"; awk -F'\t' '{printf "      - %s %s in %s (tmux %s:%s %s) %s\n", $1, $2, $3, $4, $5, $6, $7}' "$tmp/c"; [ -s "$tmp/c" ] || line "  (none)"
     rm -rf "$tmp"
 }
 
+# reboot_mode — warm|cold (anything else is warm, with a warning).
+reboot_mode() {
+    case "$MODE" in warm|cold) echo "$MODE" ;; *) echo warm ;; esac
+}
+
+# arm_wake — set the RTC wake alarm to now + WAKE_S and check it reads back.
+# The sysfs file refuses a new alarm while one is set: clear it first.
+WAKE_ARMED=0
+arm_wake() {
+    local now t rb
+    now=$(date +%s); t=$(( now + WAKE_S ))
+    if ! { echo 0 > "$RTC_WAKEALARM" && echo "$t" > "$RTC_WAKEALARM"; } 2>/dev/null; then
+        log "cold: cannot write $RTC_WAKEALARM"; return 1
+    fi
+    rb=$(cat "$RTC_WAKEALARM" 2>/dev/null)
+    if [[ "$rb" =~ ^[0-9]+$ ]] && [ "$rb" -gt "$now" ]; then
+        WAKE_ARMED=1
+        log "cold: RTC wake alarm set for $(date -d "@$rb" '+%F %T') (read back from $RTC_WAKEALARM)"
+        return 0
+    fi
+    log "cold: $RTC_WAKEALARM read back '${rb}' after writing $t — not armed"
+    echo 0 > "$RTC_WAKEALARM" 2>/dev/null
+    return 1
+}
+
 do_reboot() {  # since forced
-    local flag written=0
+    local flag prev written=0 ld=0
     flag=$(flag_read)
     if [ "$flag" = unknown ]; then log "cannot read $FLAG_FILE — not rebooting"; return 1; fi
+    # Under the lameduck the flag is already our drain: the value to put back
+    # after boot is the one the lameduck saved.
+    prev=$flag
+    if lameduck_on; then ld=1; prev=$(ld_get flag_prev); fi
     rm -rf "$STATE/restore"; mkdir -p "$STATE/restore"; chmod 0700 "$STATE/restore"
     # meta before the flag: whatever happens next, the previous value is on disk.
-    printf 'boot_id=%s\nat=%s\nflag_prev=%s\nflag_written=0\nforced=%s\n' "$(boot_id)" "$NOW" "$flag" "$2" > "$STATE/restore/meta"
+    printf 'boot_id=%s\nat=%s\nflag_prev=%s\nflag_written=%s\nlameduck=%s\nforced=%s\nmode=%s\n' \
+        "$(boot_id)" "$NOW" "$prev" "$ld" "$ld" "$2" "$(reboot_mode)" > "$STATE/restore/meta"
     trap 'restore_flag_on_abort' EXIT
-    if [ "$flag" != drain ]; then
+    if [ "$ld" -eq 1 ]; then
+        # ABORT_FLAG_PREV stays empty: an aborted reboot leaves the lameduck drain
+        # in place, and the lameduck puts it back when the window closes.
+        log "flag: drain since the lameduck began (was $prev)"
+    elif [ "$flag" != drain ]; then
         ABORT_FLAG_PREV="$flag"
         if ! flag_write drain "# Written by $FLAG_MARK before a reboot (was ARCHON_RUN_AS=$flag; put back after boot) — read by ops/cron/lib/run-as.sh"; then
             log "could not set the flag to drain — not rebooting"; return 1
@@ -508,7 +679,7 @@ do_reboot() {  # since forced
     fi
     # A cron tick may have launched a run between the check and the drain.
     if [ "$2" -eq 0 ]; then
-        REASONS=""; check_archon "$flag"
+        REASONS=""; check_archon "$prev"
         if [ -n "$REASONS" ]; then log "archon became busy after the drain ($(reasons_csv)) — not rebooting"; return 0; fi
     fi
     record_services "$STATE/restore/services.tsv"
@@ -516,16 +687,24 @@ do_reboot() {  # since forced
     log "recorded $(wc -l < "$STATE/restore/services.tsv") user service(s), $(wc -l < "$STATE/restore/sessions.tsv") Claude session(s)"
     local svc ses
     svc=$(cut -f1 "$STATE/restore/services.tsv" | paste -sd' '); ses=$(cut -f3 "$STATE/restore/sessions.tsv" | xargs -r -n1 basename | paste -sd' ')
-    notify "Rebooting $(hostname)$( [ "$2" -eq 1 ] && echo ' (forced, deadline)')" \
-        "Reboot pending since $(fmt_ts "$1"). Will restore: flag=$flag; services: ${svc:-none}; Claude sessions: ${ses:-none}." default arrows_counterclockwise
+    notify "Rebooting $(hostname)$( [ "$2" -eq 1 ] && echo ' (forced, deadline)')$( [ "$(reboot_mode)" = cold ] && echo ' (cold: power off + RTC wake)')" \
+        "Reboot pending since $(fmt_ts "$1"). Will restore: flag=$prev; services: ${svc:-none}; Claude sessions: ${ses:-none}." default arrows_counterclockwise
     log "sync (up to ${SYNC_TIMEOUT}s)"
     timeout "$SYNC_TIMEOUT" sync || log "WARNING: sync did not finish in ${SYNC_TIMEOUT}s — rebooting anyway"
     trap - EXIT; ABORT_FLAG_PREV=""
-    log "rebooting: $REBOOT_CMD"
+    local cmd="$REBOOT_CMD" what="rebooting"
+    case "$MODE" in warm) ;; cold)
+        if arm_wake; then cmd="$POWEROFF_CMD"; what="powering off for a cold boot (RTC wake in ~${WAKE_S}s)"
+        else log "WARNING: cold mode: the RTC wake alarm could not be armed — falling back to a warm reboot"; fi ;;
+        *) log "WARNING: SAFE_REBOOT_MODE=$MODE is neither warm nor cold — rebooting warm" ;;
+    esac
+    sed -i "s/^mode=.*/mode=$( [ "$cmd" = "$POWEROFF_CMD" ] && [ "$WAKE_ARMED" -eq 1 ] && echo cold || echo warm )/" "$STATE/restore/meta"
+    log "$what: $cmd"
     # shellcheck disable=SC2086  # a command line by design
-    if ! $REBOOT_CMD; then
+    if ! $cmd; then
+        [ "$WAKE_ARMED" -eq 1 ] && { echo 0 > "$RTC_WAKEALARM"; } 2>/dev/null
         ABORT_FLAG_PREV=$( [ "$written" -eq 1 ] && echo "$flag" ); restore_flag_on_abort
-        notify "Reboot FAILED on $(hostname)" "$REBOOT_CMD failed; flag put back. journalctl -u safe-reboot.service" high warning
+        notify "Reboot FAILED on $(hostname)" "$cmd failed; $( [ "$ld" -eq 1 ] && echo 'the lameduck drain stays until the window closes' || echo 'flag put back'). journalctl -u safe-reboot.service" high warning
         return 1
     fi
     return 0
@@ -538,7 +717,13 @@ cmd_restore() {
     [ "$DRY" -eq 1 ] || [ "$IS_ROOT" -eq 1 ] || [ -n "${SAFE_REBOOT_TEST:-}" ] || { echo "restore needs root (or: $TOOL restore --dry-run)" >&2; exit 1; }
     local meta="$STATE/restore/meta"
     [ "$DRY" -eq 1 ] || rm -f "$STATE/pending-since" "$STATE/force-warned" "$STATE/daily-notified" "$STATE/last-blocked"
-    if [ ! -r "$meta" ]; then log "nothing recorded — not a safe-reboot reboot"; return 0; fi
+    if [ ! -r "$meta" ]; then
+        log "nothing recorded — not a safe-reboot reboot"
+        # A boot the gate did not cause, in the middle of a lameduck: undo it
+        # (the gate drains again if the reboot is still pending and due).
+        lameduck_end "host rebooted outside the gate"
+        return 0
+    fi
     local prev written same_boot=0 i st
     prev=$(sed -n 's/^flag_prev=//p' "$meta"); written=$(sed -n 's/^flag_written=//p' "$meta")
     grep -qx "boot_id=$(boot_id)" "$meta" && same_boot=1
@@ -582,6 +767,7 @@ cmd_restore() {
         else flagmsg="flag changed by hand since ($(flag_read)) — left alone"; fi
     fi
     log "$flagmsg"
+    [ "$DRY" -eq 1 ] || rm -f "$LD_FILE" "$STATE/lameduck-notified"   # meta carried the lameduck's flag_prev
 
     # 4. user services (--no-block: the NAS mirror runs for hours).
     local restored=() u how tgt
@@ -656,6 +842,6 @@ case "${1:-}" in
     status|--dry-run|-n) DRY=1; log "status (dry-run: nothing is changed, no ntfy is sent)"; cmd_gate ;;
     gate) cmd_gate ;;
     restore) [ "${2:-}" = --dry-run ] && DRY=1; cmd_restore ;;
-    -h|--help) sed -n '2,40p' "$0" ;;
+    -h|--help) sed -n '2,76p' "$0" ;;
     *) echo "usage: $TOOL status|gate|restore [--dry-run]" >&2; exit 2 ;;
 esac

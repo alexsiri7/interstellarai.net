@@ -8,6 +8,9 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+# Optional, root-owned, not installed: SAFE_REBOOT_* settings (e.g.
+# SAFE_REBOOT_MODE=cold), see ops/host/README.md "Safe reboot".
+EnvironmentFile=-/etc/default/safe-reboot
 ExecStart=/usr/local/sbin/safe-reboot gate
 # The gate records tmux panes (/tmp/tmux-<uid>) and user units: no PrivateTmp.
 TimeoutStartSec=30min

@@ -46,7 +46,7 @@ later step with its own script and cutover: [`archon-user/README.md`](archon-use
 | 5. smartmontools | `/etc/smartd.conf`, `/usr/local/bin/smartd-ntfy` (0755) from [`smartd-ntfy`](smartd-ntfy) | Installs the package, one `DEVICESCAN` line: all checks, offline testing and attribute autosave on, spun-down disks left alone (`-n standby,q`), short self-test daily 02:00 and long self-test Saturdays 03:00, every alert delivered through `smartd-ntfy` (`-m root -M exec`). `systemctl enable --now smartd`. |
 | 6. NodeSource | `/etc/apt/sources.list.d/nodesource.sources` (backup kept alongside) | Rewrites `node_20.x` (or any other line) to `node_24.x` in the Suites/URIs (Node 20 is EOL, 24 is the current LTS line), `apt-get update`, `apt-get install -y nodejs`. |
 | 7. reboot | — | Prints whether `/var/run/reboot-required` exists (and which packages set it), and the gate's current decision. |
-| 8. safe-reboot | `/usr/local/sbin/safe-reboot` (0755) from [`safe-reboot/safe-reboot`](safe-reboot/safe-reboot); `/etc/systemd/system/safe-reboot.{service,timer}`, `safe-reboot-restore.service`; `/var/lib/safe-reboot/` | The reboot gate (every 15 min) and the restore after boot, see [Safe reboot](#safe-reboot) below. `systemctl enable --now safe-reboot.timer`, `systemctl enable safe-reboot-restore.service` (runs at the next boot). |
+| 8. safe-reboot | `/usr/local/sbin/safe-reboot` (0755) from [`safe-reboot/safe-reboot`](safe-reboot/safe-reboot); `/etc/systemd/system/safe-reboot.{service,timer}`, `safe-reboot-restore.service`; `/var/lib/safe-reboot/` | The reboot gate (every 15 min) and the restore after boot, see [Safe reboot](#safe-reboot) below. Both units read the optional `/etc/default/safe-reboot` (not installed; e.g. `SAFE_REBOOT_MODE=cold` after an attended test). `systemctl enable --now safe-reboot.timer`, `systemctl enable safe-reboot-restore.service` (runs at the next boot). |
 | 9. systemd-oomd | `/etc/systemd/system/user@.service.d/20-oomd-pressure-limit.conf` from [`20-oomd-pressure-limit.conf`](20-oomd-pressure-limit.conf) | `ManagedOOMMemoryPressure=auto` for every `user@<uid>.service`, i.e. systemd-oomd no longer kills anything in a user manager on memory pressure. Ubuntu's `/usr/lib/systemd/system/user@.service.d/10-oomd-user-service-defaults.conf` sets `kill` at 50%; this drop-in sorts after it and overrides it. Why off rather than a higher limit: on this host the pressure is reclaim waiting on writeback to the root SSD while builds fill the page cache, with 57 GB available: #132's 80% limit was passed at 96% on 2026-09-27 and oomd killed the tmux scope running claude (42 processes). A real out-of-memory is still the kernel OOM killer's. The users with a user manager here are asiri (1000) and gdm (120); the archon factory runs in system units (no linger), so it is unaffected either way. Swap-based kills stay as Ubuntu ships them (`ManagedOOMSwap=auto` on `-.slice`, i.e. off). `daemon-reload` and `systemctl restart systemd-oomd` (kills nothing); never a restart of `user@1000`. Asserts `systemctl show user@1000.service -p ManagedOOMMemoryPressure` is `auto` and that `oomctl` no longer lists `user@1000.service` under Memory Pressure Monitored CGroups. `vm.min_free_kbytes` is left at the kernel default: free memory was ~4 GB when the stall hit, far above the watermarks, so a larger reserve would not have moved it. |
 | 10. sysctl | `/etc/sysctl.d/60-dirty-bytes.conf` from [`60-dirty-bytes.conf`](60-dirty-bytes.conf) | `vm.dirty_background_bytes=268435456` (256 MiB), `vm.dirty_bytes=1073741824` (1 GiB) instead of 10% / 20% of 62 GB RAM, then `sysctl -p` and an assert. |
 | 11. /tmp on the NVMe | `/mnt/ext-fast/.tmp-root` (root:root 1777, no ACL); `/etc/systemd/system/tmp.mount` from [`tmp-on-nvme/tmp.mount`](tmp-on-nvme/tmp.mount); `/run/tmp-on-nvme.defer`; `/var/run/reboot-required{,.pkgs}` | `/tmp` becomes a bind mount of the NVMe dir **from the next boot** (no live remount), and a reboot is marked pending (`tmp-on-nvme` in `.pkgs`) so the safe-reboot gate takes it in its next idle window. Once the bind is active (a re-run after that boot), empties the old `/tmp` on `/` that the bind hides. See [/tmp on the NVMe](#tmp-on-the-nvme) below. |
@@ -182,17 +182,50 @@ window **02:30–06:30**. Then it reboots unless something is busy:
 | **hold file** `~asiri/.config/safe-reboot/hold` | hard | exists (any content; its first line is quoted in the ntfy). Create it to veto reboots (`mkdir -p ~/.config/safe-reboot && touch ~/.config/safe-reboot/hold`), `rm` it to allow them again. It lives in the owner's 0700 config dir, so the `archon` user cannot set or clear it. |
 | a cron job that must not be cut off | hard | `pgrep -f` on `ops/cron/{backup-dbs,restore-test,system-maintenance,archon-update}.sh` and `pipeline-health-cron.sh --trim` (none of them takes a lock). |
 | apt / dpkg | hard | `dpkg`, `apt`, `apt-get`, `aptitude`, `/usr/bin/unattended-upgrade`, `apt.systemd.daily` running (not the `unattended-upgrade-shutdown` daemon). |
-| archon runs | soft | `running` or `paused` runs in the run DB of the user `~asiri/.config/archon-cron/run-as` names: `asiri`/`drain` → asiri's CLI (`bun …/cli.ts workflow runs --all --status …`, as asiri, clean env, `CLAUDECODE=0`, the shape `archon-user/install.sh --cutover` uses); `archon` → `archon-as-archon workflow runs` as archon (the `--rollback` shape). A query that fails counts as busy. Plus any `archon workflow run` process. |
+| archon runs | soft | `running` runs in the run DB of the user `~asiri/.config/archon-cron/run-as` names: `asiri`/`drain` → asiri's CLI (`bun …/cli.ts workflow runs --all --status …`, as asiri, clean env, `CLAUDECODE=0`, the shape `archon-user/install.sh --cutover` uses); `archon` → `archon-as-archon workflow runs` as archon (the `--rollback` shape). A query that fails counts as busy. Plus any `archon workflow run` process. **Paused** runs do not block (since 2026-11): they are durable in the DB, resume after boot, and never finish by themselves; `safe-reboot status` lists them as `info:`. |
 | a Claude session working | soft | any `*.jsonl` under any user's `~/.claude/projects/` modified in the last 30 minutes. A `claude` process by itself is not busy: sessions sit idle in tmux for hours. |
 
 Resumable long jobs (the NAS mirror, rclone) never block: they are restarted afterwards.
+
+**Lameduck (pre-drain).** While a reboot is pending, from `SAFE_REBOOT_PREDRAIN_MIN`
+(60) minutes before the window opens (01:30) until it closes (06:30), the gate sets
+the run-as flag to `drain` (past the 72h deadline too, but no earlier: the forced
+reboot only happens inside the window, so draining all day would only idle the factory).
+It is the same write as below, with `safe-reboot lameduck` in the comment line; the
+previous value is kept in `/var/lib/safe-reboot/lameduck`. The cron scripts then launch nothing new
+and running work finishes before the window. Why: a kernel update set
+`reboot-required` on Wed 28 Oct 06:39, and on the nights of Oct 28–31 every tick
+found the factory busy (a paused run on nearly every tick, running runs and
+`archon workflow run` processes the crons kept launching through the night, recent
+Claude transcripts); the host only rebooted at the deadline, Nov 1 02:45. Until then
+the flag was drained only at the moment of rebooting.
+- It puts the flag back when the window closes without a reboot, when the reboot is
+  no longer pending, when the hold file appears, and in the restore after the reboot
+  (also after a boot the gate did not cause) — each time only if the flag is still
+  its own `drain`. It drains again the next night.
+- A `drain` someone else set is never taken over. A flag changed by hand during the
+  lameduck is left alone, and not drained again until the next night.
+- One low-priority ntfy per pending reboot ("Draining the factory…").
+- `safe-reboot status` prints a `lameduck:` line (when it starts, active since when
+  and the saved value, or why not). `SAFE_REBOOT_LAMEDUCK=0` turns it off (drain only
+  at the moment of rebooting, the pre-2026-11 behaviour).
+- Caveat after the cutover (flag `archon`): `drain` is the cutover's mode, so while it
+  holds, the cron side treats the factory as asiri's for everything but launching
+  (`lib/archon-shim/archon` runs non-launch calls through asiri's CLI; `runas_archon`
+  is false, so the archon-side `worktree-trim` ticks are skipped and a Sunday 03:00
+  `archon-update.sh` would restart asiri's user `archon-serve` rather than the system
+  unit). The factory's own running runs (system `archon-serve`, User=archon) are not
+  affected, and the gate itself asks archon's DB (the saved flag). Before 2026-11 the
+  drain lasted seconds; now it lasts at most the pre-drain plus the window (~5h a night).
 
 When nothing blocks it:
 1. writes `/var/lib/safe-reboot/restore/meta` (boot id, previous flag), then sets the
    run-as flag to `drain` the way `archon-user/install.sh --drain` does (same file
    format, 0600, written as asiri via mktemp + mv), with `safe-reboot` in the comment
-   line. A `drain` already in place (the owner's, or a cutover in progress) is left
-   untouched and restored as `drain`.
+   line. Under the lameduck the flag is already drained: the meta takes the value the
+   lameduck saved, and an aborted reboot leaves the lameduck drain in place. A `drain`
+   already in place (the owner's, or a cutover in progress) is left untouched and
+   restored as `drain`.
 2. re-checks archon (a cron tick may have launched a run in between); if busy, puts the
    flag back and waits for the next tick.
 3. records the owner's running user services that would not come back by themselves
@@ -205,7 +238,8 @@ When nothing blocks it:
    id, cwd, tmux session/window name (from the pane id), and `--permission-mode` /
    `--model` / `--effort` / `--dangerously-skip-permissions` from its command line;
 5. ntfys "Rebooting", runs `sync` (up to 15 min, so the shutdown does not stall on
-   writeback) and `systemctl reboot`. If the reboot command fails, the flag is put back
+   writeback) and `systemctl reboot` (or, in cold mode, powers off with an RTC wake
+   alarm, see below). If the reboot command fails, the flag is put back
    and it ntfys; a recorded reboot that still has not happened 20 minutes later is
    undone on the next tick.
 
@@ -251,7 +285,38 @@ archon-as-archon` door the cron scripts use, but cannot read the archon user's
 did not run after a reboot, the next gate tick puts the flag back (only the flag)
 and ntfys. Window, deadline and paths are
 `SAFE_REBOOT_*` variables at the top of the script (e.g. a
-`systemctl edit safe-reboot.service` drop-in with `Environment=SAFE_REBOOT_WINDOW=01:00-05:00`).
+`systemctl edit safe-reboot.service` drop-in with `Environment=SAFE_REBOOT_WINDOW=01:00-05:00`,
+or a line in `/etc/default/safe-reboot`, below).
+
+**Cold reboot (`SAFE_REBOOT_MODE=cold`, default `warm`).** This board (MSI Z370-A PRO,
+BIOS 2.D0) hangs on unattended *warm* reboots after long uptimes: Sep 25, Oct 5,
+Oct 15 and Nov 1, each after 5+ days up — black screen, no POST, until someone
+power-cycles it by hand. Reboots after short uptimes worked. On Nov 1 the iTCO
+watchdog (`RebootWatchdogSec=3min`, see [Hardware watchdog](#hardware-watchdog)) was
+armed and did not recover it, so the hang is past the kernel, in firmware/POST, and
+only a cold power cycle clears it. In cold mode the gate, after the sync, writes
+`0` and then `now + SAFE_REBOOT_WAKE_S` (120 s) to `/sys/class/rtc/rtc0/wakealarm`,
+reads it back, and runs `systemctl poweroff` instead of `systemctl reboot`; the RTC
+powers the host back on. If the alarm cannot be written or does not read back, it
+logs that and reboots warm (meta records `mode=cold|warm`; a failed power-off clears
+the alarm). The sysfs alarm takes epoch seconds, which is right because the RTC keeps
+UTC here (`timedatectl`: "RTC in local TZ: no", checked 2026-11-01); with an RTC in
+local time it would be off by the UTC offset. Overridable for tests: `SAFE_REBOOT_RTC_WAKEALARM`, `SAFE_REBOOT_POWEROFF_CMD`.
+
+The setting lives in **`/etc/default/safe-reboot`** (root-owned, not created by
+install.sh; both units read it as an optional `EnvironmentFile=-`, and `safe-reboot
+status` greps `SAFE_REBOOT_MODE` / `SAFE_REBOOT_WAKE_S` out of it, never sources it):
+
+```
+echo SAFE_REBOOT_MODE=cold | sudo tee /etc/default/safe-reboot
+```
+
+**Do this only after an attended test** showed the host powers itself back on: the
+firmware has to honour the RTC alarm from S5 (BIOS: *Resume By RTC Alarm* / ErP
+disabled may matter). Attended test, as root, at the desk:
+`echo 0 > /sys/class/rtc/rtc0/wakealarm; echo $(( $(date +%s) + 120 )) > /sys/class/rtc/rtc0/wakealarm; cat /sys/class/rtc/rtc0/wakealarm; systemctl poweroff`
+(or `rtcwake -m no -s 120 && systemctl poweroff`) — it should POST and boot about two
+minutes later. Until then the mode stays `warm`.
 
 ## Hardware watchdog
 
@@ -467,4 +532,5 @@ The other steps can only be exercised with `--dry-run` without root.
 against fake `grub.cfg` files, and checks the grub.d sourcing order.
 `safe-reboot.bats` runs the gate and the restore as a normal user
 (`SAFE_REBOOT_TEST=1`, every path a `SAFE_REBOOT_*` override) against stubbed
-`bun`, `pgrep`, `systemctl`, `systemd-run`, `tmux`, `curl` and reboot command.
+`bun`, `pgrep`, `systemctl`, `systemd-run`, `tmux`, `curl`, reboot and power-off
+commands, and a plain file as the RTC wake alarm.
