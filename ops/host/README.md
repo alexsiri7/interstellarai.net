@@ -208,6 +208,14 @@ the flag was drained only at the moment of rebooting.
 - `safe-reboot status` prints a `lameduck:` line (when it starts, active since when
   and the saved value, or why not). `SAFE_REBOOT_LAMEDUCK=0` turns it off (drain only
   at the moment of rebooting, the pre-2026-11 behaviour).
+- Caveat after the cutover (flag `archon`): `drain` is the cutover's mode, so while it
+  holds, the cron side treats the factory as asiri's for everything but launching
+  (`lib/archon-shim/archon` runs non-launch calls through asiri's CLI; `runas_archon`
+  is false, so the archon-side `worktree-trim` ticks are skipped and a Sunday 03:00
+  `archon-update.sh` would restart asiri's user `archon-serve` rather than the system
+  unit). The factory's own running runs (system `archon-serve`, User=archon) are not
+  affected, and the gate itself asks archon's DB (the saved flag). Before 2026-11 the
+  drain lasted seconds; now it lasts the window (and all day past the deadline).
 
 When nothing blocks it:
 1. writes `/var/lib/safe-reboot/restore/meta` (boot id, previous flag), then sets the
@@ -290,7 +298,9 @@ only a cold power cycle clears it. In cold mode the gate, after the sync, writes
 reads it back, and runs `systemctl poweroff` instead of `systemctl reboot`; the RTC
 powers the host back on. If the alarm cannot be written or does not read back, it
 logs that and reboots warm (meta records `mode=cold|warm`; a failed power-off clears
-the alarm). Overridable for tests: `SAFE_REBOOT_RTC_WAKEALARM`, `SAFE_REBOOT_POWEROFF_CMD`.
+the alarm). The sysfs alarm takes epoch seconds, which is right because the RTC keeps
+UTC here (`timedatectl`: "RTC in local TZ: no", checked 2026-11-01); with an RTC in
+local time it would be off by the UTC offset. Overridable for tests: `SAFE_REBOOT_RTC_WAKEALARM`, `SAFE_REBOOT_POWEROFF_CMD`.
 
 The setting lives in **`/etc/default/safe-reboot`** (root-owned, not created by
 install.sh; both units read it as an optional `EnvironmentFile=-`, and `safe-reboot
