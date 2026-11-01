@@ -11,16 +11,21 @@
 #
 #   source "$SCRIPT_DIR/lib/releases.sh"
 #   release_opted_out <project>      # listed in DAILY_RELEASE_OPT_OUT
-#   release_push_workflow <project>  # 0 + path: its release*.yml runs on push
-#                                    # to main; 1: none does; 2: read failed
+#   release_push_workflow <project>  # 0 + path: a release*.yml runs on push
+#                                    # to main; 1: it has release*.yml, but
+#                                    # none runs on push; 2: read failed;
+#                                    # 3: no release*.yml at all
 #   release_lag_check <project>      # pipeline-health: ntfy once per episode
 #   release_lag_note <project>       # pipeline-status: "" or the repo's line
 #
 # A repo's release workflow is a file on main named
 # .github/workflows/release*.yml|yaml. One that runs on a push to main means
 # the repo releases itself, so the cron leaves it alone. A trigger shape the
-# parser does not read counts as "not on push": the cost is one extra
-# release-* tag, never a missed release.
+# parser does not read counts as "not on push," so daily-release-cron.sh
+# falls back to its own dated release-* tag — but that tag is a changelog
+# marker, not evidence the project's own release channel ran, so a project
+# with its own release*.yml (rc 1) is still tracked by commit age, not by
+# that tag, below.
 #
 # One marker per lagging project in RELEASE_LAG_STATE_DIR/<project>, key=value
 # lines (since, tag, ahead, oldest, notified), cleared once main is released
@@ -133,6 +138,7 @@ release_push_workflow() {
   paths=$(gh api "repos/$RELEASE_OWNER/$project/git/trees/main?recursive=1" \
     --jq '.tree[] | select(.type == "blob") | .path | select(test("^\\.github/workflows/release[^/]*\\.ya?ml$"; "i"))' \
     2>/dev/null) || return 2
+  [ -z "$paths" ] && return 3
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     content=$(gh api "repos/$RELEASE_OWNER/$project/contents/$path?ref=main" --jq '.content' 2>/dev/null \
@@ -148,19 +154,32 @@ release_push_workflow() {
 
 # release_lag_check <project> — commits on main not in the newest release-*
 # tag by name (the one daily-release-cron.sh counts from), the oldest of them committed over RELEASE_LAG_SECONDS ago (a repo with
-# no tag: any commit that old), on a project the cron would release. Needs
-# log and notify_checked from the caller.
+# no tag: any commit that old), on a project the cron would release. A
+# project with its own release*.yml (any trigger shape) ignores release-*
+# tags entirely here, even one this cron just created as a changelog
+# fallback: that tag is not evidence the project's real release channel ran.
+# Needs log and notify_checked from the caller.
 release_lag_check() {
-  local project="$1" now cutoff refs tag="" out ahead oldest f
+  local project="$1" now cutoff refs tag="" out ahead oldest f rc=0 wf
   now=$(release_now)
   cutoff=$(date -u -d "@$((now - RELEASE_LAG_SECONDS))" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null) || return 0
   f="$RELEASE_LAG_STATE_DIR/$project"
-  if ! refs=$(gh api --paginate "repos/$RELEASE_OWNER/$project/git/matching-refs/tags/release-" \
+
+  wf=$(release_push_workflow "$project") || rc=$?
+  case "$rc" in
+    0) _release_lag_clear "$project" "$wf releases on push to main"; return 0 ;;
+    2) log "release-lag: $project — could not read release workflows, skipping"; return 0 ;;
+  esac
+
+  if [ "$rc" = 1 ]; then
+    tag=""
+  elif ! refs=$(gh api --paginate "repos/$RELEASE_OWNER/$project/git/matching-refs/tags/release-" \
         --jq '.[].ref' 2>/dev/null); then
     log "release-lag: $project — could not list release tags, skipping"
     return 0
+  else
+    tag=$(printf '%s\n' "$refs" | sed -n 's#^refs/tags/##p' | LC_ALL=C sort | tail -n1)
   fi
-  tag=$(printf '%s\n' "$refs" | sed -n 's#^refs/tags/##p' | LC_ALL=C sort | tail -n1)
   if [ -n "$tag" ]; then
     out=$(gh api "repos/$RELEASE_OWNER/$project/compare/$tag...main" \
       --jq '"\(.ahead_by) \([.commits[].commit.committer.date] | min // "")"' 2>/dev/null) || out=""
@@ -191,12 +210,6 @@ release_lag_check() {
     _release_lag_clear "$project" "opted out of the daily release"
     return 0
   fi
-  local rc=0 wf
-  wf=$(release_push_workflow "$project") || rc=$?
-  case "$rc" in
-    0) _release_lag_clear "$project" "$wf releases on push to main"; return 0 ;;
-    2) log "release-lag: $project — could not read release workflows, skipping"; return 0 ;;
-  esac
 
   mkdir -p "$RELEASE_LAG_STATE_DIR" 2>/dev/null || return 0
   local since notified

@@ -110,7 +110,7 @@ on:
     branches: [main]
 YML
     run release_push_workflow proj
-    [ "$status" -eq 1 ]
+    [ "$status" -eq 3 ]
 }
 
 @test "bare on: push in release.yaml releases on push" {
@@ -164,6 +164,12 @@ YML
     workflow proj .github/workflows/release.yml <<< 'on: push'
     CONTENT_FAIL=1 run release_push_workflow proj
     [ "$status" -eq 2 ]
+}
+
+@test "no release*.yml at all is 3, distinct from one that just doesn't run on push" {
+    no_workflows proj
+    run release_push_workflow proj
+    [ "$status" -eq 3 ]
 }
 
 # ── release_opted_out ────────────────────────────────────────────────────────
@@ -242,6 +248,23 @@ YML
     release_lag_check proj
     [ ! -e "$(marker proj)" ]
     [ "$(ntfys)" = 0 ]
+}
+
+@test "a project with its own non-push release workflow stays flagged after the cron's own fallback tag clears ahead_by" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+YML
+    # The cron's own daily fallback tag, sitting right at head: ahead_by 0
+    # against it, which must NOT be read as "released" for this project.
+    echo refs/tags/release-2026-01-01 > "$T/gh/proj/tags"
+    echo "0 $(iso $((T0 - 50 * 3600)))" > "$T/gh/proj/compare"
+    echo 1 > "$T/gh/proj/old-commits"
+    release_lag_check proj
+    [ -f "$(marker proj)" ]
+    grep -q 'not released since the repo started' "$T/notified"
 }
 
 @test "a failed read leaves an existing marker untouched" {
