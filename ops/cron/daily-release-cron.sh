@@ -79,28 +79,47 @@ ${titles}"
   printf '%s' "$out"
 }
 
-# release_one_tag <project> <head_sha> <pattern> — a project whose own
+# release_one_tag <project> <head_sha> <pattern> <path> — a project whose own
 # release*.yml wants a tag matching <pattern> (#248): tag main to match it,
 # unless nothing's new since the last tag that already matches. <pattern>'s
 # glob syntax ("?", "[...]") can produce a pattern no concrete git ref can
 # satisfy; release_tag_for_pattern fails in that case, and this falls back to
 # the dated release-YYYY-MM-DD path instead of never releasing the project.
+# When no tag matching <pattern> exists yet, the project may already be
+# current via a hand or workflow_dispatch run rather than the cron's own tag
+# push — <path>'s newest successful dispatch run is consulted before falling
+# back to counting commits since the repo started, the same evidence
+# release_lag_check's identical "tag, no match yet" state uses (#248 R1).
 release_one_tag() {
-  local project="$1" head_sha="$2" pattern="$3" prev_tag commit_count new_tag
+  local project="$1" head_sha="$2" pattern="$3" path="$4"
+  local prev_tag commit_count new_tag since since_label
   prev_tag=$(git tag -l "$pattern" | release_latest_tag_by_name)
   if [ -n "$prev_tag" ]; then
+    since_label="$prev_tag"
     if ! commit_count=$(git rev-list --count "$prev_tag..$head_sha" 2>&1); then
       log "$project: git rev-list failed: $commit_count, skipping"
       return
     fi
   else
-    if ! commit_count=$(git rev-list --count "$head_sha" 2>&1); then
-      log "$project: git rev-list failed: $commit_count, skipping"
+    if ! since=$(_release_dispatch_evidence "$project" "$path"); then
+      log "$project: could not read $path's runs, skipping"
       return
+    fi
+    since_label="${since:-repo start}"
+    if [ -n "$since" ]; then
+      if ! commit_count=$(git rev-list --count --since="$since" "$head_sha" 2>&1); then
+        log "$project: git rev-list failed: $commit_count, skipping"
+        return
+      fi
+    else
+      if ! commit_count=$(git rev-list --count "$head_sha" 2>&1); then
+        log "$project: git rev-list failed: $commit_count, skipping"
+        return
+      fi
     fi
   fi
   if [ "$commit_count" -eq 0 ]; then
-    log "$project: no new commits since ${prev_tag:-repo start} ($pattern), skipping"
+    log "$project: no new commits since $since_label ($pattern), skipping"
     return
   fi
 
@@ -114,7 +133,7 @@ release_one_tag() {
     return
   fi
 
-  log "$project: tagging $new_tag to match $pattern ($commit_count commits since ${prev_tag:-repo start})"
+  log "$project: tagging $new_tag to match $pattern ($commit_count commits since $since_label)"
   if ! git tag "$new_tag" "$head_sha" 2>&1 | sed "s/^/    /"; then
     log "$project: git tag failed"
     return
@@ -132,8 +151,7 @@ release_one_tag() {
 # defaults, unless nothing's new since its newest successful run.
 release_one_dispatch() {
   local project="$1" head_sha="$2" path="$3" since commit_count
-  if ! since=$(gh api "repos/$RELEASE_OWNER/$project/actions/workflows/${path##*/}/runs?event=workflow_dispatch" \
-        --jq '[.workflow_runs[] | select(.status=="completed" and .conclusion=="success")][0].created_at // ""' 2>/dev/null); then
+  if ! since=$(_release_dispatch_evidence "$project" "$path"); then
     log "$project: could not read $path's runs, skipping"
     return
   fi
@@ -180,9 +198,15 @@ release_one_fallback() {
 
   local commit_count
   if [ -n "$prev_tag" ]; then
-    commit_count=$(git rev-list --count "$prev_tag..$head_sha" 2>/dev/null || echo 0)
+    if ! commit_count=$(git rev-list --count "$prev_tag..$head_sha" 2>&1); then
+      log "$project: git rev-list failed: $commit_count, skipping"
+      return
+    fi
   else
-    commit_count=$(git rev-list --count "$head_sha" 2>/dev/null || echo 0)
+    if ! commit_count=$(git rev-list --count "$head_sha" 2>&1); then
+      log "$project: git rev-list failed: $commit_count, skipping"
+      return
+    fi
   fi
 
   if [ "$commit_count" -eq 0 ]; then
@@ -261,7 +285,7 @@ release_one() {
   esac
 
   case "$mode" in
-    tag) release_one_tag "$project" "$head_sha" "$pattern"; return ;;
+    tag) release_one_tag "$project" "$head_sha" "$pattern" "$path"; return ;;
     dispatch) release_one_dispatch "$project" "$head_sha" "$path"; return ;;
   esac
 

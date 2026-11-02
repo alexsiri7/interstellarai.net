@@ -314,6 +314,35 @@ YML
     [ "$output" = "tag .github/workflows/release.yml v*" ]
 }
 
+@test "a push match already found does not stop the scan, so a later unreadable file still aborts the classification (#248 R5)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  push:
+    branches: [main]
+YML
+    # No file written for this path — its content read would fail — but it
+    # is listed after the push-to-main file above. Unlike a tag match (#248
+    # R3), a push match does not short-circuit the scan: a later file could
+    # still turn out to be the higher-ranked tag-pattern workflow, so
+    # guessing wrong here would misroute a real release.
+    echo '.github/workflows/release-extra.yml' >> "$T/gh/proj/tree"
+    run release_classify proj
+    [ "$status" -eq 2 ]
+}
+
+@test "a dispatch match already found does not stop the scan, so a later unreadable file still aborts the classification (#248 R5)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  workflow_dispatch:
+YML
+    # Same as the push case above: a dispatch match does not short-circuit
+    # the scan either, so a later unreadable file still aborts rather than
+    # settling for the dispatch match already found (#248 R5).
+    echo '.github/workflows/release-extra.yml' >> "$T/gh/proj/tree"
+    run release_classify proj
+    [ "$status" -eq 2 ]
+}
+
 @test "no release*.yml at all is 3, distinct from one that just doesn't run on push" {
     no_workflows proj
     run release_classify proj

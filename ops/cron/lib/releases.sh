@@ -479,15 +479,29 @@ _release_lag_evidence_unreadable_clear() { # <project>
   log "release-lag: $1 — lag evidence read recovered"
 }
 
+# _release_dispatch_evidence <project> <path> — the newest successful
+# workflow_dispatch run's created_at for release*.yml at <path> in <project>,
+# or "" if none; rc nonzero when the read itself fails. The one query for "is
+# this workflow's dispatch trigger already current?", shared by
+# release_one_dispatch, release_lag_check's dispatch case, and both the tag
+# mode's and release_one_tag's no-matching-tag-yet fallback — a tag-pattern
+# project not yet tagged by the cron may already be current via a hand or
+# dispatch run (#248 R1, R2/R3).
+_release_dispatch_evidence() {
+  local project="$1" path="$2"
+  gh api "repos/$RELEASE_OWNER/$project/actions/workflows/${path##*/}/runs?event=workflow_dispatch" \
+    --jq '[.workflow_runs[] | select(.status=="completed" and .conclusion=="success")][0].created_at // ""' 2>/dev/null
+}
+
 # release_lag_check <project> — commits on main not yet covered by real
 # release evidence, the oldest of them committed over RELEASE_LAG_SECONDS ago,
 # on a project the cron would release. The evidence depends on release_classify:
 #   tag       newest tag matching the workflow's own push:tags pattern, or —
 #             when no such tag exists yet (the project is released by hand or
-#             dispatch rather than by the cron's own tag push) — the same
-#             workflow's newest successful run on main, the same evidence
-#             dispatch mode uses (#248 R2)
-#   dispatch  the workflow's newest successful run
+#             dispatch rather than by the cron's own tag push) — the
+#             workflow's newest successful workflow_dispatch run, the same
+#             evidence dispatch mode uses (#248 R2, R3)
+#   dispatch  the workflow's newest successful workflow_dispatch run
 #   none      no usable trigger at all (no release*.yml, one with neither a
 #             tag-pattern nor a dispatch trigger, or one that only runs on
 #             push to main — that alone produces no release-* tag or dated
@@ -547,8 +561,7 @@ release_lag_check() {
         # tag push. Fall back to the same run evidence dispatch mode uses
         # instead of treating this as unreleased since the repo started
         # (#248 R2).
-        if ! tag=$(gh api "repos/$RELEASE_OWNER/$project/actions/workflows/${path##*/}/runs?branch=main&status=success" \
-              --jq '.workflow_runs[0].created_at // ""' 2>/dev/null); then
+        if ! tag=$(_release_dispatch_evidence "$project" "$path"); then
           log "release-lag: $project — could not read $path's runs, skipping"
           _release_lag_evidence_unreadable_check "$project" "$now"
           return 0
@@ -557,8 +570,7 @@ release_lag_check() {
       fi
       ;;
     dispatch)
-      if ! tag=$(gh api "repos/$RELEASE_OWNER/$project/actions/workflows/${path##*/}/runs?event=workflow_dispatch" \
-            --jq '[.workflow_runs[] | select(.status=="completed" and .conclusion=="success")][0].created_at // ""' 2>/dev/null); then
+      if ! tag=$(_release_dispatch_evidence "$project" "$path"); then
         log "release-lag: $project — could not read $path's runs, skipping"
         _release_lag_evidence_unreadable_check "$project" "$now"
         return 0

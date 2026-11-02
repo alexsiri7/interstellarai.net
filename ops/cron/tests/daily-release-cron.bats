@@ -226,6 +226,27 @@ YML
     [ "$(git -C "$TEST_TMP/origins/punland.git" tag -l 'v*' | wc -l)" -eq 1 ]
 }
 
+@test "a tag-pattern release workflow with no matching tag yet but a real prior dispatch run is not tagged again (#248 R1)" {
+    project punland
+    workflow punland .github/workflows/release.yml <<'YML'
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+YML
+    # No tag matches 'v*' yet — punland has so far only been released by
+    # hand or workflow_dispatch — but a successful dispatch run already
+    # covers every commit on main. The cron must consult that run evidence
+    # instead of counting commits since the repo started, or it would tag
+    # and push a duplicate release every day (#248 R1).
+    dispatch_ran punland "$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%M:%SZ')"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"punland: no new commits since "*"(v*), skipping"* ]]
+    ! tagged punland 'v*' || false
+    ! released punland || false
+}
+
 @test "a git rev-list failure in tag mode logs rev-list failed, not no new commits, and tags nothing (#248 R4)" {
     project reli
     workflow reli .github/workflows/release.yml <<'YML'
@@ -271,6 +292,25 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"reli: git rev-list failed: fatal: bad revision, skipping"* ]]
     ! grep -qx "workflow run release.yml --repo alexsiri7/reli --ref main" "$GH_CALLS" || false
+}
+
+@test "a git rev-list failure in the dated fallback logs rev-list failed, not no new commits, and releases nothing (#248 R2)" {
+    project reli
+    local real_git
+    real_git="$(command -v git)"
+    cat > "$HOME/.local/bin/git" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = rev-list ]; then
+  echo "fatal: bad revision" >&2
+  exit 128
+fi
+exec "$real_git" "\$@"
+EOF
+    chmod +x "$HOME/.local/bin/git"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reli: git rev-list failed: fatal: bad revision, skipping"* ]]
+    ! released reli || false
 }
 
 @test "a satisfiable bracket-class tag pattern gets its own matching tag, not the dated fallback (#248 / seam R2)" {
