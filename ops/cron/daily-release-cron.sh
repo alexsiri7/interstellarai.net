@@ -194,7 +194,7 @@ release_one_fallback() {
   # Find previous release-* tag, if any: newest by name, as release_lag_check
   # picks it.
   local prev_tag
-  prev_tag=$(git tag -l 'release-*' | release_latest_tag_by_name)
+  prev_tag=$(git tag -l "$RELEASE_FALLBACK_TAG_PATTERN" | release_latest_tag_by_name)
 
   local commit_count
   if [ -n "$prev_tag" ]; then
@@ -250,7 +250,8 @@ $body"
 release_one() {
   local project="$1"
   local repo_dir="$BASE_DIR/$project"
-  local tag="release-$TODAY"
+  local tag
+  tag="$(_release_glob_prefix "$RELEASE_FALLBACK_TAG_PATTERN")$TODAY"
 
   if release_opted_out "$project"; then
     log "$project: opted out (DAILY_RELEASE_OPT_OUT), skipping"

@@ -250,7 +250,10 @@ Removing it entirely:
 - **Running archon by hand.** `archon workflow …` as asiri goes through the shim to the factory user; the wrapper refuses anything outside the verbs in its header. Anything else: `sudo -n -u archon -H bash -c '…'`, no password since `--install-sudo-ops` (for instance `sudo -n -u archon -H bash -c 'cd ~/repos/reli && ~/.bun/bin/archon workflow list'`). That shell gets sudo's reset environment, not the wrapper's allowlist, so do not start factory runs that way; use `archon workflow run …` (the shim) for those. Do not use the `CLAUDECODE=0 bun /mnt/ext-fast/archon/packages/cli/src/cli.ts workflow run …` form from `archon-playground/AGENTS.md` after the cutover. It runs the agent as asiri, with every secret in reach, against the old DB.
 - **Global workflow overrides** live in `/mnt/ext-fast/archon-home/.archon/workflows/`. They are owned by asiri, readable by archon and not writable by it. `~/.archon/workflows` is no longer read.
 - **Adding a project.**
-  1. Add it to `ops/cron/archon-projects.txt`.
+  1. Add it to `ops/cron/archon-projects.txt`. This also enrolls it in `daily-release-cron.sh`'s
+     daily auto-release (tag, workflow dispatch, or dated GitHub release, per its own
+     `release*.yml` — see `ops/cron/README.md`'s `daily-release-cron.sh` row) unless the slug
+     is added to `DAILY_RELEASE_OPT_OUT`.
   2. Add the repo to the PAT (GitHub → the token → Edit). Not needed with an all-repositories token.
   3. Once the change is on main, ops-self-update fast-forwards to it (by itself for your own pull request, otherwise after `ops/cron/ops-self-update.sh --approve`) and then runs `sudo -n /usr/local/sbin/archon-ops-promote` and `sudo -n /usr/local/sbin/archon-user-install` itself, which rewrites `/etc/archon-user/projects`, the list the wrapper accepts, from the promoted snapshot. Nothing to type.
   4. The wrapper clones it on first use.

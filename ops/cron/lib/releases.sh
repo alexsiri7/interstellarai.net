@@ -71,6 +71,13 @@ fi
 RELEASE_LAG_STATE_DIR="${RELEASE_LAG_STATE_DIR:-$HOME/.archon/state/unreleased}"
 RELEASE_LAG_SECONDS="${RELEASE_LAG_SECONDS:-172800}"
 
+# The fallback release-tag pattern, for a project with no push:tags or
+# workflow_dispatch release*.yml (mode "none"/"push"): daily-release-cron.sh
+# creates these and reads them back locally; release_lag_check reads them
+# back remotely via the GitHub API. One shared constant so both sides can
+# never drift apart (#248 R2).
+RELEASE_FALLBACK_TAG_PATTERN="release-*"
+
 # release_now — the clock (RELEASE_NOW overrides it for tests).
 release_now() { echo "${RELEASE_NOW:-$(date +%s)}"; }
 
@@ -577,7 +584,7 @@ release_lag_check() {
       fi
       ;;
     none)
-      if ! refs=$(gh api --paginate "repos/$RELEASE_OWNER/$project/git/matching-refs/tags/release-" \
+      if ! refs=$(gh api --paginate "repos/$RELEASE_OWNER/$project/git/matching-refs/tags/$(_release_glob_prefix "$RELEASE_FALLBACK_TAG_PATTERN")" \
             --jq '.[].ref' 2>/dev/null); then
         log "release-lag: $project — could not list release tags, skipping"
         _release_lag_evidence_unreadable_check "$project" "$now"
