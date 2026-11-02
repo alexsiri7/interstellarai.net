@@ -130,7 +130,7 @@ YML
     [[ "$output" == *"zoomies: opted out (DAILY_RELEASE_OPT_OUT), skipping"* ]]
 }
 
-@test "a push trigger combining branches: [main] with a tags pattern is tagged, not given the dated fallback (#248 R1)" {
+@test "a push trigger combining branches: [main] with a tags pattern is given the dated fallback, not tagged (#248 R1)" {
     project reli; project un-reminder
     workflow un-reminder .github/workflows/release.yml <<'YML'
 on:
@@ -141,12 +141,13 @@ YML
     run "$SCRIPT"
     [ "$status" -eq 0 ]
     released reli
-    # The tags pattern wins over the main-branch push filter in the same
-    # block, so un-reminder is tag-released like any other tag-mode project —
-    # not shunted to the dated fallback (#248 R1).
-    [[ "$output" == *"un-reminder: tagging v$(date -u +%Y.%-m.%-d) to match v*"* ]]
-    tagged un-reminder 'v*'
-    ! released un-reminder || false
+    # The block already self-releases on every push to main, at whatever
+    # track its own workflow picks — a tags pattern in the same block must
+    # not be read as "push a tag and trigger a separate, unattended
+    # production rollout" (#248 R1).
+    [[ "$output" == *"un-reminder: .github/workflows/release.yml runs on push to main, but that alone produces no release-* tag or dated release — falling back"* ]]
+    released un-reminder
+    ! tagged un-reminder 'v*' || false
 }
 
 @test "a bare push-to-main release workflow with no tags pattern still gets the dated fallback release" {
@@ -223,6 +224,53 @@ YML
     [ "$status" -eq 0 ]
     [[ "$output" == *"punland: no new commits since v2026.1.1 (v*), skipping"* ]]
     [ "$(git -C "$TEST_TMP/origins/punland.git" tag -l 'v*' | wc -l)" -eq 1 ]
+}
+
+@test "a git rev-list failure in tag mode logs rev-list failed, not no new commits, and tags nothing (#248 R4)" {
+    project reli
+    workflow reli .github/workflows/release.yml <<'YML'
+on:
+  push:
+    tags: ['v*']
+YML
+    local real_git
+    real_git="$(command -v git)"
+    cat > "$HOME/.local/bin/git" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = rev-list ]; then
+  echo "fatal: bad revision" >&2
+  exit 128
+fi
+exec "$real_git" "\$@"
+EOF
+    chmod +x "$HOME/.local/bin/git"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reli: git rev-list failed: fatal: bad revision, skipping"* ]]
+    ! tagged reli 'v*' || false
+}
+
+@test "a git rev-list failure in dispatch mode logs rev-list failed, not no new commits, and dispatches nothing (#248 R4)" {
+    project reli
+    workflow reli .github/workflows/release.yml <<'YML'
+on:
+  workflow_dispatch:
+YML
+    local real_git
+    real_git="$(command -v git)"
+    cat > "$HOME/.local/bin/git" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = rev-list ]; then
+  echo "fatal: bad revision" >&2
+  exit 128
+fi
+exec "$real_git" "\$@"
+EOF
+    chmod +x "$HOME/.local/bin/git"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reli: git rev-list failed: fatal: bad revision, skipping"* ]]
+    ! grep -qx "workflow run release.yml --repo alexsiri7/reli --ref main" "$GH_CALLS" || false
 }
 
 @test "a satisfiable bracket-class tag pattern gets its own matching tag, not the dated fallback (#248 / seam R2)" {

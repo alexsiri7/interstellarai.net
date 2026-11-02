@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # pipeline-status — quick project health dashboard.
-# Reads ops/cron/archon-projects.txt for the canonical project list.
+# Reads ops/cron/archon-projects.txt for the canonical project list, via
+# lib/archon-projects.sh's load_archon_projects — the same loader
+# daily-release-cron.sh and pipeline-health-cron.sh use (#248 R2).
 # Usage: pipeline-status [repo-slug ...]
 set -uo pipefail
 
 export PATH="$HOME/.bun/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-PROJECTS_FILE="$SCRIPT_DIR/../cron/archon-projects.txt"
 SWEEP_STATUS_FILE="$HOME/.archon/sweep-state/last-sweep"   # written by ops/cron/sweep-audits.sh
 # The factory's GitHub identity, probed the way pipeline-health does
 # (as the archon user when ARCHON_RUN_AS is archon or drain).
@@ -25,6 +26,11 @@ source "$SCRIPT_DIR/../cron/lib/deadlines.sh"
 # pipeline-health's markers for main commits unreleased for 48h.
 # shellcheck source=../cron/lib/releases.sh
 source "$SCRIPT_DIR/../cron/lib/releases.sh"
+# The canonical project list — same loader daily-release-cron.sh and
+# pipeline-health-cron.sh use, so a duplicated slug or a missing/unreadable
+# archon-projects.txt is handled (and reported) identically everywhere (#248 R2).
+# shellcheck source=../cron/lib/archon-projects.sh
+source "$SCRIPT_DIR/../cron/lib/archon-projects.sh"
 OWNER="alexsiri7"
 
 # Colours
@@ -35,7 +41,7 @@ RED='\033[0;31m'; YELLOW='\033[0;33m'; GREEN='\033[0;32m'; DIM='\033[2m'
 if [ $# -gt 0 ]; then
     PROJECTS=("$@")
 else
-    mapfile -t PROJECTS < <(grep -v '^\s*#' "$PROJECTS_FILE" | grep -v '^\s*$' | sed 's/#.*//' | sed 's/[[:space:]]//g')
+    load_archon_projects PROJECTS
 fi
 
 # --- Helpers ---

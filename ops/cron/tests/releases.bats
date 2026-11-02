@@ -133,7 +133,7 @@ since_commits() {
 
 # ── release_classify: push detection ─────────────────────────────────────────
 
-@test "a push trigger combining branches: [main] with a tags pattern classifies as tag, not push (#248 R1)" {
+@test "a push trigger combining branches: [main] with a tags pattern classifies as push, not tag (#248 R1)" {
     workflow proj .github/workflows/release.yml <<'YML'
 name: Release
 on:
@@ -143,8 +143,11 @@ on:
 jobs: {}
 YML
     run release_classify proj
-    [ "$status" -eq 1 ]
-    [ "$output" = "tag .github/workflows/release.yml v*" ]
+    # The block already hits main on every push, at whatever track that
+    # workflow itself picks — a tags pattern in the same block must not
+    # upgrade it to an unattended tag-triggered rollout (#248 R1).
+    [ "$status" -eq 0 ]
+    [ "$output" = "push .github/workflows/release.yml" ]
 }
 
 @test "a bare push-to-main release.yml with no tags pattern still releases on push" {
@@ -199,7 +202,6 @@ YML
     workflow proj .github/workflows/release.yml <<'YML'
 "on":
   push:
-    branches: [main]
     tags: ['v*']
 jobs: {}
 YML
@@ -295,6 +297,21 @@ YML
     workflow proj .github/workflows/release.yml <<< 'on: push'
     CONTENT_FAIL=1 run release_classify proj
     [ "$status" -eq 2 ]
+}
+
+@test "a tag match already found stops the scan, so a later unreadable file does not abort the classification (#248 R3)" {
+    workflow proj .github/workflows/release.yml <<'YML'
+on:
+  push:
+    tags: ['v*']
+YML
+    # No file written for this path — its content read would fail — but it
+    # is listed after the tag-pattern file above, and tag is already the top
+    # rank, so release_classify must never try to read it.
+    echo '.github/workflows/release-extra.yml' >> "$T/gh/proj/tree"
+    run release_classify proj
+    [ "$status" -eq 1 ]
+    [ "$output" = "tag .github/workflows/release.yml v*" ]
 }
 
 @test "no release*.yml at all is 3, distinct from one that just doesn't run on push" {

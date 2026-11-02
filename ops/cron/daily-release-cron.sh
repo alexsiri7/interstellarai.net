@@ -89,9 +89,15 @@ release_one_tag() {
   local project="$1" head_sha="$2" pattern="$3" prev_tag commit_count new_tag
   prev_tag=$(git tag -l "$pattern" | release_latest_tag_by_name)
   if [ -n "$prev_tag" ]; then
-    commit_count=$(git rev-list --count "$prev_tag..$head_sha" 2>/dev/null || echo 0)
+    if ! commit_count=$(git rev-list --count "$prev_tag..$head_sha" 2>&1); then
+      log "$project: git rev-list failed: $commit_count, skipping"
+      return
+    fi
   else
-    commit_count=$(git rev-list --count "$head_sha" 2>/dev/null || echo 0)
+    if ! commit_count=$(git rev-list --count "$head_sha" 2>&1); then
+      log "$project: git rev-list failed: $commit_count, skipping"
+      return
+    fi
   fi
   if [ "$commit_count" -eq 0 ]; then
     log "$project: no new commits since ${prev_tag:-repo start} ($pattern), skipping"
@@ -132,9 +138,15 @@ release_one_dispatch() {
     return
   fi
   if [ -n "$since" ]; then
-    commit_count=$(git rev-list --count --since="$since" "$head_sha" 2>/dev/null || echo 0)
+    if ! commit_count=$(git rev-list --count --since="$since" "$head_sha" 2>&1); then
+      log "$project: git rev-list failed: $commit_count, skipping"
+      return
+    fi
   else
-    commit_count=$(git rev-list --count "$head_sha" 2>/dev/null || echo 0)
+    if ! commit_count=$(git rev-list --count "$head_sha" 2>&1); then
+      log "$project: git rev-list failed: $commit_count, skipping"
+      return
+    fi
   fi
   if [ "$commit_count" -eq 0 ]; then
     log "$project: no new commits since ${since:-repo start} ($path), skipping"

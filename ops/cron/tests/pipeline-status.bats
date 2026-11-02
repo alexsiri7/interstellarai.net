@@ -128,3 +128,45 @@ EOF
     [[ "$output" != *"UNRELEASED:"* ]]
     [[ "$output" != *"unreleased for 48h"* ]]
 }
+
+@test "with no argv, a duplicated project slug in archon-projects.txt is deduped, not shown twice (#248 R2)" {
+    local cron_dir="$BATS_TEST_DIRNAME/.."
+    local pipeline_status="$cron_dir/../bin/pipeline-status"
+
+    export HOME="$TEST_TMP/home"
+    mkdir -p "$HOME/.local/bin"
+    cat > "$HOME/.local/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  "api rate_limit"*) echo '{"resources":{"graphql":{"limit":5000,"remaining":4000,"reset":0},"core":{"limit":5000}}}' ;;
+  *) exit 1 ;;
+esac
+EOF
+    chmod +x "$HOME/.local/bin/gh"
+
+    export RELEASE_LAG_STATE_DIR="$TEST_TMP/unreleased" DEADLINE_STATE_DIR="$TEST_TMP/deadlines"
+    export STALL_STATE_DIR="$TEST_TMP/stalled" LACHESIS_STATE_DIR="$TEST_TMP/lachesis"
+    export SWEEP_STATUS_FILE="$TEST_TMP/no-sweep"
+    export ARCHON_PROJECTS_FILE="$TEST_TMP/projects.txt"
+    printf 'test-project\ntest-project\n' > "$ARCHON_PROJECTS_FILE"
+
+    run "$pipeline_status"
+    [ "$status" -eq 0 ]
+    [ "$(echo "$output" | grep -c '^test-project ')" -eq 1 ]
+}
+
+@test "with no argv, a missing archon-projects.txt exits loudly instead of rendering an empty dashboard (#248 R2)" {
+    local cron_dir="$BATS_TEST_DIRNAME/.."
+    local pipeline_status="$cron_dir/../bin/pipeline-status"
+
+    export HOME="$TEST_TMP/home"
+    mkdir -p "$HOME/.local/bin"
+    export RELEASE_LAG_STATE_DIR="$TEST_TMP/unreleased" DEADLINE_STATE_DIR="$TEST_TMP/deadlines"
+    export STALL_STATE_DIR="$TEST_TMP/stalled" LACHESIS_STATE_DIR="$TEST_TMP/lachesis"
+    export SWEEP_STATUS_FILE="$TEST_TMP/no-sweep"
+    export ARCHON_PROJECTS_FILE="$TEST_TMP/no-such-projects.txt"
+
+    run "$pipeline_status"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"archon-projects: file not found"* ]]
+}

@@ -154,10 +154,10 @@ def consume_flow(first, rest):
     return buf, consumed
 
 def decide(push_filt, has_dispatch):
-    if push_filt is not None and push_filt.get("tags"):
-        return "tag:" + push_filt["tags"][0]
     if push_filt is not None and push_hits_main(push_filt):
         return "push"
+    if push_filt is not None and push_filt.get("tags"):
+        return "tag:" + push_filt["tags"][0]
     if has_dispatch:
         return "dispatch"
     return "none"
@@ -257,14 +257,18 @@ sys.exit(0)
 # release_classify <project> — scans every release*.yml|yaml on main and
 # reports the best trigger shape found, ranked tag > push > dispatch > none
 # (#248 R1: a file's push-to-main trigger no longer stops the scan, so a tag
-# pattern in another file still wins — even one combining a main-branch push
-# filter with a tags filter in the same block). On stdout: "tag <path>
-# <pattern>" (rc 1, a push:tags pattern — preferred, per #248), else
-# "push <path>" (rc 0, a push-to-main trigger and no tag-pattern file —
-# produces no release-* tag or dated release on its own), else "dispatch
-# <path>" (rc 1, a workflow_dispatch trigger and no tag or push-to-main
-# file), else "none <path>" (rc 1, release*.yml exists but no file's trigger
-# is usable). rc 2: a read failed. rc 3: no release*.yml at all.
+# pattern in another file still wins). Within a single file, a tags pattern
+# in the same push block as a main-hitting branch filter does not count as
+# "tag" — that block already self-releases on every push to main, at
+# whatever track its own workflow picks, so it is "push", not an unattended
+# tag-triggered rollout (#248 R1). On stdout: "tag <path> <pattern>" (rc 1, a
+# push:tags pattern whose push trigger does not also hit main — preferred,
+# per #248), else "push <path>" (rc 0, a push-to-main trigger and no
+# tag-pattern file that doesn't also hit main — produces no release-* tag or
+# dated release on its own), else "dispatch <path>" (rc 1, a
+# workflow_dispatch trigger and no tag or push-to-main file), else "none
+# <path>" (rc 1, release*.yml exists but no file's trigger is usable). rc 2:
+# a read failed. rc 3: no release*.yml at all.
 release_classify() {
   local project="$1" paths path content shape pattern first_path=""
   local best_mode="none" best_path="" best_pattern=""
@@ -295,6 +299,11 @@ release_classify() {
         [ "$best_mode" = none ] && { best_mode=dispatch; best_path="$path"; }
         ;;
     esac
+    # tag is the top rank (#248 R3): once found, no later file's shape —
+    # readable or not — can change the answer, so stop scanning rather than
+    # let a later file's transient read failure abort a classification that
+    # is already settled.
+    [ "$best_mode" = tag ] && break
   done <<< "$paths"
   case "$best_mode" in
     tag) echo "tag $best_path $best_pattern"; return 1 ;;
