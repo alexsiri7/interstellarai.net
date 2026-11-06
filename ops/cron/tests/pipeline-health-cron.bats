@@ -1018,6 +1018,8 @@ setup_prod_deploy_env() {
     HEAD_DEPLOYMENTS_FIXTURE='[]'
     DEPLOY_STATUS_FIXTURE='success'
     load_fn fire_ship_and_settle
+    # shellcheck disable=SC1090
+    source <(awk '/^DEPLOY_LAG_FLOOR_SECONDS=/{print}' "$SCRIPT_FILE")
     load_fn deploy_lag_threshold
     load_fn check_prod_deploy
 }

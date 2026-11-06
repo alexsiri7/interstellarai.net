@@ -227,6 +227,10 @@ mkdir -p "$STATE_DIR/prciretry" "$STATE_DIR/escalated" \
 # re-firing and ntfy the operator that the factory is stuck.
 MAX_ATTEMPTS=3
 
+# Floor of every repo's deploy-lag threshold (see deploy_lag_threshold), and
+# so the age below which check_prod_deploy never asks for the threshold.
+DEPLOY_LAG_FLOOR_SECONDS=900
+
 # How far past its own recorded resume deadline a paused run may drift before
 # check_parked_runs nudges it. 6x the longest `wait:` the sdlc pack declares
 # (ci-pause, duration_ms 300000).
@@ -1037,7 +1041,7 @@ deploy_relevant_change() {
 # no workflow id) or too little history gets the floor. The cap keeps a run of
 # slow or re-dispatched deploys from blinding the check.
 deploy_lag_threshold() {
-  local project="$1" wid="$2" floor=900 margin=300 cap=3600 p95
+  local project="$1" wid="$2" floor=$DEPLOY_LAG_FLOOR_SECONDS margin=300 cap=3600 p95
   if ! [[ "$wid" =~ ^[0-9]+$ ]]; then echo "$floor"; return; fi
   # Earliest successful run per SHA: re-dispatches of the same commit are not latency.
   p95=$(gh api "repos/alexsiri7/$project/actions/workflows/$wid/runs?branch=main&status=success&per_page=50" 2>/dev/null \
@@ -1247,7 +1251,7 @@ EOF
     head_epoch=$(date -d "$head_ts" +%s 2>/dev/null || echo 0)
     now_epoch=$(date +%s)
     local age=$((now_epoch - head_epoch))
-    if [ "$age" -gt 900 ]; then
+    if [ "$age" -gt "$DEPLOY_LAG_FLOOR_SECONDS" ]; then
       local marker="$STATE_DIR/prod-deploy-stale-$project-${head_sha:0:12}"
       if [ -f "$marker" ]; then
         log "$project: prod still lagging main ${head_sha:0:10} (age ${age}s) — already filed, skipping"
@@ -1288,8 +1292,8 @@ EOF
       touch "$marker"
       # No ntfy — archon will handle the issue automatically.
     fi
-    # A HEAD younger than 15 minutes (the threshold's floor) is still waiting
-    # for its pipeline.
+    # A HEAD younger than the threshold's floor is still waiting for its
+    # pipeline.
     return
   fi
 
