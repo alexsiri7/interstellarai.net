@@ -74,6 +74,9 @@ REVIEW_RETRY_MAX="${REVIEW_RETRY_MAX:-2}"
 # commit's dates say when it was made, not when it was pushed.
 REVIEW_NOT_READY_SECONDS="${REVIEW_NOT_READY_SECONDS:-21600}"
 REVIEW_REPORT_MARKER='<!-- archon-review-report -->'
+# A dependabot PR whose checks have failed on one head this long gets an
+# upgrade issue (Phase 1c).
+DEPENDABOT_RED_SECONDS=86400
 
 # Use arguments if provided, otherwise all projects
 if [ $# -gt 0 ]; then
@@ -136,6 +139,77 @@ rebase_requested_for() {
   local marker="$MAINTENANCE_STATE_DIR/${PROJECT}-$1.rebase-requested"
   [ "$(cat "$marker" 2>/dev/null)" = "$2" ] || return 1
   log "$PROJECT: PR #$1 already asked dependabot to rebase at ${2:0:7} — waiting for a new head"
+}
+
+# failing_check_names <number> — the names of the PR's checks that concluded
+# failed, one per line, reduced to a safe character set: they go into an issue
+# body. Prints nothing when none failed; exit 1 when the checks cannot be read.
+# Every check counts, required or not: Phase 1 merges only CLEAN, so a bump
+# that is UNSTABLE on a non-required check sits as surely as a BLOCKED one.
+# Failed is the complement of pr_checks_green less the checks still running:
+# NEUTRAL and SKIPPED pass, as they do for a required check.
+failing_check_names() {
+  local view
+  view=$(gh pr view "$1" --json statusCheckRollup 2>>"$LOG_DIR/pr-maintenance-errors.log") || return 1
+  printf '%s' "$view" | jq -r '
+    .statusCheckRollup[]?
+    | select((.conclusion // .state // "") | ascii_upcase
+             | IN("FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"))
+    | (.name // .context // "")' 2>/dev/null \
+    | { tr -cd 'A-Za-z0-9 ._/():\n-' | grep -v '^ *$' | sort -u || true; }
+}
+
+# Dependabot's head branch: dependabot/<ecosystem>/[<dir>/]<package>-<version>,
+# "@" dropped from a scoped npm name. Strict: plain path segments only, and a
+# version of dot-separated numbers.
+DEPENDABOT_BRANCH_RE='^dependabot/([a-z_]+)/(([A-Za-z0-9_][A-Za-z0-9._-]*/)*[A-Za-z0-9_][A-Za-z0-9._-]*)-([0-9]+(\.[0-9]+)*)$'
+
+# dependabot_branch_fields <headRefName> — print
+# "<ecosystem>\t<path>\t<dir>\t<package>\t<version>", or exit 1 when the
+# branch does not match DEPENDABOT_BRANCH_RE. <path> is everything between the
+# ecosystem and the version. The branch does not mark where the directory ends
+# and a slashed package name (actions/checkout, @playwright/test) begins, so
+# <dir> is the longest leading part of <path> that is a directory in the
+# checkout, "/" when none is. Dependabot writes a leading "." of a directory
+# as "dot-" (.github/tools → dot-github/tools).
+dependabot_branch_fields() {
+  [[ "$1" =~ $DEPENDABOT_BRANCH_RE ]] || return 1
+  local eco="${BASH_REMATCH[1]}" path="${BASH_REMATCH[2]}" version="${BASH_REMATCH[4]}"
+  local dir="" pkg="$path" prefix="" seg rest="$path"
+  while [[ "$rest" == */* ]]; do
+    seg="${rest%%/*}"; rest="${rest#*/}"
+    if [[ "$seg" == dot-* ]] && [ -d "$REPO_DIR/${prefix:+$prefix/}.${seg#dot-}" ]; then
+      seg=".${seg#dot-}"
+    fi
+    prefix="${prefix:+$prefix/}$seg"
+    if [ -d "$REPO_DIR/$prefix" ]; then dir="$prefix"; pkg="$rest"; fi
+  done
+  if [ "$eco" = npm_and_yarn ] && [[ "$pkg" == */* ]]; then pkg="@$pkg"; fi
+  printf '%s\t%s\t%s\t%s\t%s\n' "$eco" "$path" "${dir:-/}" "$pkg" "$version"
+}
+
+# dependabot_upgrade_body <ecosystem> <dir> <package> <version> <pr> <branch> <checks>
+# — the factory issue for a red dependabot bump. Built only from the parsed
+# branch fields and the failing check names: the PR's title and body carry
+# upstream text and are never read.
+dependabot_upgrade_body() {
+  local checks
+  checks=$(printf '%s\n' "$7" | sed 's/.*/- `&`/')
+  cat <<EOF
+## Upgrade \`$3\` to $4
+
+Dependabot's bump of \`$3\` to $4 ($1, directory \`$2\`) has had failing checks for over 24h: https://github.com/alexsiri7/$PROJECT/pull/$5
+
+### Failing checks
+$checks
+
+### What to do
+Bump \`$3\` to $4 in \`$2\` and fix the code so these checks pass on the new version. Do not pin \`$3\`, or any other dependency, to an older version to get green.
+
+Once the new version is on main, dependabot closes #$5 itself.
+
+Auto-filed by \`pr-maintenance-cron.sh\` from the dependabot branch \`$6\`.
+EOF
 }
 
 # pr_owned_by_live_run <number> <headRefName> <body>
@@ -238,10 +312,11 @@ review_retry_blocked() {
   return 1
 }
 
-# head_unchanged_for <number> <headRefOid> — seconds since this cron first saw
-# the PR at this head. A new head restarts the count from now.
+# head_unchanged_for <number> <headRefOid> [<marker>] — seconds since this
+# cron first saw the PR at this head (with <marker>, first saw what that marker
+# tracks at this head). A new head restarts the count from now.
 head_unchanged_for() {
-  local f="$MAINTENANCE_STATE_DIR/${PROJECT}-$1.head-seen" now sha since
+  local f="$MAINTENANCE_STATE_DIR/${PROJECT}-$1.${3:-head-seen}" now sha since
   now=$(deadline_now)
   read -r sha since 2>/dev/null < "$f" || true
   if [ "${sha:-}" != "$2" ] || ! [[ "${since:-}" =~ ^[0-9]+$ ]]; then
@@ -614,6 +689,59 @@ for PROJECT in "${PROJECTS[@]}"; do
       log "$PROJECT: PR #$PR — could not comment (see $LOG_DIR/pr-maintenance-errors.log), retrying next tick"
     fi
   done <<< "$REBASE_PRS"
+
+  # --- Phase 1c: File a factory issue for a red dependabot bump (zero AI) ---
+  # A same-major dependabot PR whose checks fail sat forever: nothing above
+  # merges or rebases it, archon never reads it, and lib/deadlines.sh counted it
+  # toward STALLED (#247). Once its checks have failed on one head for
+  # DEPENDABOT_RED_SECONDS, file one issue per (package, version) for the
+  # factory to upgrade and fix forward, link it on the PR and hold the PR.
+  # `merge` trust already keeps majors and grouped bumps for the owner.
+  RED_PRS=$(list_prs merge 'true')
+
+  while IFS=$'\t' read -r PR HEAD HOLD SHA _ AUTHOR _; do
+    [ -n "$PR" ] || continue
+    trust_is_dependabot "$AUTHOR" || continue
+    pr_on_hold "$PR" "$HOLD" && continue
+    if ! CHECKS=$(failing_check_names "$PR"); then
+      log "$PROJECT: dependabot PR #$PR — could not read its checks (see $LOG_DIR/pr-maintenance-errors.log), retrying next tick"
+      continue
+    fi
+    if [ -z "$CHECKS" ]; then
+      rm -f "$MAINTENANCE_STATE_DIR/${PROJECT}-${PR}.red-seen"
+      continue
+    fi
+    RED_FOR=$(head_unchanged_for "$PR" "$SHA" red-seen)
+    [ "$RED_FOR" -ge "$DEPENDABOT_RED_SECONDS" ] || continue
+    if ! FIELDS=$(dependabot_branch_fields "$HEAD"); then
+      log "$PROJECT: dependabot PR #$PR is red but its branch '$HEAD' is not a dependabot/<ecosystem>/<dir>/<package>-<version> name — filing nothing"
+      continue
+    fi
+    IFS=$'\t' read -r ECO DEP_PATH DIR PKG VERSION <<<"$FIELDS"
+    FILED="$MAINTENANCE_STATE_DIR/${PROJECT}-dependabot-${ECO}-${DEP_PATH//\//+}-${VERSION}.filed"
+    # An issue already filed means holding the PR failed last tick, or this is
+    # a reopened PR of a filed version: link and hold it, never file twice.
+    ISSUE_URL=$(cat "$FILED" 2>/dev/null || true)
+    if [ -z "$ISSUE_URL" ]; then
+      log "$PROJECT: dependabot PR #$PR ($PKG $VERSION) red for $((RED_FOR / 3600))h — filing an upgrade issue"
+      ISSUE_URL=$(gh issue create --repo "alexsiri7/$PROJECT" \
+          --title "Upgrade $PKG to $VERSION in $DIR and fix what breaks" \
+          --label "bug,archon:queued" \
+          --body "$(dependabot_upgrade_body "$ECO" "$DIR" "$PKG" "$VERSION" "$PR" "$HEAD" "$CHECKS")" \
+          2>>"$LOG_DIR/pr-maintenance-errors.log" | tail -1) || true
+      if ! [[ "$ISSUE_URL" =~ ^https://github\.com/alexsiri7/[^/]+/issues/[0-9]+$ ]]; then
+        log "$PROJECT: PR #$PR — could not file the upgrade issue (see $LOG_DIR/pr-maintenance-errors.log), retrying next tick"
+        continue
+      fi
+      echo "$ISSUE_URL" > "$FILED"
+    fi
+    gh pr comment "$PR" --body "Checks have failed on this bump for over 24h. Filed $ISSUE_URL to upgrade $PKG to $VERSION and fix what breaks; holding this PR meanwhile." \
+        >/dev/null 2>>"$LOG_DIR/pr-maintenance-errors.log" \
+      || log "$PROJECT: PR #$PR — could not comment the issue link (see $LOG_DIR/pr-maintenance-errors.log)"
+    if ! gh pr edit "$PR" --add-label "$HOLD_LABEL" >/dev/null 2>>"$LOG_DIR/pr-maintenance-errors.log"; then
+      log "$PROJECT: PR #$PR — could not add $HOLD_LABEL (see $LOG_DIR/pr-maintenance-errors.log), retrying next tick"
+    fi
+  done <<< "$RED_PRS"
 
   # --- Phase 2: Check for one PR needing AI attention ---
   # Drafts count only when DIRTY. GitHub runs no pull_request workflow on a
