@@ -21,6 +21,9 @@ setup() {
     export STUB_SMART_USB=""          # device names behind a USB bridge plain smartctl cannot query
     export STUB_SMART_USB_TYPE=""     # the one -d type that queries those devices (empty: none does)
     export STUB_SMART_GONE=""         # device names smartctl cannot open at all (no USB bridge involved)
+    export STUB_SMART_ATTR=""         # device names whose bridge rejects the SMART status opcode
+    export STUB_SMART_ATTR_RC=4       # smartctl's exit status for those devices
+    export STUB_SMART_ATTR_WARN=1     # 0: they omit the "based on an Attribute check" warning
     export STUB_SUDO_REFUSE=0         # 1: sudo -n behaves as if no sudoers entry matched
     export STUB_APT_KEPT_BACK=""      # packages still upgradable after full-upgrade, "kept back"
     export STUB_APT_PHASED=""         # packages still upgradable after full-upgrade, deferred by phasing
@@ -101,6 +104,13 @@ case " $STUB_SMART_USB " in
             echo "Read Device Identity failed: scsi error unsupported field in scsi command"
             exit 2
         fi ;;
+esac
+case " $STUB_SMART_ATTR " in
+    *" $dev "*)
+        echo "SMART Status command failed: scsi error unsupported scsi opcode"
+        echo "SMART overall-health self-assessment test result: PASSED"
+        [ "$STUB_SMART_ATTR_WARN" = 1 ] && echo "Warning: This result is based on an Attribute check."
+        exit "$STUB_SMART_ATTR_RC" ;;
 esac
 case " $STUB_SMART_FAIL " in
     *" $dev "*) echo "SMART overall-health self-assessment test result: FAILED!"; echo "Drive failure expected in less than 24 hours. SAVE ALL DATA."; exit 8 ;;
@@ -218,6 +228,33 @@ status_field() { grep "^$1=" "$T/state/system-maintenance-status" | cut -d= -f2-
     grep -q '^SMART: /dev/sdb not PASSED.*smartctl -d sat -H /dev/sdb (exit 8)' "$NTFY_LOG"
     [[ "$(status_field last_run_failed)" == "smart:/dev/sdb" ]]
     ! grep -q 'sntasmedia' "$STUB_ARGV"
+}
+
+@test "SMART on a bridge that rejects the status opcode: exit 4 with an attribute check is PASSED" {
+    export STUB_SMART_ATTR="sda"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ ! -f "$NTFY_LOG" ]
+    [ "$(status_field last_run_status)" = "ok" ]
+    [[ "$output" == *"smart: /dev/sda PASSED (attribute check)"* ]]
+    [[ "$output" == *"smart: checked 3 disk(s), 3 PASSED"* ]]
+}
+
+@test "SMART attribute check with any other exit bit set, or exit 4 without one: still a failure" {
+    export STUB_SMART_ATTR="sda"
+    for rc in 8 16 32 20; do
+        rm -f "$NTFY_LOG"
+        export STUB_SMART_ATTR_RC="$rc"
+        run "$SCRIPT"
+        [ "$status" -eq 1 ]
+        [[ "$(status_field last_run_failed)" == "smart:/dev/sda" ]]
+        grep -q "^SMART: /dev/sda not PASSED.*(exit $rc)" "$NTFY_LOG"
+    done
+    rm -f "$NTFY_LOG"
+    export STUB_SMART_ATTR_RC=4 STUB_SMART_ATTR_WARN=0
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    grep -q '^SMART: /dev/sda not PASSED.*(exit 4)' "$NTFY_LOG"
 }
 
 @test "SMART on a USB bridge no -d type can query: health unknown, not a failure" {
