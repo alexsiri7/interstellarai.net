@@ -13,13 +13,15 @@
 #   stall_check <project>      # pipeline-health: 0 merged PRs in 24h with open work
 #   stall_note <project>       # pipeline-status: "" or the repo's stall line
 #   deadline_kind_note <project> <kind>  # pipeline-status: "" or "#51 (needs_human) ..."
+#   deadline_current_items <kind>  # "<project> <number> <sha> <first_seen>" per current item
 #
 # Kinds (who marks them):
 #   failed-run    pr-maintenance: a PR left by a failed archon run that is out
 #                 of review retries or not retryable (not review-stage, worktree
 #                 gone).
 #   ops-merge     pr-maintenance: a CLEAN PR on a protected repo that touches
-#                 ops/ or .github/, so it needs a human merge.
+#                 ops/ or .github/, so it needs a human merge, or
+#                 ops-pr-review.sh, which works from these marks.
 #   untrusted     pr-maintenance: a PR with a stranger's comment or review.
 #   needs-author  pipeline-health: a trusted issue labelled needs-author.
 #   review-not-ready  pr-maintenance: a draft PR on an archon branch whose run
@@ -356,4 +358,22 @@ deadline_kind_note() {
     out+="#$num (${action}$(( (now - first) / 3600 ))h) "
   done
   printf '%s' "${out% }"
+}
+
+# deadline_current_items <kind> — one "<project> <number> <sha> <first_seen>"
+# line per current item of that kind, by number ascending.
+deadline_current_items() {
+  local kind="$1" f now num project sha first last
+  [ -d "$DEADLINE_STATE_DIR" ] || return 0
+  now=$(deadline_now)
+  for f in "$DEADLINE_STATE_DIR/$kind--"*; do
+    [ -f "$f" ] || continue
+    [[ "${f##*/}" =~ ^[a-z-]+--[A-Za-z0-9._-]+--[0-9]+$ ]] || continue
+    project=$(deadline_get "$f" project); num=$(deadline_get "$f" number)
+    sha=$(deadline_get "$f" sha)
+    first=$(deadline_get "$f" first_seen); last=$(deadline_get "$f" last_seen)
+    [[ "$num" =~ ^[0-9]+$ && "$first" =~ ^[0-9]+$ && "$last" =~ ^[0-9]+$ ]] || continue
+    [ $((now - last)) -le "$DEADLINE_FRESH_SECONDS" ] || continue
+    printf '%s %s %s %s\n' "$project" "$num" "${sha:--}" "$first"
+  done | sort -k2,2n
 }

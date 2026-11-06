@@ -201,6 +201,47 @@ commit_file() {  # commit_file <path>
     [ "$(git -C "$T/live" rev-parse HEAD)" = "$before" ]
 }
 
+# ------------------------------------------- self-update: --approve-reviewed (#246)
+@test "self-update, archon mode: --approve-reviewed releases the one reviewed ops commit" {
+    mk_repos
+    commit_file ops/cron/reviewed.sh
+    reviewed=$(git -C "$T/work" rev-parse HEAD)
+    commit_file src/page.astro
+    target=$(git -C "$T/work" rev-parse HEAD)
+    ARCHON_RUN_AS=archon OPS_CHECKOUT="$T/live" run "$CRON/ops-self-update.sh" --approve-reviewed "$reviewed"
+    [ "$status" -eq 0 ]
+    [ "$(git -C "$T/live" rev-parse HEAD)" = "$target" ]
+    grep -qx "$target" "$HOME/.config/archon-cron/ops-approved"
+    # already live: nothing to do, still success
+    ARCHON_RUN_AS=archon OPS_CHECKOUT="$T/live" run "$CRON/ops-self-update.sh" --approve-reviewed "$reviewed"
+    [ "$status" -eq 0 ]
+}
+
+@test "self-update, archon mode: --approve-reviewed refuses when another ops commit would ride along" {
+    mk_repos
+    commit_file ops/cron/unreviewed.sh
+    commit_file ops/cron/reviewed.sh
+    reviewed=$(git -C "$T/work" rev-parse HEAD)
+    before=$(git -C "$T/live" rev-parse HEAD)
+    ARCHON_RUN_AS=archon OPS_CHECKOUT="$T/live" run "$CRON/ops-self-update.sh" --approve-reviewed "$reviewed"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"not only ${reviewed:0:10}"* ]]
+    [ "$(git -C "$T/live" rev-parse HEAD)" = "$before" ]
+    [ ! -e "$HOME/.config/archon-cron/ops-approved" ]
+}
+
+@test "self-update, archon mode: --approve-reviewed refuses a commit not on origin/main, or no sha" {
+    mk_repos
+    commit_file ops/cron/x.sh
+    before=$(git -C "$T/live" rev-parse HEAD)
+    ARCHON_RUN_AS=archon OPS_CHECKOUT="$T/live" run "$CRON/ops-self-update.sh" --approve-reviewed "$(printf '%040d' 7)"
+    [ "$status" -eq 1 ]
+    ARCHON_RUN_AS=archon OPS_CHECKOUT="$T/live" run "$CRON/ops-self-update.sh" --approve-reviewed HEAD
+    [ "$status" -eq 2 ]
+    [ "$(git -C "$T/live" rev-parse HEAD)" = "$before" ]
+    [ ! -e "$HOME/.config/archon-cron/ops-approved" ]
+}
+
 # ---------------------------------------------------- self-update: ops/host (#182)
 P=/usr/local/sbin/archon-ops-promote
 U=/usr/local/sbin/archon-user-install

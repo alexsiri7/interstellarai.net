@@ -245,7 +245,8 @@ With `archon`:
 - the GitHub identity probe (`lib/gh-factory.sh`: `check_gh_factory`, issue-pickup's launch hold, the `pipeline-status` line) runs `gh api rate_limit` as archon;
 - the stale-worktree trim also runs as archon over its own layout;
 - `pr-maintenance-cron.sh` never auto-merges an interstellarai.net PR that touches `ops/**` or `.github/**`;
-- `ops-self-update.sh` holds any update touching `ops/**` for `ops-self-update.sh --approve` (unless every commit is the owner's pull request), and after a fast-forward that changes `ops/host/**` runs `archon-ops-promote` and `archon-user-install` itself.
+- `ops-pr-review.sh` reviews those held PRs with `claude -p` on the owner's account and merges the ones whose review passes, then releases exactly that commit with `ops-self-update.sh --approve-reviewed`, unless a PR touches the sensitive set (`ops/host/**`, sudoers, `lib/trust.sh`, `lib/screen.sh`, `lib/claude-auth.sh`, secrets and Doppler, the crontab, `lib/run-as.sh`, `lib/archon-shim/`, `archon-projects.txt`, its own gates `ops-pr-review.sh`, `ops-self-update.sh` and `.github/unsafe-change.yml`), adds a network host main does not name, or closes an issue only screening vetted: those wait for the owner (one comment, one ntfy);
+- `ops-self-update.sh` holds any update touching `ops/**` for `ops-self-update.sh --approve` (unless every commit is the owner's pull request, or `--approve-reviewed` releases the one commit `ops-pr-review.sh` merged), and after a fast-forward that changes `ops/host/**` runs `archon-ops-promote` and `archon-user-install` itself.
 
 Setup, cutover, verification and the one-step rollback: [`../host/archon-user/README.md`](../host/archon-user/README.md).
 
@@ -276,7 +277,7 @@ On 2026-10-26, 15 finished, CI-green PRs had sat for 3–6 days. `pr-maintenance
 | Kind | Marked by | When |
 |---|---|---|
 | `failed-run` | `pr-maintenance` | a PR left by a failed archon run that the review-stage retry cannot help: not a review-stage failure, out of retries, or its worktree is gone |
-| `ops-merge` | `pr-maintenance` | a CLEAN PR on a protected repo that touches `ops/` or `.github/`, so it needs a human merge |
+| `ops-merge` | `pr-maintenance` | a CLEAN PR on a protected repo that touches `ops/` or `.github/`, so it needs a human merge, or `ops-pr-review.sh` |
 | `untrusted` | `pr-maintenance` | a PR with a stranger's comment or review (not a listing that merely failed) |
 | `needs-author` | `pipeline-health` | a trusted open issue labelled `needs-author` |
 | `review-not-ready` | `pr-maintenance` | a draft PR on an `archon/task-*` branch whose run finished (no running, paused or failed run holds the branch), whose latest review report (the newest trusted comment by `updated_at` carrying `<!-- archon-review-report -->`) says `Verdict: not ready` with an `action:` of `correct`, `replan` or `needs_human`, and whose head has not moved for 6h (`REVIEW_NOT_READY_SECONDS`). A PR with a stranger's comment is marked `untrusted` instead |
@@ -397,7 +398,8 @@ Status lives in `~/.archon/pipeline-health-state/archon-update-status` (`last_ru
 | `doppler-push.sh` | manual (agents, when a secret changes) | pushes one Doppler config onto one Railway service Doppler's sync does not cover; names only, never deletes (see "Secrets") |
 | `lib/pg-backup.sh` | sourced by `backup-dbs.sh`, `restore-test.sh` | the project list (`PG_BACKUP_PROJECTS`) and its URL variables (`pg_backup_url_vars`), URL → `PG*` env, pg client/server version selection, archive validation |
 | `archon-projects.txt` | data | canonical list of managed project slugs under `alexsiri7/` |
-| `ops-self-update.sh` | every 10 min | keeps this checkout on origin/main (`git pull --ff-only`); under `ARCHON_RUN_AS=archon` an update touching `ops/**` waits for the owner's `ops-self-update.sh --approve` at the console (one ntfy per held commit); after a fast-forward that changes `ops/host/**` it runs `sudo -n archon-ops-promote` then `archon-user-install` itself (one ntfy on failure) |
+| `ops-self-update.sh` | every 10 min | keeps this checkout on origin/main (`git pull --ff-only`); under `ARCHON_RUN_AS=archon` an update touching `ops/**` waits for the owner's `ops-self-update.sh --approve` at the console (one ntfy per held commit), or for `--approve-reviewed <sha>` from `ops-pr-review.sh`, which approves only when `<sha>` is the one `ops/**` commit pending; after a fast-forward that changes `ops/host/**` it runs `sudo -n archon-ops-promote` then `archon-user-install` itself (one ntfy on failure) |
+| `ops-pr-review.sh` | every 30 min (`5,35`), as asiri on `~/.claude` | under `ARCHON_RUN_AS=archon`, works the current `ops-merge` marks oldest first (none: no gh or Claude call). A PR still at its marked head, open, trusted, unlabelled, CLEAN and green is checked against the sensitive set and for new network hosts (hit: one comment and one ntfy, never merged), then reviewed by a tool-less `claude -p` over its text, its linked issues and its diff. `merge`: squash-merged pinned to the reviewed head, then made live with `ops-self-update.sh --approve-reviewed` (a refusal stops further merges until it passes, one ntfy); `block`: a review-report comment Phase 2 corrects; `escalate`: one comment and one ntfy. Every decision is logged and written as a Lachesis note; `pipeline-status` shows "ops PRs awaiting review" |
 | `lib/run-as.sh`, `lib/archon-shim/archon` | sourced by the archon-calling scripts | the `ARCHON_RUN_AS` flag (see "Factory user") and the owner-side `archon` that forwards to the factory user |
 
 ## Tests
