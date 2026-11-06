@@ -1028,19 +1028,20 @@ deploy_relevant_change() {
   echo "$cmp" | jq -r '.files[]' 2>/dev/null | paths_match_watch_patterns "$patterns"
 }
 
-# deploy_lag_threshold <project> — seconds an undeployed main HEAD may age
-# before it counts as lagging: the p95 of recent commit → Production-run
-# latency plus a margin, clamped to [15 min, 1 h]. The latency ends when the
-# run is created, not when it finishes, because Case 2 below only asks whether
-# a run exists at HEAD. Repos without a Production workflow (Railway-native)
-# or with too little history get the floor. The cap keeps a run of slow or
-# re-dispatched deploys from blinding the check.
+# deploy_lag_threshold <project> <workflow_id> — seconds an undeployed main
+# HEAD may age before it counts as lagging: the p95 of recent commit →
+# Production-run latency plus a margin, clamped to [15 min, 1 h], measured on
+# the workflow whose run check_prod_deploy took as the deploy signal. The latency
+# ends when the run is created, not when it finishes, because Case 2 below only
+# asks whether a run exists at HEAD. A deployment-based signal (Railway-native,
+# no workflow id) or too little history gets the floor. The cap keeps a run of
+# slow or re-dispatched deploys from blinding the check.
 deploy_lag_threshold() {
-  local project="$1" floor=900 margin=300 cap=3600 wid p95
-  wid=$(gh api "repos/alexsiri7/$project/actions/workflows?per_page=100"     --jq '[.workflows[] | select(.state == "active" and (.name | test("Production"; "i")))][0].id // empty'     2>/dev/null || echo "")
+  local project="$1" wid="$2" floor=900 margin=300 cap=3600 p95
   if ! [[ "$wid" =~ ^[0-9]+$ ]]; then echo "$floor"; return; fi
   # Earliest successful run per SHA: re-dispatches of the same commit are not latency.
-  p95=$(gh api "repos/alexsiri7/$project/actions/workflows/$wid/runs?branch=main&status=success&per_page=50" 2>/dev/null     | jq '[.workflow_runs[]? | select(.head_sha and .created_at and .head_commit.timestamp)
+  p95=$(gh api "repos/alexsiri7/$project/actions/workflows/$wid/runs?branch=main&status=success&per_page=50" 2>/dev/null \
+    | jq '[.workflow_runs[]? | select(.head_sha and .created_at and .head_commit.timestamp)
            | {sha: .head_sha, lat: ((.created_at | fromdateiso8601) - (.head_commit.timestamp | fromdateiso8601))}]
           | group_by(.sha) | map(map(.lat) | min) | map(select(. >= 0)) | sort
           | if length < 5 then empty else .[((length * 0.95) | ceil) - 1] | floor end' 2>/dev/null || echo "")
@@ -1091,15 +1092,16 @@ check_prod_deploy() {
   # with an August run for reli while the September HEAD was already live,
   # and comparing HEAD against it filed reli#1512 and tripped the stall
   # diagnostic. State is judged below on the deploy at HEAD itself.
-  local latest_sha="" latest_ts="" latest_url="" latest_dep_id=""
+  local latest_sha="" latest_ts="" latest_url="" latest_dep_id="" latest_wf_id=""
   local wf_run
   wf_run=$(gh run list --repo "alexsiri7/$project" --branch main --limit 10 \
-    --json name,headSha,updatedAt,url 2>/dev/null \
+    --json name,headSha,updatedAt,url,workflowDatabaseId 2>/dev/null \
     | jq -c '[.[] | select(.name | test("Production"; "i"))] | .[0] // empty' 2>/dev/null || echo "")
   if [ -n "$wf_run" ]; then
     latest_sha=$(echo "$wf_run" | jq -r '.headSha')
     latest_ts=$(echo "$wf_run" | jq -r '.updatedAt')
     latest_url=$(echo "$wf_run" | jq -r '.url')
+    latest_wf_id=$(echo "$wf_run" | jq -r '.workflowDatabaseId // empty')
   fi
   if [ -z "$latest_sha" ]; then
     local dep
@@ -1253,7 +1255,7 @@ EOF
       fi
 
       local threshold
-      threshold=$(deploy_lag_threshold "$project")
+      threshold=$(deploy_lag_threshold "$project" "$latest_wf_id")
       if [ "$age" -le "$threshold" ]; then
         log "$project: main ${head_sha:0:10} undeployed for ${age}s, within its ${threshold}s lag threshold — waiting"
         return
@@ -2026,13 +2028,21 @@ check_progress() {
   # times with nothing to find (#261). needs-author is read by label because
   # check_deadlines writes its marks after this check.
   local ignore="needs-author $STALL_IGNORE_LABELS"
-  local items="" item
+  local items="" item unlisted=""
   for project in "${REPOS[@]}"; do
-    local found
+    local issues prs found
+    # A failed listing is not an empty one: judging the tick without it would
+    # call a real stall idle.
+    if ! issues=$(gh issue list --repo "alexsiri7/$project" --state open --limit 100 \
+                    --json number,labels,createdAt,author,title,body 2>/dev/null) || \
+       ! prs=$(gh pr list --repo "alexsiri7/$project" --state open \
+                 --json number,labels,isDraft,mergeStateStatus,createdAt,author,isCrossRepository 2>/dev/null); then
+      unlisted+=" $project"
+      continue
+    fi
     # Trusted items only: the factory never works an untrusted one, so counting
     # it would read as a permanent stall and fire the diagnostic every 2h at it.
-    found=$(gh issue list --repo "alexsiri7/$project" --state open --limit 100 \
-          --json number,labels,createdAt,author,title,body 2>/dev/null \
+    found=$(printf '%s' "$issues" \
         | TRUST_QUIET=1 trust_filter_issues "$project" \
         | jq -r --arg since "$since_iso" --arg ignore "$ignore" '
             ($ignore | split(" ") | map(select(. != ""))) as $ig
@@ -2042,7 +2052,7 @@ check_progress() {
             | select(any($l[]; . as $n | $ig | any(.[]; . == $n)) | not)
             | .number' 2>/dev/null || true)
     found+=$'\n'
-    found+=$(gh pr list --repo "alexsiri7/$project" --state open --json number,labels,isDraft,mergeStateStatus,createdAt,author,isCrossRepository 2>/dev/null \
+    found+=$(printf '%s' "$prs" \
         | trust_filter_prs "$project" full \
         | jq -r --arg since "$since_iso" --arg ignore "$ignore" '
             ($ignore | split(" ") | map(select(. != ""))) as $ig
@@ -2056,6 +2066,10 @@ check_progress() {
       items+="$project#$item"$'\n'
     done <<< "$found"
   done
+  if [ -n "$unlisted" ]; then
+    log "no progress, but could not list issues/PRs for${unlisted} — skipping the stall verdict this tick"
+    return
+  fi
   items=$(printf '%s' "$items" | sort -u)
   local pending=0
   [ -n "$items" ] && pending=$(printf '%s\n' "$items" | wc -l)
