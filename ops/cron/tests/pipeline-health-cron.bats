@@ -991,6 +991,7 @@ stub_gh_for_prod_deploy() {
             "api repos/alexsiri7/test-project/deployments?sha="*) echo "$HEAD_DEPLOYMENTS_FIXTURE" ;;
             "api repos/alexsiri7/test-project/deployments?per_page=10") echo "$DEPLOYMENTS_FIXTURE" ;;
             "api repos/alexsiri7/test-project/deployments/"*) echo "$DEPLOY_STATUS_FIXTURE" ;;
+            "api repos/alexsiri7/test-project/actions/workflows/123/runs?"*) echo "${WORKFLOW_RUNS_FIXTURE:-}" ;;
             "issue list") echo "" ;;
             "issue create") echo "$*" > "$ISSUE_SENTINEL"; record_issue_body "$@"; echo "https://github.com/alexsiri7/test-project/issues/42" ;;
             *) echo "" ;;
@@ -1010,14 +1011,29 @@ setup_prod_deploy_env() {
     # HEAD "aaa" is hours old unless a case is about a fresh push.
     HEAD_FIXTURE='{"sha":"aaa","ts":"2026-01-01T00:00:00Z"}'
     # The listing leads with a stale run, which is what filed reli#1512.
-    RUNS_FIXTURE='[{"name":"Staging → Production Pipeline","headSha":"old","updatedAt":"2026-08-26T05:16:16Z","url":"https://example.com/runs/1"}]'
+    # Its workflow, 123, is the only one whose run history the stub serves.
+    RUNS_FIXTURE='[{"name":"Staging → Production Pipeline","headSha":"old","updatedAt":"2026-08-26T05:16:16Z","url":"https://example.com/runs/1","workflowDatabaseId":123}]'
     HEAD_RUNS_FIXTURE='[]'
     DEPLOYMENTS_FIXTURE='[]'
     HEAD_DEPLOYMENTS_FIXTURE='[]'
     DEPLOY_STATUS_FIXTURE='success'
     load_fn fire_ship_and_settle
+    # shellcheck disable=SC1090
+    source <(awk '/^DEPLOY_LAG_FLOOR_SECONDS=/{print}' "$SCRIPT_FILE")
+    load_fn deploy_lag_threshold
     load_fn check_prod_deploy
 }
+
+# Successful Production runs on <count> distinct SHAs, each created <latency>
+# seconds after its commit: raw API JSON for the workflow runs endpoint.
+workflow_runs_fixture() {
+    jq -n --argjson lat "$1" --argjson n "$2" --argjson now "$(date +%s)" '
+        {workflow_runs: [range($n) | {head_sha: "s\(.)",
+            head_commit: {timestamp: ($now - 86400 - . * 3600 | todateiso8601)},
+            created_at: ($now - 86400 - . * 3600 + $lat | todateiso8601)}]}'
+}
+
+head_aged() { HEAD_FIXTURE='{"sha":"aaa","ts":"'"$(date -u -d "@$(( $(date +%s) - $1 ))" '+%Y-%m-%dT%H:%M:%SZ')"'"}'; }
 
 @test "check_prod_deploy judges the deploy at main HEAD, not the run the listing puts first" {
     setup_prod_deploy_env
@@ -1094,6 +1110,69 @@ setup_prod_deploy_env() {
 
     [ ! -f "$ISSUE_SENTINEL" ]
     [ -f "$STATE_DIR/prod-deploy-stale-test-project-zzz" ]
+}
+
+# #261: word-coach-annie's CI → dispatch → deploy chain runs 13-16 min, so a
+# flat 15-min cutoff filed lag issues for deploys that were on their way.
+@test "check_prod_deploy does not call a 16-minute undeployed HEAD lagging when the repo's p95 is 15 minutes" {
+    setup_prod_deploy_env
+    WORKFLOW_RUNS_FIXTURE=$(workflow_runs_fixture 900 20)
+    head_aged 960
+    stub_gh_for_prod_deploy
+
+    check_prod_deploy "test-project"
+
+    [ ! -f "$ISSUE_SENTINEL" ]
+    [ ! -f "$STATE_DIR/prod-deploy-stale-test-project-aaa" ]
+}
+
+@test "check_prod_deploy files lag once HEAD outlives the repo's p95 plus margin" {
+    setup_prod_deploy_env
+    WORKFLOW_RUNS_FIXTURE=$(workflow_runs_fixture 900 20)
+    head_aged 1260
+    stub_gh_for_prod_deploy
+
+    check_prod_deploy "test-project"
+
+    [ -f "$ISSUE_SENTINEL" ]
+    grep -q ">20 minutes" "$STATE_DIR/issue-body"
+    [ -f "$STATE_DIR/prod-deploy-stale-test-project-aaa" ]
+}
+
+@test "check_prod_deploy caps the lag threshold at an hour" {
+    setup_prod_deploy_env
+    WORKFLOW_RUNS_FIXTURE=$(workflow_runs_fixture 7200 20)
+    head_aged 3700
+    stub_gh_for_prod_deploy
+
+    check_prod_deploy "test-project"
+
+    [ -f "$ISSUE_SENTINEL" ]
+    grep -q ">60 minutes" "$STATE_DIR/issue-body"
+}
+
+@test "deploy_lag_threshold counts a re-dispatched commit once, at its first run" {
+    setup_prod_deploy_env
+    # 20 commits deployed 10 minutes after landing, and s0 re-dispatched six
+    # times 50 minutes later. As separate samples the re-runs would be the p95.
+    WORKFLOW_RUNS_FIXTURE=$(workflow_runs_fixture 600 20 | jq --argjson now "$(date +%s)" '
+        .workflow_runs += [range(6) | {head_sha: "s0",
+            head_commit: {timestamp: ($now - 86400 | todateiso8601)},
+            created_at: ($now - 86400 + 3000 | todateiso8601)}]')
+    stub_gh_for_prod_deploy
+
+    [ "$(deploy_lag_threshold test-project 123)" = 900 ]
+}
+
+@test "check_prod_deploy keeps the 15-minute floor with too little run history" {
+    setup_prod_deploy_env
+    WORKFLOW_RUNS_FIXTURE=$(workflow_runs_fixture 1800 4)
+    head_aged 960
+    stub_gh_for_prod_deploy
+
+    check_prod_deploy "test-project"
+
+    [ -f "$ISSUE_SENTINEL" ]
 }
 
 # ── check_prod_deploy: Railway watchPatterns ────────────────────────────────
@@ -1218,8 +1297,13 @@ setup_progress_env() {
     disown() { :; }
     echo $(( $(date +%s) - 1800 )) > "$STATE_DIR/last-progress-ts"
     STALL_MARKER="$STATE_DIR/last-stall-diagnostic-ts"
+    STALL_SET="$STATE_DIR/last-stall-diagnostic-set"
     load_fn check_progress
     load_trust
+    export DEADLINE_STATE_DIR="$STATE_DIR/deadlines"
+    unset _ARCHON_DEADLINES_SH DEADLINE_NOW
+    # shellcheck source=../lib/deadlines.sh
+    source "$(dirname "$SCRIPT_FILE")/lib/deadlines.sh"
 }
 
 # The real lib/trust.sh, state and config kept under $STATE_DIR, ntfy recorded.
@@ -1255,6 +1339,24 @@ load_trust() {
     check_progress
 
     [ -f "$STALL_MARKER" ]
+}
+
+@test "check_progress gives no idle verdict when it could not list the PRs" {
+    setup_progress_env
+    gh() {
+        case "$1 $2" in
+            "pr list") return 1 ;;
+            "issue list") echo '[]' ;;
+            *) echo 0 ;;
+        esac
+    }
+    log() { echo "$*"; }
+
+    run check_progress
+
+    [[ "$output" == *"could not list issues/PRs for test-project"* ]]
+    [[ "$output" != *"idle, not stalled"* ]]
+    [ ! -f "$STALL_MARKER" ]
 }
 
 @test "check_progress does not count a stranger's queued issue or fork PR as pending" {
@@ -1312,6 +1414,83 @@ load_trust() {
     check_progress
 
     [ ! -f "$STALL_MARKER" ]
+}
+
+# #261: the diagnostic fired 84 times at work that was waiting on a person.
+@test "check_progress fires no diagnostic when every pending item waits on its author" {
+    setup_progress_env
+    ISSUE_LIST_FIXTURE='[{"number":7,"author":{"login":"alexsiri7"},"createdAt":"2026-01-01T00:00:00Z","labels":[{"name":"archon:in-progress"},{"name":"needs-author"}]}]'
+    PR_LIST_FIXTURE='[{"number":8,"author":{"login":"alexsiri7"},"isCrossRepository":false,"createdAt":"2026-01-01T00:00:00Z","isDraft":false,"mergeStateStatus":"CLEAN","labels":[{"name":"hold"}]}]'
+    stub_gh_for_progress
+
+    check_progress
+
+    [ ! -f "$STALL_MARKER" ]
+}
+
+@test "check_progress does not count a PR parked by pr-maintenance" {
+    setup_progress_env
+    ISSUE_LIST_FIXTURE='[]'
+    PR_LIST_FIXTURE='[{"number":8,"author":{"login":"alexsiri7"},"isCrossRepository":false,"createdAt":"2026-01-01T00:00:00Z","isDraft":false,"mergeStateStatus":"CLEAN","labels":[]}]'
+    stub_gh_for_progress
+    deadline_mark ops-merge test-project 8 abc branch "needs a human merge"
+
+    check_progress
+
+    [ ! -f "$STALL_MARKER" ]
+}
+
+@test "check_progress counts a PR whose parked mark has gone stale" {
+    setup_progress_env
+    ISSUE_LIST_FIXTURE='[]'
+    PR_LIST_FIXTURE='[{"number":8,"author":{"login":"alexsiri7"},"isCrossRepository":false,"createdAt":"2026-01-01T00:00:00Z","isDraft":false,"mergeStateStatus":"CLEAN","labels":[]}]'
+    stub_gh_for_progress
+    DEADLINE_NOW=$(( $(date +%s) - 7200 )) deadline_mark ops-merge test-project 8 abc branch "needs a human merge"
+
+    check_progress
+
+    [ -f "$STALL_MARKER" ]
+    [ "$(cat "$STALL_SET")" = "test-project#8" ]
+}
+
+@test "check_progress backs off while the pending set is unchanged" {
+    setup_progress_env
+    ISSUE_LIST_FIXTURE='[{"number":7,"author":{"login":"alexsiri7"},"createdAt":"2026-01-01T00:00:00Z","labels":[{"name":"archon:queued"}]}]'
+    stub_gh_for_progress
+    local stamp=$(( $(date +%s) - 3 * 3600 ))
+    echo "$stamp" > "$STALL_MARKER"
+    echo "test-project#7" > "$STALL_SET"
+
+    check_progress
+
+    [ "$(cat "$STALL_MARKER")" = "$stamp" ]
+}
+
+@test "check_progress fires again when the pending set changed" {
+    setup_progress_env
+    ISSUE_LIST_FIXTURE='[{"number":7,"author":{"login":"alexsiri7"},"createdAt":"2026-01-01T00:00:00Z","labels":[{"name":"archon:queued"}]}]'
+    stub_gh_for_progress
+    local stamp=$(( $(date +%s) - 3 * 3600 ))
+    echo "$stamp" > "$STALL_MARKER"
+    echo "test-project#6" > "$STALL_SET"
+
+    check_progress
+
+    [ "$(cat "$STALL_MARKER")" != "$stamp" ]
+    [ "$(cat "$STALL_SET")" = "test-project#7" ]
+}
+
+@test "check_progress fires again for the same pending set after 12h" {
+    setup_progress_env
+    ISSUE_LIST_FIXTURE='[{"number":7,"author":{"login":"alexsiri7"},"createdAt":"2026-01-01T00:00:00Z","labels":[{"name":"archon:queued"}]}]'
+    stub_gh_for_progress
+    local stamp=$(( $(date +%s) - 13 * 3600 ))
+    echo "$stamp" > "$STALL_MARKER"
+    echo "test-project#7" > "$STALL_SET"
+
+    check_progress
+
+    [ "$(cat "$STALL_MARKER")" != "$stamp" ]
 }
 
 @test "check_cron_heartbeats watches issue-pickup and pr-maintenance at their 15-minute periods" {

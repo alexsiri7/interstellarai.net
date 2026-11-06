@@ -13,6 +13,7 @@
 #   stall_check <project>      # pipeline-health: 0 merged PRs in 24h with open work
 #   stall_note <project>       # pipeline-status: "" or the repo's stall line
 #   deadline_kind_note <project> <kind>  # pipeline-status: "" or "#51 (needs_human) ..."
+#   deadline_parked <project> <number>   # pipeline-health: is the item parked now?
 #
 # Kinds (who marks them):
 #   failed-run    pr-maintenance: a PR left by a failed archon run that is out
@@ -356,4 +357,19 @@ deadline_kind_note() {
     out+="#$num (${action}$(( (now - first) / 3600 ))h) "
   done
   printf '%s' "${out% }"
+}
+
+# deadline_parked <project> <number> — 0 when the item has a current mark of
+# any kind. Issues and PRs share one number space per repo.
+deadline_parked() {
+  local project="$1" num="$2" f last now
+  [ -d "$DEADLINE_STATE_DIR" ] || return 1
+  now=$(deadline_now)
+  for f in "$DEADLINE_STATE_DIR/"*"--$project--$num"; do
+    [ -f "$f" ] || continue
+    last=$(deadline_get "$f" last_seen)
+    [[ "$last" =~ ^[0-9]+$ ]] || continue
+    [ $((now - last)) -le "$DEADLINE_FRESH_SECONDS" ] && return 0
+  done
+  return 1
 }
