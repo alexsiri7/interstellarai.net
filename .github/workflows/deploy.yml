@@ -19,6 +19,8 @@ jobs:
   deploy:
     name: Build and deploy
     runs-on: ubuntu-latest
+    env:
+      DEPLOY_COMMAND: pages deploy dist --project-name=interstellarai-net --branch=${{ github.head_ref || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -33,12 +35,31 @@ jobs:
       - name: Build Astro
         run: npm run build
 
+      # Cloudflare's deploy stage sometimes fails with "Unknown internal error" after a good upload (#263),
+      # so the deploy gets one retry; a second failure is real and turns the job red.
       - name: Deploy to Cloudflare Pages
+        id: deploy
+        continue-on-error: true
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy dist --project-name=interstellarai-net --branch=${{ github.head_ref || github.ref_name }}
+          command: ${{ env.DEPLOY_COMMAND }}
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait before retrying deploy
+        if: steps.deploy.outcome == 'failure'
+        run: |
+          echo "::warning::Cloudflare Pages deploy failed; retrying once in 60s"
+          sleep 60
+
+      - name: Retry deploy to Cloudflare Pages
+        if: steps.deploy.outcome == 'failure'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: ${{ env.DEPLOY_COMMAND }}
           gitHubToken: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Notify prod landing
