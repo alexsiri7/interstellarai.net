@@ -19,6 +19,8 @@ jobs:
   deploy:
     name: Build and deploy
     runs-on: ubuntu-latest
+    env:
+      DEPLOY_COMMAND: pages deploy dist --project-name=interstellarai-net --branch=${{ github.head_ref || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -42,7 +44,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy dist --project-name=interstellarai-net --branch=${{ github.head_ref || github.ref_name }}
+          command: ${{ env.DEPLOY_COMMAND }}
           gitHubToken: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait before retrying deploy
@@ -57,7 +59,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy dist --project-name=interstellarai-net --branch=${{ github.head_ref || github.ref_name }}
+          command: ${{ env.DEPLOY_COMMAND }}
           gitHubToken: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Notify prod landing
