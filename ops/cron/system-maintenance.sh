@@ -135,9 +135,16 @@ smart_query() {
 }
 
 # smart_judge <dev>: PASSED, or fail + urgent ntfy, on smart_query's last output.
+# A bridge that rejects the SMART status opcode makes smartctl judge health from
+# the attributes instead and set exit bit 2 alone ("command failed"); that
+# PASSED stands. Any other bit set (failing, prefail attributes, error logs) fails.
 smart_judge() {
-    if [ "$smart_rc" -eq 0 ] && printf '%s\n' "$smart_out" | grep -q 'PASSED'; then
-        log "smart: /dev/$1 PASSED${smart_type:+ (-d $smart_type)}"
+    local how=""
+    if [ "$smart_rc" -eq 4 ] && printf '%s\n' "$smart_out" | grep -q 'based on an Attribute check'; then
+        how=" (attribute check)"
+    fi
+    if { [ "$smart_rc" -eq 0 ] || [ -n "$how" ]; } && printf '%s\n' "$smart_out" | grep -q 'PASSED'; then
+        log "smart: /dev/$1 PASSED$how${smart_type:+ (-d $smart_type)}"
         passed=$((passed + 1))
         return
     fi
