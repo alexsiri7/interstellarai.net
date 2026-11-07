@@ -136,7 +136,10 @@ lands in the status file as `last_run_kept_back=a,b` (empty when none) — it
 does not fail the run. Every disabled snap revision removed; journal vacuumed
 to 500M; `smartctl -H` on each `disk` from `lsblk` (loop devices excluded;
 `SYSTEM_MAINT_SMART_SKIP="sda ..."` leaves a disk out) with an urgent ntfy for
-anything not `PASSED`. A disk whose plain `-H` names a USB bridge smartctl
+anything not `PASSED`. A `PASSED` whose only exit bit is 2 (the bridge
+rejected the status command and smartctl fell back to "This result is based on
+an Attribute check") is logged `PASSED (attribute check)`; any other exit bit
+still fails. A disk whose plain `-H` names a USB bridge smartctl
 does not recognise ("Unknown USB bridge", "Please specify device type with the
 -d option") is retried with `-d sat`, `-d sntasmedia`, `-d sntjmicron`,
 `-d sntrealtek` until one reaches a verdict, which is then judged the same way.
