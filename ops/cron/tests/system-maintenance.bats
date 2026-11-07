@@ -24,6 +24,7 @@ setup() {
     export STUB_SMART_ATTR=""         # device names whose bridge rejects the SMART status opcode
     export STUB_SMART_ATTR_RC=4       # smartctl's exit status for those devices
     export STUB_SMART_ATTR_WARN=1     # 0: they omit the "based on an Attribute check" warning
+    export STUB_SMART_ATTR_FAIL=0     # 1: their attribute check reports FAILED! instead of PASSED
     export STUB_SUDO_REFUSE=0         # 1: sudo -n behaves as if no sudoers entry matched
     export STUB_APT_KEPT_BACK=""      # packages still upgradable after full-upgrade, "kept back"
     export STUB_APT_PHASED=""         # packages still upgradable after full-upgrade, deferred by phasing
@@ -108,7 +109,11 @@ esac
 case " $STUB_SMART_ATTR " in
     *" $dev "*)
         echo "SMART Status command failed: scsi error unsupported scsi opcode"
-        echo "SMART overall-health self-assessment test result: PASSED"
+        if [ "$STUB_SMART_ATTR_FAIL" = 1 ]; then
+            echo "SMART overall-health self-assessment test result: FAILED!"
+        else
+            echo "SMART overall-health self-assessment test result: PASSED"
+        fi
         [ "$STUB_SMART_ATTR_WARN" = 1 ] && echo "Warning: This result is based on an Attribute check."
         exit "$STUB_SMART_ATTR_RC" ;;
 esac
@@ -255,6 +260,15 @@ status_field() { grep "^$1=" "$T/state/system-maintenance-status" | cut -d= -f2-
     run "$SCRIPT"
     [ "$status" -eq 1 ]
     grep -q '^SMART: /dev/sda not PASSED.*(exit 4)' "$NTFY_LOG"
+}
+
+@test "SMART attribute check at exit 4 reporting FAILED!: still a failure, never logged PASSED" {
+    export STUB_SMART_ATTR="sda" STUB_SMART_ATTR_FAIL=1
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [[ "$(status_field last_run_failed)" == "smart:/dev/sda" ]]
+    grep -q '^SMART: /dev/sda not PASSED.*(exit 4).*FAILED!' "$NTFY_LOG"
+    [[ "$output" != *"smart: /dev/sda PASSED"* ]]
 }
 
 @test "SMART on a USB bridge no -d type can query: health unknown, not a failure" {
