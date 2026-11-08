@@ -132,6 +132,7 @@ LOG_DIR="${ARCHON_CRON_LOG_DIR:-$HOME/.local/state/archon-cron/logs}"
 STATUS_FILE="$STATE_DIR/archon-update-status"
 PREVIOUS_FILE="$STATE_DIR/archon-update-previous"
 LOCK_FILE="$STATE_DIR/archon-update.lock"
+# + <tag>: the URL of the one issue filed for that tag (file_issue).
 ISSUE_MARKER_PREFIX="$STATE_DIR/archon-update-issue-"
 
 LIVE_DIR="${ARCHON_LIVE_DIR:-/mnt/ext-fast/archon}"
@@ -399,6 +400,11 @@ EOF
     printf '%s\n' "$context"
 }
 
+# separator_lines <rev> <file>: how many `=======` lines <file> has at <rev>.
+separator_lines() {
+    git -C "$WORKTREE" show "$1:$2" 2>/dev/null | grep -cx '=======' || true
+}
+
 # resolve_conflicts <file...>: Claude resolves the conflicted merge in
 # $WORKTREE with file tools only, confined to it; then the result must touch
 # nothing but those files and keep no conflict marker, and the merge is
@@ -406,7 +412,7 @@ EOF
 resolve_conflicts() {
     local prompt="$LOG_DIR/archon-update-$TAG-resolve-prompt.txt"
     local out="$LOG_DIR/archon-update-$TAG-resolve.log"
-    local json rc touched outside marked="" f
+    local json rc touched outside marked="" f separators
     resolve_prompt "$(git -C "$WORKTREE" merge-base HEAD "$TAG")" "$@" > "$prompt"
     log "+ claude -p --model $RESOLVE_MODEL --restricted --tools Read,Edit,Write,Glob,Grep (in $WORKTREE) — $out"
     json=$(cd "$WORKTREE" && CLAUDE_CONFIG_DIR="$RESOLVE_CLAUDE_DIR" timeout "$RESOLVE_TIMEOUT" \
@@ -422,9 +428,14 @@ resolve_conflicts() {
     touched=$( { git -C "$WORKTREE" diff --name-only; git -C "$WORKTREE" ls-files --others --exclude-standard; } | LC_ALL=C sort -u)
     outside=$(LC_ALL=C comm -23 <(printf '%s\n' "$touched") <(printf '%s\n' "$@" | LC_ALL=C sort -u) | grep -v '^$' | paste -sd ' ')
     if [ -n "$outside" ]; then RESOLVE_FAILURE="edited files outside the conflict: $outside"; return 1; fi
-    # No `=======` here: a Markdown heading underline can be exactly that.
+    # A `=======` line can be a Markdown heading underline: it is a leftover
+    # separator only beyond the count either side of the merge has.
     for f in "$@"; do
-        if [ -f "$WORKTREE/$f" ] && grep -qE '^(<<<<<<<|\|\|\|\|\|\|\||>>>>>>>)( |$)' "$WORKTREE/$f"; then
+        [ -f "$WORKTREE/$f" ] || continue
+        separators=$(grep -cx '=======' "$WORKTREE/$f")
+        if grep -qE '^(<<<<<<<|\|\|\|\|\|\|\||>>>>>>>)( |$)' "$WORKTREE/$f" ||
+            { [ "$separators" -gt "$(separator_lines HEAD "$f")" ] &&
+              [ "$separators" -gt "$(separator_lines "$TAG" "$f")" ]; }; then
             marked="$marked$f "
         fi
     done
@@ -442,9 +453,9 @@ resolve_conflicts() {
 # script filed for $TAG and older tags. A marker goes only with its issue.
 close_resolved_escalations() {
     local marker tag url out
-    for marker in "$STATE_DIR"/archon-update-issue-v*; do
+    for marker in "$ISSUE_MARKER_PREFIX"v*; do
         [ -f "$marker" ] || continue
-        tag="${marker##*/archon-update-issue-}"
+        tag="${marker#"$ISSUE_MARKER_PREFIX"}"
         [ "$(printf '%s\n%s\n' "$tag" "$TAG" | sort -V | tail -n 1)" = "$TAG" ] || continue
         url=$(cat "$marker")
         if out=$(gh issue close "$url" --comment "archon-update.sh brought $LIVE_DIR to $TAG ($BRANCH); this escalation is resolved." 2>&1); then
