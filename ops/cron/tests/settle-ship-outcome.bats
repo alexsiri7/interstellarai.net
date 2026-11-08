@@ -1121,7 +1121,7 @@ asked_proceed() {
     [[ "$(asked_default)" == "Run #9 once more, with this verdict as direction. <!-- archon-settle-default: proceed -->" ]]
 }
 
-@test "tiers: No delivery needed naming an open PR, or an open sub-issue, defaults to running once more" {
+@test "tiers: No delivery needed naming an open PR, an open sub-issue, or an unlooked-up ref, defaults to running once more" {
     lachesis_on
     echo 'No delivery needed: PR #50 implements this.' > "$RUN_LOG"
     ref 50 pr
@@ -1133,6 +1133,13 @@ asked_proceed() {
     : > "$LACHESIS_ARGV"; : > "$GH_ARGV"
     echo 'No delivery needed: every phase of this epic has shipped.' > "$RUN_LOG"
     printf '3\t1\n' > "$T/fixtures/sub-9"
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 9
+    asked_proceed
+
+    : > "$LACHESIS_ARGV"; : > "$GH_ARGV"; rm "$T/fixtures/sub-9"
+    echo 'No delivery needed: see #8 for details.' > "$RUN_LOG"
     run "$SCRIPT" testproj 9 "$RUN_LOG"
     [ "$status" -eq 0 ]
     assert_parked 9
