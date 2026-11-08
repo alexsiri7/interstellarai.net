@@ -39,7 +39,8 @@
 #          pending set again only after 12h)
 #  5b. Open archon PRs (non-draft, not CLEAN or BLOCKED) idle >2h → fire
 #      archon-pr-maintenance, trusted authors/comments only; after 3 attempts
-#      on one head SHA, ntfy + file a "factory stuck" issue (dedup by PR + SHA)
+#      on one head SHA, ntfy + file a "factory stuck" issue, one per PR: a
+#      later stuck SHA is a comment on the open one (#260)
 #   6. Open archon PRs with failed CI → fire archon-assist to diagnose + fix
 #      (dedup by PR number, reset when PR merges/closes)
 #  6b. Staging deploy HTTP health → ntfy operator if staging URL returns non-2xx/3xx
@@ -277,8 +278,19 @@ notify() { notify_checked "$@" || true; }
 # INGEST_LABELS ("enhancement", "bug"), so these issues will NOT be re-queued
 # into archon — they exist purely as a durable work item for a human.
 #
-# Dedup: at most one open `manual-review` issue per (repo, kind, sha). We
-# search existing open issues by title for "SHA <sha>" and skip if one exists.
+# Dedup:
+#   - main-ci: at most one open `manual-review` issue per (repo, sha), found by
+#     "SHA <sha>" in its title.
+#   - pr-ci / stuck-pr: at most one open escalation per PR (repo + number),
+#     whatever its kind or head SHA (#260). A PR held by a gate moves to a new
+#     head SHA each time someone rebases it, and an issue per SHA was one
+#     archon-ship run and one Lachesis author question each: Word Coach Annie
+#     PR #1292 got seven. A newer SHA becomes one comment on the open issue
+#     (pr_escalation_comment), so the issue, and its question, are raised once
+#     per PR. See find_pr_escalation for how the open issue is found.
+#
+# Returns 1 when it could not tell whether an escalation is already open, or
+# could not file or comment, so the caller can let the next tick retry.
 #
 # Args:
 #   $1 repo             — "owner/repo" (e.g. "alexsiri7/word-coach-annie")
@@ -299,17 +311,45 @@ file_stuck_issue() {
     --description "Factory escalation — needs human attention" \
     --force >/dev/null 2>&1 || true
 
-  # Dedup: skip if an open manual-review issue for this SHA already exists.
-  local existing
-  existing=$(gh issue list --repo "$repo" --state open --label manual-review \
-    --search "SHA $sha in:title" --json number --jq '.[0].number // empty' \
-    2>/dev/null || echo "")
-  if [ -n "$existing" ]; then
-    log "$repo: manual-review issue #$existing already open for SHA $sha ($kind) — skipping"
-    return
+  local pr_num="" existing
+  case "$kind" in
+    pr-ci|stuck-pr)
+      pr_num=$(grep -oE '/pull/[0-9]+$' <<< "$evidence_link" | grep -oE '[0-9]+$')
+      ;;
+  esac
+
+  if [ -n "$pr_num" ]; then
+    # A failed lookup is not "none open": filing on it is the duplicate this
+    # dedup exists to stop.
+    if ! existing=$(find_pr_escalation "$repo" "$pr_num"); then
+      log "$repo: could not list open escalations for PR #$pr_num ($kind) — not filing, retrying next tick"
+      return 1
+    fi
+    if [ -n "$existing" ]; then
+      pr_escalation_comment "$repo" "$existing" "$kind" "$sha" \
+        "$subject_summary" "$attempts" "$log_file"
+      return
+    fi
+  else
+    # Dedup: skip if an open manual-review issue for this SHA already exists.
+    existing=$(gh issue list --repo "$repo" --state open --label manual-review \
+      --search "SHA $sha in:title" --json number --jq '.[0].number // empty' \
+      2>/dev/null || echo "")
+    if [ -n "$existing" ]; then
+      log "$repo: manual-review issue #$existing already open for SHA $sha ($kind) — skipping"
+      return
+    fi
   fi
 
+  # A PR escalation outlives its first SHA, so its title names none; the body
+  # carries the first SHA and each comment a later one.
   local title="factory stuck: $subject_summary after $attempts attempts (SHA $sha)"
+  local marker_line=""
+  if [ -n "$pr_num" ]; then
+    title="factory stuck: $subject_summary after $attempts attempts"
+    marker_line="
+<!-- pipeline-health-escalation: $repo#$pr_num -->"
+  fi
   local body
   body=$(cat <<EOF
 ## Factory escalation — manual review required
@@ -323,7 +363,7 @@ file_stuck_issue() {
 
 Auto-filed by \`pipeline-health-cron.sh\` after \`sha_attempt_decide\` exhausted the remediation budget for this SHA. The ntfy alert has also been sent.
 
-This issue is labeled \`manual-review\` only — \`issue-pickup-cron.sh\` will NOT auto-queue it into archon (its \`INGEST_LABELS\` is \`enhancement\` / \`bug\`). A human should diagnose why automated remediation kept failing for this SHA and either fix it or close the issue.
+This issue is labeled \`manual-review\` only — \`issue-pickup-cron.sh\` will NOT auto-queue it into archon (its \`INGEST_LABELS\` is \`enhancement\` / \`bug\`). A human should diagnose why automated remediation kept failing for this SHA and either fix it or close the issue.$marker_line
 EOF
 )
 
@@ -339,7 +379,85 @@ EOF
     add_to_project "$repo" "$issue_num"
   else
     log "$repo: failed to file manual-review issue for $kind at $sha"
+    return 1
   fi
+}
+
+# ----------------------------------------------------------------------------
+# find_pr_escalation <repo> <pr>: echo the number of the open escalation this
+# script filed for PR <pr> of <repo> (pr-ci or stuck-pr), nothing if none.
+# Returns 1 when the issues could not be listed.
+#
+# An issue filed since #260 carries a hidden
+#   <!-- pipeline-health-escalation: <repo>#<pr> -->
+# line. One filed before it is matched on what every file_stuck_issue body
+# already says (a pr-ci/stuck-pr **Kind** and an **Evidence** link to <repo>'s
+# PR), or on its title, "factory stuck: <project> PR #<pr> ...". Either way the
+# body must carry the Auto-filed line, as open_escalations requires. Lists open issues rather than searching, as open_escalations
+# does, so one filed on the tick before is seen before the search index has it.
+# Several open (the pre-#260 per-SHA ones): the newest, which is the one a
+# human most likely reads next.
+# ----------------------------------------------------------------------------
+find_pr_escalation() {
+  local repo="$1" pr_num="$2" issues
+  issues=$(gh issue list --repo "$repo" --state open --limit 200 \
+    --json number,title,body 2>/dev/null) || return 1
+  jq -r --arg repo "$repo" --arg pr "$pr_num" --arg project "${repo#*/}" '
+    ("<!-- pipeline-health-escalation: \($repo)#\($pr) -->") as $marker
+    | ("https://github.com/\($repo)/pull/\($pr)") as $link
+    | ("factory stuck: \($project) PR #\($pr) ") as $title
+    | [ .[] | (.body // "") as $b
+        | select($b | contains("Auto-filed by `pipeline-health-cron.sh`"))
+        | select(($b | contains($marker))
+            or (($b | test("\\*\\*Kind\\*\\*: (pr-ci|stuck-pr)\\b"))
+                and (($b | split("\n") | map(select(startswith("**Evidence**: ")))
+                      | .[0] // "") == "**Evidence**: \($link)"))
+            or ((.title // "") | startswith($title)))
+        | .number ]
+    | max // empty' <<< "$issues" 2>/dev/null || return 1
+}
+
+# ----------------------------------------------------------------------------
+# pr_escalation_comment <repo> <issue> <kind> <sha> <subject> <attempts> <log>:
+# add <sha> to open escalation <issue> as one comment, once per SHA, whatever
+# the ticks or the local state: the comment carries a hidden
+#   <!-- pipeline-health-escalation-sha: <sha> -->
+# line, and a SHA already in a comment or in the issue body is not posted
+# again. The comment ends with the <!-- lachesis:automated --> line, so it is
+# not read as the author answering the issue's question and the escalation
+# raises no second one. Returns 1 when the thread could not be read or the
+# comment not posted.
+# ----------------------------------------------------------------------------
+pr_escalation_comment() {
+  local repo="$1" issue_num="$2" kind="$3" sha="$4" subject_summary="$5" \
+        attempts="$6" log_file="$7" thread seen
+  if ! thread=$(gh issue view "$issue_num" --repo "$repo" --json body,comments 2>/dev/null) \
+    || ! seen=$(jq -r --arg sha "$sha" '
+        (.body // "" | contains("**SHA**: `\($sha)`"))
+        or any((.comments // [])[]; (.body // "")
+               | contains("<!-- pipeline-health-escalation-sha: \($sha) -->"))' \
+        <<< "$thread" 2>/dev/null); then
+    log "$repo: could not read escalation #$issue_num — SHA $sha not added, retrying next tick"
+    return 1
+  fi
+  if [ "$seen" = "true" ]; then
+    log "$repo: escalation #$issue_num already names SHA $sha ($kind) — skipping"
+    return
+  fi
+  if ! gh issue comment "$issue_num" --repo "$repo" --body "Still stuck at a new head SHA: $subject_summary after $attempts attempts.
+
+**Kind**: $kind
+**SHA**: \`$sha\`
+**Archon log**: \`$log_file\`
+
+Added by \`pipeline-health-cron.sh\`, which keeps one escalation per PR rather than one per SHA (alexsiri7/interstellarai.net#260).
+
+<!-- pipeline-health-escalation-sha: $sha -->
+<!-- lachesis:automated -->" >/dev/null 2>&1; then
+    log "$repo: could not comment SHA $sha on escalation #$issue_num — retrying next tick"
+    return 1
+  fi
+  log "$repo: escalation #$issue_num already open — commented new SHA $sha ($kind)"
 }
 
 # ----------------------------------------------------------------------------
@@ -2271,11 +2389,14 @@ check_pr_ci_retry() {
         notify "factory stuck: $project PR #$pr_num CI red" \
           "PR #$pr_num CI red at ${pr_sha:0:10} after $MAX_ATTEMPTS attempts" \
           high warning
+        # Not escalated after all: drop the once-per-SHA marker so the next
+        # tick tries again.
         file_stuck_issue "alexsiri7/$project" "pr-ci" "$pr_sha" \
           "$project PR #$pr_num CI red" \
           "https://github.com/alexsiri7/$project/pull/$pr_num" \
           "$MAX_ATTEMPTS" \
-          "$repo_dir/.archon-logs/"
+          "$repo_dir/.archon-logs/" \
+          || rm -f "$STATE_DIR/escalated/$project-pr$pr_num-$pr_sha"
         continue
         ;;
     esac
@@ -2298,7 +2419,8 @@ check_pr_ci_retry() {
 # Check 5b: Stuck archon PRs — open, CI-clean (not caught by check_pr_ci_retry),
 #   but not merged/updated for 2+ hours. Fires archon-pr-maintenance to unblock.
 #   Covers cases where pr-maintenance-cron has a gap (e.g. draft+conflicting were
-#   invisible until that script was fixed). Dedup by (project, PR#, head SHA).
+#   invisible until that script was fixed). Attempts are counted per (project,
+#   PR#, head SHA); the escalation issue is one per PR (file_stuck_issue, #260).
 # ----------------------------------------------------------------------------
 check_stuck_prs() {
   local project="$1"
@@ -2373,11 +2495,14 @@ check_stuck_prs() {
         notify "factory stuck: $project PR #$pr_num ($merge_state)" \
           "PR #$pr_num open >2h, mergeState=$merge_state, pr-maintenance not making progress" \
           high warning
+        # Not escalated after all: drop the once-per-SHA marker so the next
+        # tick tries again.
         file_stuck_issue "alexsiri7/$project" "stuck-pr" "$pr_sha" \
           "$project PR #$pr_num stuck ($merge_state)" \
           "https://github.com/alexsiri7/$project/pull/$pr_num" \
           "$MAX_ATTEMPTS" \
-          "$repo_dir/.archon-logs/"
+          "$repo_dir/.archon-logs/" \
+          || rm -f "$STATE_DIR/escalated/stuck-$project-pr$pr_num-$pr_sha"
         continue
         ;;
     esac
