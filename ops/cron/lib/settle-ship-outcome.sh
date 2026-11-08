@@ -433,9 +433,11 @@ stale_note=""
 SETTLE_DEFAULT_WAIT_DAYS=2
 
 # suggested_action — what the verdict asks for: close-completed,
-# close-not-planned, depend-<M>, proceed, or wait (nothing the factory can do
-# on its own: a named open PR may still land, an open sub-issue, a blocker it
-# cannot record). Every action but proceed and wait must match
+# close-not-planned or depend-<M> when GitHub confirms it, otherwise proceed.
+# A verdict whose refs GitHub cannot confirm (an open PR that may still land,
+# an open sub-issue, several blockers or none named) is run once more with the
+# verdict as direction (#268): only a run can carry out a recommendation that
+# lives in its prose. Every action but proceed must match
 # SETTLE_DEFAULT_ACTION_RE (lib/severity.sh), or pickup launches a run when
 # its default is taken instead of carrying it out.
 suggested_action() {
@@ -443,10 +445,10 @@ suggested_action() {
   case "$verdict" in
     "No delivery needed: "*)
       if ! { [[ "$sub_open" =~ ^[0-9]+$ ]] && [ "$sub_open" -eq 0 ] && [ "$all_refs_known" = 1 ]; }; then
-        echo wait; return
+        echo proceed; return
       fi
       for ref in "${refs[@]}"; do
-        [ "${kind[$ref]:-}" = pr ] && { echo wait; return; }
+        [ "${kind[$ref]:-}" = pr ] && { echo proceed; return; }
       done
       echo close-completed ;;
     "No work owed in this repository: "*) echo close-not-planned ;;
@@ -456,7 +458,7 @@ suggested_action() {
                 --jq 'if .pull_request then "pr" else .state end' 2>/dev/null)" = open ]; then
         echo "depend-${refs[0]}"
       else
-        echo wait
+        echo proceed
       fi ;;
     *) echo proceed ;;
   esac

@@ -1052,6 +1052,7 @@ tier_outcome() {
     for verdict in 'No delivery needed: false positive alert, not a code change.' \
             'No work owed in this repository: the crash is in the upstream SDK.' \
             'Not done: blocked on #8 landing first.' \
+            'Not done: blocked on Owner-level product decision: keep the documented tradeoff.' \
             'Not done: the investigation was inconclusive. The crash did not reproduce.'; do
         : > "$LACHESIS_ARGV"
         echo "$verdict" > "$RUN_LOG"
@@ -1064,7 +1065,14 @@ tier_outcome() {
     done
 }
 
-@test "tiers: blocked on an open PR, or on two issues, asks with no default" {
+# asked_proceed — the one question asked defaults to running #9 once more,
+# taken after two days.
+asked_proceed() {
+    [ "$(asked_default)" = "Run #9 once more, with this verdict as direction. <!-- archon-settle-default: proceed -->" ]
+    sed -n 's/^ask_question //p' "$LACHESIS_ARGV" | jq -e '.wait_days == 2'
+}
+
+@test "tiers: blocked on an open PR, or on two issues, defaults to running once more" {
     lachesis_on
     printf 'Not done: blocked on PR #8.\n' > "$RUN_LOG"
     printf 'pr\topen\n' > "$T/fixtures/state-8"
@@ -1072,16 +1080,37 @@ tier_outcome() {
     ref 8 pr
     run "$SCRIPT" testproj 9 "$RUN_LOG"
     [ "$status" -eq 0 ]
-    [ "$(asked_default)" = "" ]
-    sed -n 's/^ask_question //p' "$LACHESIS_ARGV" | jq -e 'has("wait_days") or has("options") | not'
+    asked_proceed
+    [[ "$output" == *"tier 2, default proceed"* ]]
 
     : > "$LACHESIS_ARGV"; : > "$GH_ARGV"
     printf 'Not done: blocked on #8 and #10.\n' > "$RUN_LOG"
     for n in 8 10; do printf 'issue\topen\n' > "$T/fixtures/state-$n"; ref "$n" open-issue; done
     run "$SCRIPT" testproj 9 "$RUN_LOG"
     [ "$status" -eq 0 ]
+    asked_proceed
+    [[ "$output" == *"tier 2, default proceed"* ]]
+}
+
+@test "tiers: blocked on a decision naming no issue defaults to running once more" {
+    lachesis_on
+    printf 'Not done: blocked on Owner-level product decision: keep the documented no-revocation tradeoff, or restore server-side revocation.\n' > "$RUN_LOG"
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 9
+    asked_proceed
+    [[ "$output" == *"tier 2, default proceed"* ]]
+}
+
+@test "tiers: a tier-3 blocked-on verdict naming no issue still asks with no default" {
+    lachesis_on
+    printf "Not done: blocked on the owner's GDPR position for data-subject requests.\n" > "$RUN_LOG"
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 9
     [ "$(asked_default)" = "" ]
-    [[ "$output" == *"tier 2, default none"* ]]
+    sed -n 's/^ask_question //p' "$LACHESIS_ARGV" | jq -e 'has("wait_days") or has("options") | not'
+    [[ "$output" == *"tier 3, default none"* ]]
 }
 
 @test "tiers: any other Not done defaults to running once more" {
@@ -1092,20 +1121,29 @@ tier_outcome() {
     [[ "$(asked_default)" == "Run #9 once more, with this verdict as direction. <!-- archon-settle-default: proceed -->" ]]
 }
 
-@test "tiers: No delivery needed naming an open PR, or an open sub-issue, asks with no default" {
+@test "tiers: No delivery needed naming an open PR, an open sub-issue, or an unlooked-up ref, defaults to running once more" {
     lachesis_on
     echo 'No delivery needed: PR #50 implements this.' > "$RUN_LOG"
     ref 50 pr
     run "$SCRIPT" testproj 9 "$RUN_LOG"
     [ "$status" -eq 0 ]
-    [ "$(asked_default)" = "" ]
+    assert_parked 9
+    asked_proceed
 
-    : > "$LACHESIS_ARGV"
+    : > "$LACHESIS_ARGV"; : > "$GH_ARGV"
     echo 'No delivery needed: every phase of this epic has shipped.' > "$RUN_LOG"
     printf '3\t1\n' > "$T/fixtures/sub-9"
     run "$SCRIPT" testproj 9 "$RUN_LOG"
     [ "$status" -eq 0 ]
-    [ "$(asked_default)" = "" ]
+    assert_parked 9
+    asked_proceed
+
+    : > "$LACHESIS_ARGV"; : > "$GH_ARGV"; rm "$T/fixtures/sub-9"
+    echo 'No delivery needed: see #8 for details.' > "$RUN_LOG"
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 9
+    asked_proceed
 }
 
 @test "tiers: a tier-3 word in the verdict or the title asks with no default, even when tier 1 is declared" {
