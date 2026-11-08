@@ -3179,11 +3179,14 @@ check_cron_heartbeats() {
 #   `gh api rate_limit` and the public profile, as the archon user in archon
 #   mode); ntfy once per episode when it is blocked, log when it recovers. A
 #   probe that fails (sudo, network) is logged, not alerted: it proves nothing.
-#   The alert is marked sent only once ntfy took it.
+#   The alert is marked sent only once ntfy took it. A blocked account that a
+#   switch to the owner account fixes (gh_factory_try_switch, #272) is not an
+#   episode: that switch sends its own ntfy.
 # ----------------------------------------------------------------------------
 check_gh_factory() {
   local marker="$STATE_DIR/gh-factory-alerted" rc
   gh_factory_probe; rc=$?
+  [ "$rc" -eq 1 ] && gh_factory_try_switch "pipeline-health" && rc=0
   if [ "$rc" -eq 2 ]; then
     log "gh-factory: probe failed — $GH_FACTORY_DETAIL"
     return 0
