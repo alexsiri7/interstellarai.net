@@ -33,7 +33,7 @@
 # tokens for both. On 2026-11-07 something ran `gh auth switch` back to the
 # flagged account and pickup held for 25h. So a blocked active account that is
 # not the owner's is switched to the owner's when its stored token works, with
-# one ntfy; every launch gate logs the active account and the hosts.yml mtime,
+# one ntfy, under a lock the morning pass's own switch shares; every launch gate logs the active account and the hosts.yml mtime,
 # so the next flip can be dated.
 
 [ -n "${_GH_FACTORY_SH:-}" ] && return 0
@@ -48,6 +48,7 @@ GH_FACTORY_CORE_MIN_LIMIT="${GH_FACTORY_CORE_MIN_LIMIT:-1000}"
 GH_FACTORY_TIMEOUT="${GH_FACTORY_TIMEOUT:-20}"
 GH_FACTORY_PROFILE_BASE="${GH_FACTORY_PROFILE_BASE:-https://github.com}"
 GH_FACTORY_OWNER_LOGIN="${GH_FACTORY_OWNER_LOGIN:-alexsiri7}"
+GH_FACTORY_SWITCH_LOCK="${GH_FACTORY_SWITCH_LOCK:-$HOME/.archon/state/gh-factory-switch.lock}"
 
 # gh_factory_as_archon — true when the factory's gh is the archon user's.
 gh_factory_as_archon() {
@@ -142,21 +143,43 @@ _gh_factory_notify() {
 }
 
 # gh_factory_try_switch <script> — after gh_factory_probe found the active
-# account blocked: when hosts.yml holds a working token for
-# GH_FACTORY_OWNER_LOGIN (GraphQL limit above 0, REST core limit above 60),
-# `gh auth switch` to it, re-probe and ntfy once. Only that account, never
-# another, and only in archon or drain mode: in asiri mode the factory's gh is
-# the owner's own. True when the account it switched to probes ok.
+# account blocked: when hosts.yml holds a token for GH_FACTORY_OWNER_LOGIN that
+# passes the probe's own rate-limit bars, `gh auth switch` to it, re-probe and
+# ntfy once. Only that account, never another, and only in archon or drain
+# mode: in asiri mode the factory's gh is the owner's own. issue-pickup,
+# pipeline-health and the morning pass can all reach for the switch in the same
+# minute, so it holds GH_FACTORY_SWITCH_LOCK and re-probes under it: the
+# account another writer just switched to is not switched or announced again.
+# Returns like gh_factory_probe, for the account active when it returns.
 gh_factory_try_switch() {
-  local from="$GH_FACTORY_LOGIN" reason="$GH_FACTORY_DETAIL" rl err rc msg changed
+  local fd rc
   gh_factory_as_archon || return 1
+  mkdir -p "$(dirname "$GH_FACTORY_SWITCH_LOCK")"
+  exec {fd}>"$GH_FACTORY_SWITCH_LOCK"
+  if flock -w "$((GH_FACTORY_TIMEOUT * 6))" "$fd"; then
+    _gh_factory_switch_locked "$1"; rc=$?
+  else
+    echo "$(date -Is) [gh-factory] $1: another switch holds $GH_FACTORY_SWITCH_LOCK — not switching"
+    rc=1
+  fi
+  exec {fd}>&-
+  return "$rc"
+}
+
+_gh_factory_switch_locked() {
+  local from reason rl err rc msg changed
+  gh_factory_probe; rc=$?
+  [ "$rc" -eq 1 ] || return "$rc"
+  from="$GH_FACTORY_LOGIN" reason="$GH_FACTORY_DETAIL"
   # An unreadable login may already be the owner: switching would change nothing.
   [ -n "$from" ] && [ "$from" != "$GH_FACTORY_OWNER_LOGIN" ] || return 1
   # The token stays inside the factory user's own process, never on an argv.
   # shellcheck disable=SC2016
   if ! rl=$(_gh_factory_exec bash -c 'tok=$(gh auth token -u "$1" 2>/dev/null) && [ -n "$tok" ] && GH_TOKEN=$tok exec gh api rate_limit' \
         _ "$GH_FACTORY_OWNER_LOGIN" 2>/dev/null) \
-     || ! jq -e '.resources.graphql.limit > 0 and .resources.core.limit > 60' <<<"$rl" >/dev/null 2>&1; then
+     || ! jq -e --argjson gmin "$GH_FACTORY_GRAPHQL_MIN" --argjson cmin "$GH_FACTORY_CORE_MIN_LIMIT" \
+          '.resources.graphql.limit > 0 and .resources.graphql.remaining >= $gmin and .resources.core.limit >= $cmin' \
+          <<<"$rl" >/dev/null 2>&1; then
     echo "$(date -Is) [gh-factory] $1: no working $GH_FACTORY_OWNER_LOGIN token in the factory gh's hosts.yml — not switching"
     return 1
   fi
@@ -169,7 +192,7 @@ gh_factory_try_switch() {
   msg="Switched the factory GitHub account from $from ($reason) to $GH_FACTORY_OWNER_LOGIN, now $GH_FACTORY_STATE: $GH_FACTORY_DETAIL. hosts.yml was last changed $changed."
   echo "$(date -Is) [gh-factory] $1: $msg"
   _gh_factory_notify "Factory GitHub account switched" "$msg"
-  [ "$rc" -eq 0 ]
+  return "$rc"
 }
 
 # gh_factory_may_launch <script> — logs the active account and the hosts.yml
@@ -180,9 +203,11 @@ gh_factory_may_launch() {
   local rc
   gh_factory_probe; rc=$?
   echo "$(date -Is) [gh-factory] $1: active account $(gh_factory_who), $GH_FACTORY_STATE; hosts.yml modified $(gh_factory_hosts_mtime)"
+  if [ "$rc" -eq 1 ]; then
+    gh_factory_try_switch "$1"; rc=$?
+  fi
   case $rc in
     1)
-      gh_factory_try_switch "$1" && return 0
       echo "$(date -Is) [gh-factory] $1: factory GitHub identity ($(gh_factory_who)) cannot open PRs: $GH_FACTORY_DETAIL — no launches this tick"
       return 1 ;;
     2)

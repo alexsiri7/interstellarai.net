@@ -18,7 +18,8 @@ setup() {
     # `api user --jq .login` prints $STUB_LOGIN. The owner account (alexsiri7):
     # `auth token -u alexsiri7` prints $STUB_OWNER_TOKEN, `api rate_limit` with
     # that GH_TOKEN, or after `auth switch -u alexsiri7`, prints
-    # $T/owner_rate_limit.json.
+    # $T/owner_rate_limit.json — after the switch, $STUB_SWITCHED_FAIL instead
+    # makes it fail with that message.
     cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 printf 'gh %s HOME=%s\n' "$*" "$HOME" >> "$ARGV"
@@ -27,6 +28,9 @@ owner=0
 [ "$(cat "$T/active" 2>/dev/null)" = alexsiri7 ] && owner=1
 case "$*" in
   "api rate_limit")
+    if [ "$owner" = 1 ] && [ -z "${GH_TOKEN:-}" ] && [ -n "${STUB_SWITCHED_FAIL:-}" ]; then
+      echo "$STUB_SWITCHED_FAIL" >&2; exit 1
+    fi
     if [ "$owner" = 1 ]; then cat "$T/owner_rate_limit.json"; exit 0; fi
     cat "$T/rate_limit.json"; exit "${STUB_GH_RC:-0}" ;;
   "api user --jq .login")
@@ -64,6 +68,7 @@ STUB
     mkdir -p "$T/gh"
     touch -d '2026-11-07 10:29:00 UTC' "$T/gh/hosts.yml"
     export GH_CONFIG_DIR="$T/gh" NTFY_TOPIC=test-topic
+    export GH_FACTORY_SWITCH_LOCK="$T/state/gh-factory-switch.lock"
 
     export ARCHON_RUN_AS=asiri
     unset _GH_FACTORY_SH
@@ -195,9 +200,16 @@ owner_rate_limit() { rate_limit "$@" owner_rate_limit.json; }  # the owner accou
 @test "blocked with no working owner token: hold, never switch, no ntfy from the gate" {
     export ARCHON_RUN_AS=archon
     rate_limit 0 0 60
-    for owner in missing flagged; do
+    # throttled and low: the probe's own bars (core limit 1000, GraphQL 200 left), not just a flag
+    for owner in missing flagged throttled low; do
         : > "$ARGV"
-        if [ "$owner" = missing ]; then export STUB_OWNER_TOKEN=""; else unset STUB_OWNER_TOKEN; owner_rate_limit 0 0 60; fi
+        unset STUB_OWNER_TOKEN
+        case $owner in
+          missing)   export STUB_OWNER_TOKEN="" ;;
+          flagged)   owner_rate_limit 0 0 60 ;;
+          throttled) owner_rate_limit 5000 5000 100 ;;
+          low)       owner_rate_limit 5000 150 5000 ;;
+        esac
         run gh_factory_may_launch issue-pickup
         [ "$status" -eq 1 ]
         [[ "$output" == *"no working alexsiri7 token"*"no launches this tick"* ]]
@@ -205,6 +217,31 @@ owner_rate_limit() { rate_limit "$@" owner_rate_limit.json; }  # the owner accou
         ! grep -q '^gh auth switch' "$ARGV"
         [ ! -e "$T/ntfy-curl" ]
     done
+}
+
+@test "a switch whose re-probe cannot tell does not hold the launch" {
+    export ARCHON_RUN_AS=archon STUB_SWITCHED_FAIL="HTTP 502: Bad Gateway"
+    rate_limit 0 0 60
+    run gh_factory_may_launch issue-pickup
+    [ "$status" -eq 0 ]
+    [ "$(cat "$T/active")" = alexsiri7 ]
+    [[ "$output" == *"to alexsiri7, now unknown: gh api rate_limit failed: HTTP 502: Bad Gateway"* ]]
+    [[ "$output" == *"could not probe"*"not holding launches"* ]]
+    [ "$(wc -l < "$T/ntfy-curl")" -eq 1 ]
+}
+
+@test "a switch waits for another writer's lock and does not switch or announce again" {
+    export ARCHON_RUN_AS=archon
+    rate_limit 0 0 60
+    gh_factory_probe || true                 # the caller saw the factory account blocked
+    mkdir -p "$(dirname "$GH_FACTORY_SWITCH_LOCK")"
+    ( exec 8>"$GH_FACTORY_SWITCH_LOCK"; flock 8; touch "$T/locked"; sleep 1; echo alexsiri7 > "$T/active" ) &
+    until [ -e "$T/locked" ]; do sleep 0.1; done
+    run gh_factory_try_switch issue-pickup
+    wait
+    [ "$status" -eq 0 ]
+    ! grep -q '^gh auth' "$ARGV"
+    [ ! -e "$T/ntfy-curl" ]
 }
 
 @test "a refused gh auth switch holds and says why" {
@@ -296,6 +333,18 @@ load_check() {
     [ "$(wc -l < "$T/ntfy-curl")" -eq 1 ]      # the switch's own ntfy
     [[ "$output" == *"gh-factory: recovered — alexsiri7, as archon"* ]]
     [ ! -f "$T/state/gh-factory-alerted" ]
+}
+
+@test "check_gh_factory: a switch whose re-probe cannot tell is logged, not alerted as blocked" {
+    load_check
+    export ARCHON_RUN_AS=archon STUB_SWITCHED_FAIL="HTTP 502: Bad Gateway"
+    rate_limit 0 0 60
+    run check_gh_factory
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"gh-factory: probe failed — gh api rate_limit failed: HTTP 502: Bad Gateway"* ]]
+    [[ "$output" != *"BLOCKED"* ]]
+    [ ! -e "$NTFY_SENT" ]
+    [ "$(wc -l < "$T/ntfy-curl")" -eq 1 ]      # the switch's own ntfy
 }
 
 @test "check_gh_factory: blocked with no owner token to switch to alerts once per episode" {

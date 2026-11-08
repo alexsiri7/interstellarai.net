@@ -62,7 +62,9 @@
 #  9g. Factory GitHub identity cannot open PRs (graphql.limit 0 or nearly
 #      used up, REST core limit at the unauthenticated 60, public profile 404 =
 #      flagged account; lib/gh-factory.sh, probed as the archon user in archon
-#      mode) → ntfy once per episode; issue-pickup holds launches meanwhile
+#      mode) → switch to the owner account when its stored token works
+#      (#272, one ntfy); otherwise ntfy once per episode, issue-pickup holds
+#      launches meanwhile
 #  9h. Doppler token (lib/secrets.sh) missing, loose-moded or rejected → ntfy
 #      once per episode
 #  10. Parked work gets a clock (lib/deadlines.sh): pr-maintenance marks
@@ -3186,7 +3188,9 @@ check_cron_heartbeats() {
 check_gh_factory() {
   local marker="$STATE_DIR/gh-factory-alerted" rc
   gh_factory_probe; rc=$?
-  [ "$rc" -eq 1 ] && gh_factory_try_switch "pipeline-health" && rc=0
+  if [ "$rc" -eq 1 ]; then
+    gh_factory_try_switch "pipeline-health"; rc=$?
+  fi
   if [ "$rc" -eq 2 ]; then
     log "gh-factory: probe failed — $GH_FACTORY_DETAIL"
     return 0
