@@ -557,11 +557,11 @@ find_tracked_issue() {
 
 # ----------------------------------------------------------------------------
 # open_escalations <repo>: echo "<number>\t<kind>\t<pr>" for each open issue
-# this script filed as an escalation — a "Main CI red" issue (kind main-ci) or a
-# file_stuck_issue one (kind from its **Kind** line, PR number from its
-# **Evidence** link; empty for main-ci). Lists open issues rather than
-# searching, so a just-filed issue the search index has not caught up with is
-# still seen.
+# this script filed as an escalation — a "Main CI red" issue (kind main-ci), a
+# "Prod deploy failed/lagging" one (kind prod-deploy) or a file_stuck_issue one
+# (kind from its **Kind** line, PR number from its **Evidence** link; empty for
+# main-ci and prod-deploy). Lists open issues rather than searching, so a
+# just-filed issue the search index has not caught up with is still seen.
 # ----------------------------------------------------------------------------
 open_escalations() {
   local repo="$1" issues
@@ -573,12 +573,20 @@ open_escalations() {
   fi
   echo "$issues" | jq -r '.[] | select((.body // "") | contains("Auto-filed by `pipeline-health-cron.sh`"))
         | if (.title | startswith("Main CI red")) then [(.number|tostring), "main-ci", ""]
+          elif (.title | startswith("Prod deploy ")) then [(.number|tostring), "prod-deploy", ""]
           elif ([.labels[].name] | index("manual-review")) then
             [(.number|tostring),
              ((.body | capture("\\*\\*Kind\\*\\*: (?<k>[a-z-]+)") | .k) // ""),
              ((.body | capture("\\*\\*Evidence\\*\\*: \\S*/pull/(?<n>[0-9]+)") | .n) // "")]
           else empty end
         | @tsv' 2>/dev/null
+}
+
+# label_factory_closed <repo> <issue>: mark a close made without asking the
+# owner, so they can be listed for review (#259).
+label_factory_closed() {
+  gh issue edit "$2" --repo "$1" --add-label factory-closed >/dev/null 2>&1 \
+    || log "$1: closed #$2, but could not add factory-closed"
 }
 
 close_escalation() {
@@ -620,10 +628,10 @@ close_resolved_pr_escalations() {
 # fire_ship_and_settle <project> <issue> <repo-dir> <log>: run archon-ship on
 # the issue in the background; the wrapper settles a no-PR verdict on it as
 # soon as the run exits (lib/settle-ship-outcome.sh parks health-filed issues,
-# never closes them — #107). Same shape as issue-pickup's pick_and_fire: the
-# wrapper's command line carries the literal "fix #$1" and a repo-relative log
-# path, so the pgrep guards only see the archon child. unstick_stale finds the
-# log by its "-issue-N-" part.
+# never closes them on their verdict — #107). Same shape as issue-pickup's
+# pick_and_fire: the wrapper's command line carries the literal "fix #$1" and
+# a repo-relative log path, so the pgrep guards only see the archon child.
+# unstick_stale finds the log by its "-issue-N-" part.
 # ----------------------------------------------------------------------------
 fire_ship_and_settle() {
   local project="$1" issue_num="$2" repo_dir="$3" logf="$4"
@@ -1193,6 +1201,8 @@ deploy_lag_threshold() {
 #   (deploy_lag_threshold) → file lag issue —
 #   unless the signal is a Railway deployment whose watchPatterns no commit
 #   since the latest deploy touched; then that deploy is judged instead.
+#   A successful deploy closes the failed/lagging issues this check filed: they
+#   resolved themselves (#259).
 #   Projects with no deploy signal are skipped silently.
 # ----------------------------------------------------------------------------
 check_prod_deploy() {
@@ -1432,6 +1442,12 @@ EOF
 
   # Deploy up to date — clear stale markers
   find "$STATE_DIR" -maxdepth 1 \( -name "prod-deploy-failed-$project-*" -o -name "prod-deploy-stale-$project-*" \) -delete 2>/dev/null || true
+  local issue_num kind
+  while IFS=$'\t' read -r issue_num kind _; do
+    [ "$kind" = prod-deploy ] || continue
+    close_escalation "alexsiri7/$project" "$issue_num" "prod deploy at \`$deploy_sha\` succeeded ($deploy_url, $deploy_ts)." \
+      && label_factory_closed "alexsiri7/$project" "$issue_num"
+  done < <(open_escalations "alexsiri7/$project")
 }
 
 # ----------------------------------------------------------------------------
@@ -2527,7 +2543,8 @@ check_stuck_prs() {
 #   Ported from archon/scripts/poll-health.sh (check 3). For each project with
 #   a DEPLOY_URLS entry, GET the URL (body discarded); if HTTP status is <200
 #   or >=400, file a `bug` issue (queued for the normal pickup cron). Dedup per
-#   project; marker is cleared once the deploy recovers.
+#   project; once the deploy recovers the marker is cleared and the issue it
+#   filed is closed (#259).
 # ----------------------------------------------------------------------------
 check_deploy_http() {
   local project="$1"
@@ -2590,6 +2607,20 @@ EOF
   fi
 
   # Healthy — clear markers
+  if [ -f "$marker" ]; then
+    local issues issue_num
+    if issues=$(gh issue list --repo "alexsiri7/$project" --state open --limit 200 \
+        --json number,title,body 2>/dev/null); then
+      while read -r issue_num; do
+        close_escalation "alexsiri7/$project" "$issue_num" "$deploy_url answers HTTP $http_code again." \
+          && label_factory_closed "alexsiri7/$project" "$issue_num"
+      done < <(jq -r --arg t "Deploy down: $deploy_url returning HTTP " '.[]
+        | select((.title | startswith($t)) and ((.body // "") | contains("## Deploy health check failure")))
+        | .number' <<<"$issues")
+    else
+      log "$project: gh issue list failed — its deploy-down issue is left for a human"
+    fi
+  fi
   rm -f "$marker" "$suspect"
   log "$project: deploy OK (HTTP $http_code at $deploy_url)"
 }

@@ -265,6 +265,43 @@ setup_main_ci_env() {
     [ ! -f "$STATE_DIR/deploy-down-test-project" ]
 }
 
+# #259: the deploy-down issue closes on the tick that sees the deploy back.
+@test "check_deploy_http closes the deploy-down issue it filed once the deploy answers again" {
+    curl() { printf "200"; return 0; }
+    export -f curl
+    load_check_deploy_http
+    load_fn close_escalation
+    load_fn label_factory_closed
+    gh() {
+        case "$1 $2" in
+            "issue list") echo '[
+              {"number":50,"title":"Deploy down: https://test.example.com/healthz returning HTTP 000","body":"## Deploy health check failure\n\n**URL**: https://test.example.com/healthz"},
+              {"number":51,"title":"Deploy down: https://test.example.com/healthz returning HTTP 502","body":"Filed by hand."},
+              {"number":52,"title":"Deploy down: https://other.example.com/ returning HTTP 000","body":"## Deploy health check failure"}]' ;;
+            "issue close"|"issue edit") printf '%s\n' "$*" >> "$STATE_DIR/issue-writes" ;;
+        esac
+    }
+    touch "$STATE_DIR/deploy-down-test-project"
+
+    check_deploy_http "test-project"
+
+    [ "$(grep -c '^issue close' "$STATE_DIR/issue-writes")" -eq 1 ]
+    grep -q '^issue close 50 --repo alexsiri7/test-project --comment Resolved: https://test.example.com/healthz answers HTTP 200 again\.' "$STATE_DIR/issue-writes"
+    grep -qx 'issue edit 50 --repo alexsiri7/test-project --add-label factory-closed' "$STATE_DIR/issue-writes"
+    [ ! -f "$STATE_DIR/deploy-down-test-project" ]
+}
+
+@test "check_deploy_http lists no issues on a healthy tick with no down episode filed" {
+    curl() { printf "200"; return 0; }
+    export -f curl
+    load_check_deploy_http
+    gh() { echo "$*" >> "$STATE_DIR/gh-calls"; }
+
+    check_deploy_http "test-project"
+
+    [ ! -f "$STATE_DIR/gh-calls" ]
+}
+
 @test "check_deploy_http returns early for unconfigured project" {
     curl() { printf "200"; return 0; }
     export -f curl
@@ -992,8 +1029,13 @@ stub_gh_for_prod_deploy() {
             "api repos/alexsiri7/test-project/deployments?per_page=10") echo "$DEPLOYMENTS_FIXTURE" ;;
             "api repos/alexsiri7/test-project/deployments/"*) echo "$DEPLOY_STATUS_FIXTURE" ;;
             "api repos/alexsiri7/test-project/actions/workflows/123/runs?"*) echo "${WORKFLOW_RUNS_FIXTURE:-}" ;;
-            "issue list") echo "" ;;
+            "issue list")
+                case "$*" in
+                    *"--search"*) echo "" ;;
+                    *) echo "${ISSUE_LIST_FIXTURE:-[]}" ;;
+                esac ;;
             "issue create") echo "$*" > "$ISSUE_SENTINEL"; record_issue_body "$@"; echo "https://github.com/alexsiri7/test-project/issues/42" ;;
+            "issue close"|"issue edit") printf '%s\n' "$*" >> "$STATE_DIR/issue-writes" ;;
             *) echo "" ;;
         esac
     }
@@ -1021,6 +1063,9 @@ setup_prod_deploy_env() {
     # shellcheck disable=SC1090
     source <(awk '/^DEPLOY_LAG_FLOOR_SECONDS=/{print}' "$SCRIPT_FILE")
     load_fn deploy_lag_threshold
+    load_fn open_escalations
+    load_fn close_escalation
+    load_fn label_factory_closed
     load_fn check_prod_deploy
 }
 
@@ -1103,6 +1148,7 @@ head_aged() { HEAD_FIXTURE='{"sha":"aaa","ts":"'"$(date -u -d "@$(( $(date +%s) 
 @test "check_prod_deploy waits while the run at HEAD is in flight" {
     setup_prod_deploy_env
     HEAD_RUNS_FIXTURE='[{"name":"Staging → Production Pipeline","conclusion":null,"createdAt":"2026-09-16T01:46:08Z","updatedAt":"2026-09-16T01:46:08Z","url":"https://example.com/runs/3"}]'
+    ISSUE_LIST_FIXTURE="$FILED_LAG_ISSUE"
     stub_gh_for_prod_deploy
     touch "$STATE_DIR/prod-deploy-stale-test-project-zzz"
 
@@ -1110,6 +1156,49 @@ head_aged() { HEAD_FIXTURE='{"sha":"aaa","ts":"'"$(date -u -d "@$(( $(date +%s) 
 
     [ ! -f "$ISSUE_SENTINEL" ]
     [ -f "$STATE_DIR/prod-deploy-stale-test-project-zzz" ]
+    [ ! -f "$STATE_DIR/issue-writes" ]
+}
+
+# #259: a lag that the deploy itself catches up on resolved itself, as Annie's
+# "Prod deploy lagging main" did 16 minutes after it was filed.
+FILED_LAG_ISSUE='[
+  {"number":40,"title":"Prod deploy lagging main","body":"## Prod deploy lagging main\n\nAuto-filed by `pipeline-health-cron.sh`. main has been ahead of prod.","labels":[{"name":"bug"}]},
+  {"number":41,"title":"Prod deploy feels slow","body":"Filed by hand.","labels":[]}
+]'
+
+@test "open_escalations reads kind prod-deploy off only the deploy issues this script filed" {
+    load_fn open_escalations
+    ISSUE_LIST_FIXTURE="$FILED_LAG_ISSUE"
+    stub_gh_issues
+
+    run open_escalations "alexsiri7/test-project"
+
+    [ "$output" = "$(printf '40\tprod-deploy\t')" ]
+}
+
+@test "check_prod_deploy closes the deploy issues it filed once the deploy at HEAD succeeds" {
+    setup_prod_deploy_env
+    HEAD_RUNS_FIXTURE='[{"name":"Staging → Production Pipeline","conclusion":"success","createdAt":"2026-09-16T01:46:08Z","updatedAt":"2026-09-16T01:49:29Z","url":"https://example.com/runs/3"}]'
+    ISSUE_LIST_FIXTURE="$FILED_LAG_ISSUE"
+    stub_gh_for_prod_deploy
+
+    check_prod_deploy "test-project"
+
+    [ "$(grep -c '^issue close' "$STATE_DIR/issue-writes")" -eq 1 ]
+    grep -q '^issue close 40 --repo alexsiri7/test-project --comment Resolved: prod deploy at `aaa` succeeded (https://example.com/runs/3, 2026-09-16T01:49:29Z)\.' "$STATE_DIR/issue-writes"
+    grep -qx -- '<!-- lachesis:automated -->' "$STATE_DIR/issue-writes"
+    grep -qx 'issue edit 40 --repo alexsiri7/test-project --add-label factory-closed' "$STATE_DIR/issue-writes"
+}
+
+@test "check_prod_deploy leaves its lag issue open while HEAD is still undeployed" {
+    setup_prod_deploy_env
+    ISSUE_LIST_FIXTURE="$FILED_LAG_ISSUE"
+    stub_gh_for_prod_deploy
+    touch "$STATE_DIR/prod-deploy-stale-test-project-aaa"
+
+    check_prod_deploy "test-project"
+
+    [ ! -f "$STATE_DIR/issue-writes" ]
 }
 
 # #261: word-coach-annie's CI → dispatch → deploy chain runs 13-16 min, so a

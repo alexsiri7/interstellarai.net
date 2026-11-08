@@ -115,6 +115,8 @@ ensure_labels() {
   # label fails its whole `gh issue edit`.
   gh label create "manual-review" --repo "alexsiri7/$repo" \
     --color "d93f0b" --description "Needs a human before the factory touches it" 2>/dev/null || true
+  gh label create "factory-closed" --repo "alexsiri7/$repo" \
+    --color "c5def5" --description "Closed by the factory without asking the owner; the closing comment cites why" 2>/dev/null || true
   gh label create "$TRUST_APPROVED_LABEL" --repo "alexsiri7/$repo" \
     --color "0e8a16" --description "Owner vetted: the factory may work this bridge-filed issue" 2>/dev/null || true
   gh label create "$SCREEN_AUTO_LABEL" --repo "alexsiri7/$repo" \
