@@ -15,7 +15,9 @@
 #      dispatch / rerun when that run is for an older SHA); a red drift run
 #      off HEAD files "Main CI drift: <workflow>" + fires archon, closed once
 #      it is green again. Release/deploy/side-effect workflows are never touched
-#   2. Prod deploy failed or lagging main HEAD → file issue + fire archon (dedup by SHA)
+#   2. Prod deploy failed or lagging main HEAD → file issue + fire archon (dedup by SHA);
+#      lagging = undeployed past the repo's p95 Production-run latency + 5 min
+#      (floor 15 min, cap 1h)
 #   3. Zombie archon DB runs (status=running, age >4h) → abandon
 #   4. Disk >85% on / or /mnt/ext-fast → autoclean, then ntfy only if still
 #      >=85%. For `/` that is the conservative full set (go/bun/npm/uv/pip
@@ -30,9 +32,11 @@
 #      ~/.cargo/tmp-build (the build-dir /tmp/.cargo/config.toml gives builds
 #      under /tmp) to $BASE_DIR/.archon/cargo-build/tmp
 #   5. No pipeline progress in last tick (no commits, no archon completions)
-#      while work is pending (queued/in-progress issues or actionable PRs):
+#      while work is pending (queued/in-progress issues or actionable PRs, minus
+#      needs-author, hold/needs-owner-review and lib/deadlines.sh-parked items):
 #        - If token-limit markers in recent logs → wait, retry next tick
-#        - Else → fire archon-assist diagnostic (dedup: 2h cooldown)
+#        - Else → fire archon-assist diagnostic (dedup: 2h cooldown; the same
+#          pending set again only after 12h)
 #  5b. Open archon PRs (non-draft, not CLEAN or BLOCKED) idle >2h → fire
 #      archon-pr-maintenance, trusted authors/comments only; after 3 attempts
 #      on one head SHA, ntfy + file a "factory stuck" issue (dedup by PR + SHA)
@@ -222,6 +226,10 @@ mkdir -p "$STATE_DIR/prciretry" "$STATE_DIR/escalated" \
 # Max archon-remediation attempts against a single head SHA before we stop
 # re-firing and ntfy the operator that the factory is stuck.
 MAX_ATTEMPTS=3
+
+# Floor of every repo's deploy-lag threshold (see deploy_lag_threshold), and
+# so the age below which check_prod_deploy never asks for the threshold.
+DEPLOY_LAG_FLOOR_SECONDS=900
 
 # How far past its own recorded resume deadline a paused run may drift before
 # check_parked_runs nudges it. 6x the longest `wait:` the sdlc pack declares
@@ -1024,6 +1032,30 @@ deploy_relevant_change() {
   echo "$cmp" | jq -r '.files[]' 2>/dev/null | paths_match_watch_patterns "$patterns"
 }
 
+# deploy_lag_threshold <project> <workflow_id> — seconds an undeployed main
+# HEAD may age before it counts as lagging: the p95 of recent commit →
+# Production-run latency plus a margin, clamped to [15 min, 1 h], measured on
+# the workflow whose run check_prod_deploy took as the deploy signal. The latency
+# ends when the run is created, not when it finishes, because Case 2 below only
+# asks whether a run exists at HEAD. A deployment-based signal (Railway-native,
+# no workflow id) or too little history gets the floor. The cap keeps a run of
+# slow or re-dispatched deploys from blinding the check.
+deploy_lag_threshold() {
+  local project="$1" wid="$2" floor=$DEPLOY_LAG_FLOOR_SECONDS margin=300 cap=3600 p95
+  if ! [[ "$wid" =~ ^[0-9]+$ ]]; then echo "$floor"; return; fi
+  # Earliest successful run per SHA: re-dispatches of the same commit are not latency.
+  p95=$(gh api "repos/alexsiri7/$project/actions/workflows/$wid/runs?branch=main&status=success&per_page=50" 2>/dev/null \
+    | jq '[.workflow_runs[]? | select(.head_sha and .created_at and .head_commit.timestamp)
+           | {sha: .head_sha, lat: ((.created_at | fromdateiso8601) - (.head_commit.timestamp | fromdateiso8601))}]
+          | group_by(.sha) | map(map(.lat) | min) | map(select(. >= 0)) | sort
+          | if length < 5 then empty else .[((length * 0.95) | ceil) - 1] | floor end' 2>/dev/null || echo "")
+  if ! [[ "$p95" =~ ^[0-9]+$ ]]; then echo "$floor"; return; fi
+  local t=$((p95 + margin))
+  [ "$t" -lt "$floor" ] && t=$floor
+  [ "$t" -gt "$cap" ] && t=$cap
+  echo "$t"
+}
+
 # ----------------------------------------------------------------------------
 # Check 2: Prod deploy health — failed or lagging main HEAD.
 #   Signal sources (try in order, use whichever exists):
@@ -1032,7 +1064,8 @@ deploy_relevant_change() {
 #   The listings only prove a signal exists; state is judged on the run or
 #   deployment at main HEAD, never on whichever entry a listing puts first.
 #   If the deploy at HEAD FAILED → file issue + fire archon (dedup by SHA).
-#   If nothing deployed HEAD AND HEAD older than 15 min → file lag issue —
+#   If nothing deployed HEAD AND HEAD older than the repo's lag threshold
+#   (deploy_lag_threshold) → file lag issue —
 #   unless the signal is a Railway deployment whose watchPatterns no commit
 #   since the latest deploy touched; then that deploy is judged instead.
 #   Projects with no deploy signal are skipped silently.
@@ -1063,15 +1096,16 @@ check_prod_deploy() {
   # with an August run for reli while the September HEAD was already live,
   # and comparing HEAD against it filed reli#1512 and tripped the stall
   # diagnostic. State is judged below on the deploy at HEAD itself.
-  local latest_sha="" latest_ts="" latest_url="" latest_dep_id=""
+  local latest_sha="" latest_ts="" latest_url="" latest_dep_id="" latest_wf_id=""
   local wf_run
   wf_run=$(gh run list --repo "alexsiri7/$project" --branch main --limit 10 \
-    --json name,headSha,updatedAt,url 2>/dev/null \
+    --json name,headSha,updatedAt,url,workflowDatabaseId 2>/dev/null \
     | jq -c '[.[] | select(.name | test("Production"; "i"))] | .[0] // empty' 2>/dev/null || echo "")
   if [ -n "$wf_run" ]; then
     latest_sha=$(echo "$wf_run" | jq -r '.headSha')
     latest_ts=$(echo "$wf_run" | jq -r '.updatedAt')
     latest_url=$(echo "$wf_run" | jq -r '.url')
+    latest_wf_id=$(echo "$wf_run" | jq -r '.workflowDatabaseId // empty')
   fi
   if [ -z "$latest_sha" ]; then
     local dep
@@ -1217,14 +1251,21 @@ EOF
     head_epoch=$(date -d "$head_ts" +%s 2>/dev/null || echo 0)
     now_epoch=$(date +%s)
     local age=$((now_epoch - head_epoch))
-    if [ "$age" -gt 900 ]; then
+    if [ "$age" -gt "$DEPLOY_LAG_FLOOR_SECONDS" ]; then
       local marker="$STATE_DIR/prod-deploy-stale-$project-${head_sha:0:12}"
       if [ -f "$marker" ]; then
         log "$project: prod still lagging main ${head_sha:0:10} (age ${age}s) — already filed, skipping"
         return
       fi
 
-      log "$project: prod LAGGING — main=${head_sha:0:10} prod=${deploy_sha:0:10} (head age ${age}s)"
+      local threshold
+      threshold=$(deploy_lag_threshold "$project" "$latest_wf_id")
+      if [ "$age" -le "$threshold" ]; then
+        log "$project: main ${head_sha:0:10} undeployed for ${age}s, within its ${threshold}s lag threshold — waiting"
+        return
+      fi
+
+      log "$project: prod LAGGING — main=${head_sha:0:10} prod=${deploy_sha:0:10} (head age ${age}s > threshold ${threshold}s)"
 
       local body
       body=$(cat <<EOF
@@ -1235,7 +1276,7 @@ EOF
 **Latest prod deploy**: \`$latest_sha\` at $latest_ts
 **Deploy source**: $latest_url
 
-Auto-filed by \`pipeline-health-cron.sh\`. main has been ahead of prod for >15 minutes, which suggests the deploy mechanism (Railway webhook, GH Actions workflow) did not fire or silently failed.
+Auto-filed by \`pipeline-health-cron.sh\`. main has been ahead of prod for >$((threshold / 60)) minutes (this repo's lag threshold: p95 of recent Production-run latency + 5 min, floor 15, cap 60), which suggests the deploy mechanism (Railway webhook, GH Actions workflow) did not fire or silently failed.
 
 ### Steps
 1. Check $latest_url — is there a run for $head_sha?
@@ -1251,7 +1292,8 @@ EOF
       touch "$marker"
       # No ntfy — archon will handle the issue automatically.
     fi
-    # A HEAD younger than 15 minutes is still waiting for its pipeline.
+    # A HEAD younger than the threshold's floor is still waiting for its
+    # pipeline.
     return
   fi
 
@@ -1934,8 +1976,10 @@ ensure_cargo_tmp_build_link() {
 # ----------------------------------------------------------------------------
 # Check 4: Progress detection.
 #   Signal = commits to origin/main across repos + archon log completions since
-#   the last health tick. If zero: look for token-limit markers first (expected,
-#   transient). If none, fire archon-assist to diagnose (cooldown: 2h).
+#   the last health tick. If zero and unparked work is pending: look for
+#   token-limit markers first (expected, transient). If none, fire
+#   archon-assist to diagnose (at most every 2h; the same pending set at most
+#   every 12h).
 # ----------------------------------------------------------------------------
 check_progress() {
   local progress_marker="$STATE_DIR/last-progress-ts"
@@ -1981,25 +2025,60 @@ check_progress() {
   # is not evidence of a stall either. The prod-deploy check files
   # archon:queued issues earlier in this same tick; counting those fired the
   # diagnostic at a seconds-old issue (reli#1512, 2026-09-16).
-  local pending=0
+  # Parked items are not pending either: one waiting on its author
+  # (needs-author), held on purpose (STALL_IGNORE_LABELS), or carrying a
+  # current lib/deadlines.sh mark (pr-maintenance parked it for a human).
+  # Nothing the factory does moves them, so they fired the diagnostic 84
+  # times with nothing to find (#261). needs-author is read by label because
+  # check_deadlines writes its marks after this check.
+  local ignore="needs-author $STALL_IGNORE_LABELS"
+  local items="" item unlisted=""
   for project in "${REPOS[@]}"; do
-    local n
+    local issues prs found
+    # A failed listing is not an empty one: judging the tick without it would
+    # call a real stall idle.
+    if ! issues=$(gh issue list --repo "alexsiri7/$project" --state open --limit 100 \
+                    --json number,labels,createdAt,author,title,body 2>/dev/null) || \
+       ! prs=$(gh pr list --repo "alexsiri7/$project" --state open \
+                 --json number,labels,isDraft,mergeStateStatus,createdAt,author,isCrossRepository 2>/dev/null); then
+      unlisted+=" $project"
+      continue
+    fi
     # Trusted items only: the factory never works an untrusted one, so counting
     # it would read as a permanent stall and fire the diagnostic every 2h at it.
-    n=$(gh issue list --repo "alexsiri7/$project" --state open --limit 100 \
-          --json number,labels,createdAt,author,title,body 2>/dev/null \
+    found=$(printf '%s' "$issues" \
         | TRUST_QUIET=1 trust_filter_issues "$project" \
-        | jq --arg since "$since_iso" '[.[] | select(.createdAt < $since) | select(.labels | map(.name) | any(. == "archon:queued" or . == "archon:in-progress" or . == "archon:triage-in-progress"))] | length' \
-          2>/dev/null || echo 0)
-    pending=$((pending + ${n:-0}))
-    n=$(gh pr list --repo "alexsiri7/$project" --state open --json number,isDraft,mergeStateStatus,createdAt,author,isCrossRepository 2>/dev/null \
+        | jq -r --arg since "$since_iso" --arg ignore "$ignore" '
+            ($ignore | split(" ") | map(select(. != ""))) as $ig
+            | .[] | select(.createdAt < $since)
+            | ((.labels // []) | map(.name)) as $l
+            | select($l | any(. == "archon:queued" or . == "archon:in-progress" or . == "archon:triage-in-progress"))
+            | select(any($l[]; . as $n | $ig | any(.[]; . == $n)) | not)
+            | .number' 2>/dev/null || true)
+    found+=$'\n'
+    found+=$(printf '%s' "$prs" \
         | trust_filter_prs "$project" full \
-        | jq --arg since "$since_iso" '[.[] | select(.createdAt < $since) | select(.isDraft == false and (.mergeStateStatus == "CLEAN" or .mergeStateStatus == "BEHIND" or .mergeStateStatus == "DIRTY" or .mergeStateStatus == "UNSTABLE" or .mergeStateStatus == "UNKNOWN"))] | length' \
-          2>/dev/null || echo 0)
-    pending=$((pending + ${n:-0}))
+        | jq -r --arg since "$since_iso" --arg ignore "$ignore" '
+            ($ignore | split(" ") | map(select(. != ""))) as $ig
+            | .[] | select(.createdAt < $since)
+            | select(.isDraft == false and (.mergeStateStatus == "CLEAN" or .mergeStateStatus == "BEHIND" or .mergeStateStatus == "DIRTY" or .mergeStateStatus == "UNSTABLE" or .mergeStateStatus == "UNKNOWN"))
+            | select(any((.labels // [])[].name; . as $n | $ig | any(.[]; . == $n)) | not)
+            | .number' 2>/dev/null || true)
+    while read -r item; do
+      [[ "$item" =~ ^[0-9]+$ ]] || continue
+      deadline_parked "$project" "$item" && continue
+      items+="$project#$item"$'\n'
+    done <<< "$found"
   done
+  if [ -n "$unlisted" ]; then
+    log "no progress, but could not list issues/PRs for${unlisted} — skipping the stall verdict this tick"
+    return
+  fi
+  items=$(printf '%s' "$items" | sort -u)
+  local pending=0
+  [ -n "$items" ] && pending=$(printf '%s\n' "$items" | wc -l)
   if [ "$pending" -eq 0 ]; then
-    log "no progress, but no queued issues or actionable PRs — idle, not stalled"
+    log "no progress, but no queued issues or actionable PRs (parked, on-hold and author-waiting items excluded) — idle, not stalled"
     return
   fi
   log "no progress with $pending pending item(s) — checking for token-limit markers"
@@ -2021,17 +2100,27 @@ check_progress() {
     return
   fi
 
-  # Cooldown: only fire diagnostic if we haven't in the last 2h
+  # Back-off: at most one diagnostic per 2h, and none for the same pending set
+  # within 12h. The diagnostic is fire-and-forget, so the cron cannot tell a
+  # useful run from a clean one; a new or resolved item re-arms it.
   local stall_marker="$STATE_DIR/last-stall-diagnostic-ts"
+  local stall_set="$STATE_DIR/last-stall-diagnostic-set"
   local last_stall=0
   [ -f "$stall_marker" ] && last_stall=$(cat "$stall_marker" 2>/dev/null || echo 0)
+  [[ "$last_stall" =~ ^[0-9]+$ ]] || last_stall=0
   if [ $((now - last_stall)) -lt 7200 ]; then
     log "no progress, but diagnostic fired <2h ago — skipping"
+    return
+  fi
+  if [ $((now - last_stall)) -lt 43200 ] && [ -f "$stall_set" ] && \
+     [ "$(cat "$stall_set" 2>/dev/null)" = "$items" ]; then
+    log "no progress, but the same $pending pending item(s) the diagnostic saw <12h ago — skipping"
     return
   fi
 
   log "no progress, no token hints — firing archon-assist diagnostic"
   echo "$now" > "$stall_marker"
+  printf '%s\n' "$items" > "$stall_set"
 
   local logf="$LOG_DIR/pipeline-health-diagnostic-$(date +%Y%m%d-%H%M%S).log"
   # Under ARCHON_RUN_AS=archon the factory user may only run in a factory
@@ -2046,7 +2135,8 @@ check_progress() {
     disown
   )
   # No ntfy — archon-assist has been fired and will diagnose; if nothing
-  # improves on the next tick, we'll fire it again (2h cooldown).
+  # improves, we fire it again once the pending set changes (2h minimum) or
+  # after 12h.
 }
 
 # ----------------------------------------------------------------------------
