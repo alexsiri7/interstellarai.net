@@ -36,13 +36,13 @@
 # once per PR. Any lookup failure, or a named open issue or trusted open PR,
 # parks.
 #
-# Issues pipeline-health-cron.sh files (Main CI red, Prod deploy failed/lagging)
-# are never closed on the refs their verdict names (#107): they track live
-# CI/deploy state, and a PR their verdict names is usually what broke it, not
-# a fix (un-reminder #450 cites merged PR #449, the cause of the red). They
-# close only when the alert's condition is false now, when they duplicate the
-# open alert with the same title, or when the owner decided (#259); otherwise
-# they are parked for a human.
+# Issues pipeline-health-cron.sh files (Main CI red, Prod deploy failed/lagging,
+# Deploy down) are never closed on the refs their verdict names (#107): they
+# track live CI/deploy state, and a PR their verdict names is usually what
+# broke it, not a fix (un-reminder #450 cites merged PR #449, the cause of
+# the red). They close only when the alert's condition is false now, when
+# they duplicate the open alert with the same title, or when the owner
+# decided (#259); otherwise they are parked for a human.
 #
 # Two more closes need no person (#259), each confirmed on GitHub, labelled
 # factory-closed and quoting its evidence, and closed as not planned: the

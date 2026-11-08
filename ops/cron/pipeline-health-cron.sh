@@ -558,10 +558,11 @@ find_tracked_issue() {
 # ----------------------------------------------------------------------------
 # open_escalations <repo>: echo "<number>\t<kind>\t<pr>" for each open issue
 # this script filed as an escalation — a "Main CI red" issue (kind main-ci), a
-# "Prod deploy failed/lagging" one (kind prod-deploy) or a file_stuck_issue one
-# (kind from its **Kind** line, PR number from its **Evidence** link; empty for
-# main-ci and prod-deploy). Lists open issues rather than searching, so a
-# just-filed issue the search index has not caught up with is still seen.
+# "Prod deploy failed/lagging" one (kind prod-deploy), a "Deploy down" one
+# (kind deploy-down) or a file_stuck_issue one (kind from its **Kind** line, PR
+# number from its **Evidence** link; empty for the others). Lists open issues
+# rather than searching, so a just-filed issue the search index has not caught
+# up with is still seen. Returns 1 when the listing failed.
 # ----------------------------------------------------------------------------
 open_escalations() {
   local repo="$1" issues
@@ -569,11 +570,12 @@ open_escalations() {
   if ! issues=$(gh issue list --repo "$repo" --state open --limit 200 \
       --json number,title,body,labels 2>/dev/null); then
     log "$repo: gh issue list failed — escalation close check skipped, retrying next tick" >&2
-    return
+    return 1
   fi
   echo "$issues" | jq -r '.[] | select((.body // "") | contains("Auto-filed by `pipeline-health-cron.sh`"))
         | if (.title | startswith("Main CI red")) then [(.number|tostring), "main-ci", ""]
           elif (.title | startswith("Prod deploy ")) then [(.number|tostring), "prod-deploy", ""]
+          elif (.title | startswith("Deploy down: ")) then [(.number|tostring), "deploy-down", ""]
           elif ([.labels[].name] | index("manual-review")) then
             [(.number|tostring),
              ((.body | capture("\\*\\*Kind\\*\\*: (?<k>[a-z-]+)") | .k) // ""),
@@ -2596,6 +2598,8 @@ check_deploy_http() {
 
 The production deployment is not responding correctly. Check the hosting
 dashboard (Railway / Cloudflare Pages / etc.) and recent deployments for errors.
+
+Auto-filed by \`pipeline-health-cron.sh\`. This issue is closed automatically once the URL answers again.
 EOF
 )
     gh issue create --repo "alexsiri7/$project" \
@@ -2606,22 +2610,25 @@ EOF
     return
   fi
 
-  # Healthy — clear markers
+  # Healthy — clear markers. The down marker stays until the issue it filed is
+  # closed, so a failed close is retried next tick.
+  rm -f "$suspect"
   if [ -f "$marker" ]; then
-    local issues issue_num
-    if issues=$(gh issue list --repo "alexsiri7/$project" --state open --limit 200 \
-        --json number,title,body 2>/dev/null); then
-      while read -r issue_num; do
-        close_escalation "alexsiri7/$project" "$issue_num" "$deploy_url answers HTTP $http_code again." \
-          && label_factory_closed "alexsiri7/$project" "$issue_num"
-      done < <(jq -r --arg t "Deploy down: $deploy_url returning HTTP " '.[]
-        | select((.title | startswith($t)) and ((.body // "") | contains("## Deploy health check failure")))
-        | .number' <<<"$issues")
+    local escalations issue_num kind closed=1
+    if escalations=$(open_escalations "alexsiri7/$project"); then
+      while IFS=$'\t' read -r issue_num kind _; do
+        [ "$kind" = deploy-down ] || continue
+        if close_escalation "alexsiri7/$project" "$issue_num" "$deploy_url answers HTTP $http_code again."; then
+          label_factory_closed "alexsiri7/$project" "$issue_num"
+        else
+          closed=0
+        fi
+      done <<<"$escalations"
     else
-      log "$project: gh issue list failed — its deploy-down issue is left for a human"
+      closed=0
     fi
+    [ "$closed" = 1 ] && rm -f "$marker"
   fi
-  rm -f "$marker" "$suspect"
   log "$project: deploy OK (HTTP $http_code at $deploy_url)"
 }
 

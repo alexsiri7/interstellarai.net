@@ -255,6 +255,7 @@ setup_main_ci_env() {
     export -f curl
 
     load_check_deploy_http
+    load_fn open_escalations
 
     # Pre-create marker — simulates a previously-down deploy now recovered.
     touch "$STATE_DIR/deploy-down-test-project"
@@ -266,22 +267,30 @@ setup_main_ci_env() {
 }
 
 # #259: the deploy-down issue closes on the tick that sees the deploy back.
-@test "check_deploy_http closes the deploy-down issue it filed once the deploy answers again" {
+DEPLOY_DOWN_ISSUES='[
+  {"number":50,"title":"Deploy down: https://test.example.com/healthz returning HTTP 000","body":"## Deploy health check failure\n\nAuto-filed by `pipeline-health-cron.sh`.","labels":[]},
+  {"number":51,"title":"Deploy down: https://test.example.com/healthz returning HTTP 502","body":"Filed by hand.","labels":[]},
+  {"number":52,"title":"Main CI red on test-project","body":"Auto-filed by `pipeline-health-cron.sh`.","labels":[]}]'
+
+load_deploy_recovery() {
     curl() { printf "200"; return 0; }
     export -f curl
     load_check_deploy_http
+    load_fn open_escalations
     load_fn close_escalation
     load_fn label_factory_closed
     gh() {
         case "$1 $2" in
-            "issue list") echo '[
-              {"number":50,"title":"Deploy down: https://test.example.com/healthz returning HTTP 000","body":"## Deploy health check failure\n\n**URL**: https://test.example.com/healthz"},
-              {"number":51,"title":"Deploy down: https://test.example.com/healthz returning HTTP 502","body":"Filed by hand."},
-              {"number":52,"title":"Deploy down: https://other.example.com/ returning HTTP 000","body":"## Deploy health check failure"}]' ;;
-            "issue close"|"issue edit") printf '%s\n' "$*" >> "$STATE_DIR/issue-writes" ;;
+            "issue list") [ -z "${GH_LIST_FAILS:-}" ] && echo "$DEPLOY_DOWN_ISSUES" ;;
+            "issue close") printf '%s\n' "$*" >> "$STATE_DIR/issue-writes"; [ -z "${GH_CLOSE_FAILS:-}" ] ;;
+            "issue edit") printf '%s\n' "$*" >> "$STATE_DIR/issue-writes" ;;
         esac
     }
-    touch "$STATE_DIR/deploy-down-test-project"
+    touch "$STATE_DIR/deploy-down-test-project" "$STATE_DIR/deploy-suspect-test-project"
+}
+
+@test "check_deploy_http closes the deploy-down issue it filed once the deploy answers again" {
+    load_deploy_recovery
 
     check_deploy_http "test-project"
 
@@ -289,6 +298,35 @@ setup_main_ci_env() {
     grep -q '^issue close 50 --repo alexsiri7/test-project --comment Resolved: https://test.example.com/healthz answers HTTP 200 again\.' "$STATE_DIR/issue-writes"
     grep -qx 'issue edit 50 --repo alexsiri7/test-project --add-label factory-closed' "$STATE_DIR/issue-writes"
     [ ! -f "$STATE_DIR/deploy-down-test-project" ]
+    [ ! -f "$STATE_DIR/deploy-suspect-test-project" ]
+}
+
+@test "check_deploy_http keeps the down marker, to retry the close, when the issue list or the close fails" {
+    local failure
+    for failure in GH_LIST_FAILS GH_CLOSE_FAILS; do
+        rm -f "$STATE_DIR/issue-writes"
+        load_deploy_recovery
+        export "$failure=1"
+
+        check_deploy_http "test-project"
+
+        unset "$failure"
+        [ -f "$STATE_DIR/deploy-down-test-project" ] || { echo "failure: $failure"; return 1; }
+        [ ! -f "$STATE_DIR/deploy-suspect-test-project" ] || { echo "failure: $failure"; return 1; }
+        ! grep -q 'factory-closed' "$STATE_DIR/issue-writes" 2>/dev/null || { echo "failure: $failure"; return 1; }
+    done
+}
+
+@test "the deploy-down issue body carries the line open_escalations and settle key on" {
+    curl() { printf "502"; return 0; }
+    export -f curl
+    load_check_deploy_http
+    gh() { [ "$1 $2" = "issue create" ] && printf '%s\n' "$@" > "$STATE_DIR/created"; }
+    touch "$STATE_DIR/deploy-suspect-test-project"
+
+    check_deploy_http "test-project"
+
+    grep -qF 'Auto-filed by `pipeline-health-cron.sh`' "$STATE_DIR/created"
 }
 
 @test "check_deploy_http lists no issues on a healthy tick with no down episode filed" {
@@ -645,12 +683,12 @@ ESCALATIONS_FIXTURE='[
     grep -q "gh pr view #7 failed — escalation #22 left open" "$STATE_DIR/log"
 }
 
-@test "open_escalations logs a failed issue listing to stderr and lists nothing" {
+@test "open_escalations logs a failed issue listing to stderr, lists nothing and fails" {
     load_fn open_escalations
     gh() { return 1; }
     log() { echo "LOG: $*"; }
 
-    open_escalations "alexsiri7/test-project" > "$STATE_DIR/out" 2> "$STATE_DIR/err"
+    ! open_escalations "alexsiri7/test-project" > "$STATE_DIR/out" 2> "$STATE_DIR/err"
 
     [ ! -s "$STATE_DIR/out" ]
     grep -q "alexsiri7/test-project: gh issue list failed" "$STATE_DIR/err"
