@@ -33,8 +33,9 @@
 # tokens for both. On 2026-11-07 something ran `gh auth switch` back to the
 # flagged account and pickup held for 25h. So a blocked active account that is
 # not the owner's is switched to the owner's when its stored token works, with
-# one ntfy, under a lock the morning pass's own switch shares; every launch gate logs the active account and the hosts.yml mtime,
-# so the next flip can be dated.
+# one ntfy, under a lock the morning pass's own switch shares; every launch
+# gate logs the active account and the hosts.yml mtime, so the next flip can be
+# dated.
 
 [ -n "${_GH_FACTORY_SH:-}" ] && return 0
 _GH_FACTORY_SH=1
