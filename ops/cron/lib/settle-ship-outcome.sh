@@ -484,7 +484,7 @@ tier=$(severity_tier "$declared_tier" "$verdict_block"$'\n'"$title")
 # of this run (matched on its log's file name, as settle_resume_act does)
 # finishes the release. A comment that fails releases nothing and exits 1; the
 # issue it filed carries archon-split-from, so the next settle reuses it
-# instead of filing the part again.
+# instead of filing the part again, and records its dependency again.
 settle_split() {
   [[ "$verdict" =~ $SPLIT_RE ]] || return 0
   local keeps="${BASH_REMATCH[1]}" waits="${BASH_REMATCH[2]}" blocker="${BASH_REMATCH[3]}"
@@ -520,16 +520,18 @@ settle_split() {
 <!-- lachesis:automated -->" 2>/dev/null) || return 0
     new=${url##*/}
     [[ "$new" =~ ^[0-9]+$ ]] || return 0
-
-    # Each pickup reads its own record: Lachesis next_issue its dependencies,
-    # the label queue GitHub's native blocked_by links.
-    if lachesis_pickup_enabled; then
-      lachesis_depend "$project" "$new" "$blocker"
-    else
-      [[ "${id:-}" =~ ^[0-9]+$ ]] && gh api --method POST "repos/$repo/issues/$new/dependencies/blocked_by" \
-        -F issue_id="$id" >/dev/null 2>&1
-    fi || dep_note=" The dependency of #$new on #$blocker could not be recorded; its body names it."
   fi
+
+  # Each pickup reads its own record: Lachesis next_issue its dependencies,
+  # the label queue GitHub's native blocked_by links.
+  if lachesis_pickup_enabled; then
+    lachesis_depend "$project" "$new" "$blocker"
+  else
+    [[ "${id:-}" =~ ^[0-9]+$ ]] && {
+      gh api "repos/$repo/issues/$new/dependencies/blocked_by" --jq '.[].id' 2>/dev/null | grep -qx "$id" \
+        || gh api --method POST "repos/$repo/issues/$new/dependencies/blocked_by" -F issue_id="$id" >/dev/null 2>&1
+    }
+  fi || dep_note=" The dependency of #$new on #$blocker could not be recorded; its body names it."
 
   today=$(date +%F)
   if ! gh issue comment "$issue" --repo "$repo" --body "**Scope (factory split, ${today}):** #$issue now covers only: ${keeps}. The part that waits on #$blocker — ${waits} — moved to #$new, blocked on #$blocker.

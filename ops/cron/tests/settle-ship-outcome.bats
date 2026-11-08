@@ -23,8 +23,9 @@ setup() {
     # deps-<sha> (deployments) with depstate-<id> (its latest state), and
     # file-<path with / as _> (a file that exists). GH_COMMENT_RC fails `issue comment`.
     # `issue create` prints issue GH_CREATE_NUM's URL (default 99), or fails
-    # with GH_CREATE_RC; GH_DEP_RC fails the native blocked_by POST. `issue list`
-    # prints the issue-list fixture (default: none).
+    # with GH_CREATE_RC; GH_DEP_RC fails the native blocked_by POST, and its GET
+    # reads blocked-by-<N> (default: none). `issue list` prints the issue-list
+    # fixture (default: none).
     cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_ARGV"
@@ -58,6 +59,9 @@ case "$*" in
     [ -e "$GH_FIXTURES/gone-${2##*/}" ] && { echo 'gh: Not Found (HTTP 404)' >&2; exit 1; }
     cat "$GH_FIXTURES/state-${2##*/}" 2>/dev/null || exit 1 ;;
   "api --method POST "*/dependencies/blocked_by*) exit "${GH_DEP_RC:-0}" ;;
+  "api "*/dependencies/blocked_by*)
+    n=$(sed -E 's#.*/issues/([0-9]+)/.*#\1#' <<<"$*")
+    jq -r "$4" "$GH_FIXTURES/blocked-by-$n" 2>/dev/null || echo '[]' | jq -r "$4" ;;
   "api "*/issues/*)   [ "$3" = --jq ] && jq -r "$4" "$GH_FIXTURES/ref-${2##*/}" 2>/dev/null ;;
   *"issue list"*)     cat "$GH_FIXTURES/issue-list" 2>/dev/null || echo '[]' ;;
   *"issue create"*)
@@ -1966,7 +1970,7 @@ assert_landed_here() {
     split_verdict
     ref 246 open-issue
 
-    GH_COMMENT_RC=1 run "$SCRIPT" testproj 9 "$RUN_LOG"
+    LACHESIS_DEPEND_RC=1 GH_COMMENT_RC=1 run "$SCRIPT" testproj 9 "$RUN_LOG"
 
     [ "$status" -eq 1 ]
     [ "$(gh_calls 'issue create')" -eq 1 ]
@@ -1979,8 +1983,50 @@ assert_landed_here() {
 
     [ "$status" -eq 0 ]
     [ "$(gh_calls 'issue create')" -eq 0 ]
-    [ "$(grep -c '^add_dependency' "$LACHESIS_ARGV")" -eq 0 ]
+    sed -n 's/^add_dependency //p' "$LACHESIS_ARGV" \
+        | jq -e '. == {repo: "alexsiri7/testproj", issue_number: 99, blocked_by_issue_number: 246}'
+    [ "$(gh_calls 'could not be recorded')" -eq 0 ]
     grep -q -- "moved to #99, blocked on #246" "$GH_ARGV"
     grep -qx -- "<!-- archon-settle-split: 99 -->" "$GH_ARGV"
     assert_released 9
+}
+
+@test "split reused after a failed comment, pickup off: links the blocker unless the link is already there" {
+    export LACHESIS_CALL_CMD="$T/no-such-lachesis"
+    split_verdict
+    ref 246 open-issue
+    fixture issue-list '[{"number":99,"body":"Split from #9 by the factory (#270)\n\n<!-- archon-split-from: 9 -->"}]'
+
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    [ "$(gh_calls 'issue create')" -eq 0 ]
+    grep -qx -- "api --method POST repos/alexsiri7/testproj/issues/99/dependencies/blocked_by -F issue_id=1246" "$GH_ARGV"
+    [ "$(gh_calls 'could not be recorded')" -eq 0 ]
+
+    : > "$GH_ARGV"
+    fixture blocked-by-99 '[{"id":1246}]'
+
+    GH_DEP_RC=1 run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    [ "$(gh_calls 'api --method POST')" -eq 0 ]
+    [ "$(gh_calls 'could not be recorded')" -eq 0 ]
+    grep -q -- "moved to #99, blocked on #246" "$GH_ARGV"
+}
+
+# The split's blocker closed by settle time: no split, and the closed #212 it
+# names must not close it as matching that precedent either.
+@test "a split verdict naming a closed precedent is never closed as matching it" {
+    lachesis_on
+    printf '%s\nReport: /x/triage.md\n' \
+        'Not done: blocked on a split: this issue keeps "Escalate a stuck PR once per PR"; "Route gate-blocked PRs to the ops reviewer" waits on #246. Same as precedent issue #212, which landed part 1.' \
+        > "$RUN_LOG"
+    ref 246 closed-issue
+    ref 212 closed-issue
+
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    [ "$(gh_calls 'issue close')" -eq 0 ]
+    [ "$(gh_calls 'issue create')" -eq 0 ]
 }
