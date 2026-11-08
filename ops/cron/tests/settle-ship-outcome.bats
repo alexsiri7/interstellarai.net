@@ -17,16 +17,37 @@ setup() {
     # fixtures (default: an ordinary issue), or fails with GH_VIEW_RC. The deferral checks (#211) read state-<N>
     # ("issue|pr<TAB>open|closed") and pull-<N> ("<state><TAB><merged><TAB>
     # <cross><TAB><login>"); gone-<N> makes both answer 404; comments-<N>
-    # is the issue's one comment body, which the script's --jq reads. GH_COMMENT_RC fails `issue comment`.
+    # is the issue's one comment body, which the script's --jq reads, and
+    # comments-json-<N> the full comment array (login, association, url) instead.
+    # The #259 lookups read head (main's SHA), runs-<sha> (gh run list JSON),
+    # deps-<sha> (deployments) with depstate-<id> (its latest state), and
+    # file-<path with / as _> (a file that exists). GH_COMMENT_RC fails `issue comment`.
     cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_ARGV"
 case "$*" in
   *sub_issues*)       cat "$GH_FIXTURES/sub-$(sed -E 's#.*/issues/([0-9]+)/.*#\1#' <<<"$*")" 2>/dev/null || printf '0\t0\n' ;;
   *"/comments"*)
-    f="$GH_FIXTURES/comments-$(sed -E 's#.*/issues/([0-9]+)/.*#\1#' <<<"$*")"
-    [ -e "$f" ] && jq -Rs '[{body: .}]' "$f" | jq -r "$5"
+    n=$(sed -E 's#.*/issues/([0-9]+)/.*#\1#' <<<"$*")
+    f="$GH_FIXTURES/comments-$n"
+    if [ -e "$GH_FIXTURES/comments-json-$n" ]; then jq -r "$5" "$GH_FIXTURES/comments-json-$n"
+    elif [ -e "$f" ]; then jq -Rs '[{body: .}]' "$f" | jq -r "$5"; fi
     exit "${GH_COMMENTS_RC:-0}" ;;
+  "api "*/commits/main*)
+    [ -e "$GH_FIXTURES/head" ] || exit 1
+    cat "$GH_FIXTURES/head" ;;
+  "run list "*)
+    sha=$(sed -E 's/.*--commit ([0-9a-f]+).*/\1/' <<<"$*")
+    cat "$GH_FIXTURES/runs-$sha" 2>/dev/null || echo '[]' ;;
+  "api "*/deployments/*/statuses*)
+    id=$(sed -E 's#.*/deployments/([0-9]+)/.*#\1#' <<<"$*")
+    cat "$GH_FIXTURES/depstate-$id" 2>/dev/null || exit 1 ;;
+  "api "*/deployments*)
+    sha=$(sed -E 's/.*sha=([0-9a-f]+).*/\1/' <<<"$*")
+    cat "$GH_FIXTURES/deps-$sha" 2>/dev/null || echo '[]' ;;
+  "api "*/contents/*)
+    p=${2#*/contents/}
+    [ -e "$GH_FIXTURES/file-${p//\//_}" ] && echo file || { echo 'gh: Not Found (HTTP 404)' >&2; exit 1; } ;;
   "api "*/pulls/*)
     [ -e "$GH_FIXTURES/gone-${2##*/}" ] && { echo 'gh: Not Found (HTTP 404)' >&2; exit 1; }
     cat "$GH_FIXTURES/pull-${2##*/}" 2>/dev/null || exit 1 ;;
@@ -169,15 +190,29 @@ LOG
     assert_parked 7
 }
 
-@test "a verdict naming only a closed original parks for a maintainer, naming it" {
+# #259 turned this around: a duplicate of a closed issue closes, citing it.
+@test "a verdict naming only a closed original closes on that precedent, labelled factory-closed" {
     printf 'No delivery needed: duplicate of #8, closed last week.\nReport: /x\n' > "$RUN_LOG"
     ref 8 closed-issue
 
     run "$SCRIPT" testproj 7 "$RUN_LOG"
 
     [ "$status" -eq 0 ]
+    grep -q -- "issue close 7 --repo alexsiri7/testproj --reason not planned --comment" "$GH_ARGV"
+    grep -q -- "Closed as archon:done: matches closed precedent #8" "$GH_ARGV"
+    grep -q -- "issue edit 7 --repo alexsiri7/testproj --add-label factory-closed" "$GH_ARGV"
+    [ "$(gh_calls 'archon:skipped')" -eq 0 ]
+}
+
+@test "a closed ref the verdict gives no precedent reason for still parks, naming it" {
+    printf 'No delivery needed: see #8, closed last week, for background.\nReport: /x\n' > "$RUN_LOG"
+    ref 8 closed-issue
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
     assert_parked 7
-    grep -q -- "Not auto-closed: the verdict names closed issue #8, and a duplicate of a closed issue is a maintainer's call" "$GH_ARGV"
+    grep -q -- "Not auto-closed: the verdict names closed issue #8" "$GH_ARGV"
 }
 
 @test "a verdict naming only a merged PR closes as completed" {
@@ -604,9 +639,10 @@ Report: /x'
     [ "$status" -eq 0 ]
     grep -q -- "issue edit 450 --repo alexsiri7/testproj --remove-label archon:in-progress --add-label archon:skipped" "$GH_ARGV"
     [ "$(gh_calls 'issue close')" -eq 0 ]
-    [ "$(gh_calls 'api ')" -eq 0 ]
     grep -q -- "issue comment 450 " "$GH_ARGV"
     grep -q "Not auto-closed: the issue was filed by pipeline-health-cron.sh" "$GH_ARGV"
+    # The merged PR is never looked up; only the alert's own condition (#259).
+    [ "$(gh_calls 'api repos/alexsiri7/testproj/issues/')" -eq 0 ]
 }
 
 @test "--recheck leaves a parked health-filed verdict untouched even when it names a merged PR" {
@@ -688,9 +724,19 @@ STUB
     [ ! -s "$LACHESIS_ARGV" ]
 }
 
-@test "lachesis pickup on: a duplicate of a closed issue asks, naming it" {
+@test "lachesis pickup on: a duplicate of a closed issue closes without a question (#259)" {
     lachesis_on
     echo 'No delivery needed: duplicate of #8.' > "$RUN_LOG"
+    ref 8 closed-issue
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    grep -q -- "issue close 9 --repo alexsiri7/testproj --reason not planned --comment" "$GH_ARGV"
+    [ ! -s "$LACHESIS_ARGV" ]
+}
+
+@test "lachesis pickup on: a closed ref with no precedent reason asks, naming it" {
+    lachesis_on
+    echo 'No delivery needed: see #8 for background.' > "$RUN_LOG"
     ref 8 closed-issue
     run "$SCRIPT" testproj 9 "$RUN_LOG"
     [ "$status" -eq 0 ]
@@ -899,7 +945,8 @@ assert_released() {
 
     [ "$status" -eq 0 ]
     grep -q -- "issue edit 450 --repo alexsiri7/testproj --remove-label archon:in-progress --add-label archon:skipped" "$GH_ARGV"
-    [ "$(gh_calls 'api ')" -eq 0 ]
+    [ "$(gh_calls 'api repos/alexsiri7/testproj/issues/')" -eq 0 ]
+    [ "$(gh_calls 'pulls/')" -eq 0 ]
     grep -q -- "Not auto-closed" "$GH_ARGV"
 }
 
@@ -1293,4 +1340,365 @@ tier_outcome() {
     assert_parked 9
     [ "$(gh_calls 'comments')" -eq 0 ]
     [[ "$output" != *"tier"* ]]
+}
+
+# ── Closes with a reason (#259) ──────────────────────────────────────────────
+# The owner's rule of 2026-11-08: the factory closes any issue it can give a
+# reason and evidence for, labels it factory-closed, and asks only for a spec
+# decision or when it has no reason. Fixtures are the verbatim verdicts the
+# factory parked on the owner before the rule.
+
+assert_factory_closed() {
+    grep -q -- "label create factory-closed --repo alexsiri7/testproj" "$GH_ARGV"
+    grep -q -- "issue close $1 --repo alexsiri7/testproj $2 --comment" "$GH_ARGV"
+    grep -q -- "issue edit $1 --repo alexsiri7/testproj --add-label factory-closed" "$GH_ARGV"
+    grep -q -- "--add-label archon:done" "$GH_ARGV"
+    grep -q -- "Closed by the factory without asking the owner" "$GH_ARGV"
+    [ "$(gh_calls 'archon:skipped')" -eq 0 ]
+}
+
+HEAD_SHA=1111111111aaaaaaaaaa2222222222bbbbbbbbbb
+ALERT_SHA=3333333333cccccccccc4444444444dddddddddd
+
+# word-coach-annie "Prod deploy lagging main": the deploy succeeded ~16 min
+# after the commit, before the run ended.
+lagging_alert() {
+    printf 'Prod deploy lagging main' > "$T/fixtures/title-$1"
+    cat > "$T/fixtures/body-$1" <<BODY
+## Prod deploy lagging main
+
+**Repo**: alexsiri7/testproj
+**main HEAD**: \`$ALERT_SHA\` (committed 2026-11-06T08:00:00Z, age 960s)
+**Latest prod deploy**: \`0000000000eeeeeeeeee\` at 2026-11-06T07:00:00Z
+
+Auto-filed by \`pipeline-health-cron.sh\`. main has been ahead of prod for >15 minutes.
+BODY
+}
+
+ci_red_alert() {
+    printf 'Main CI red: check' > "$T/fixtures/title-$1"
+    cat > "$T/fixtures/body-$1" <<BODY
+## Main CI red
+
+**Repo**: alexsiri7/testproj
+**SHA**: \`$ALERT_SHA\`
+**Workflow**: CI
+**Failing workflows at this SHA**: CI
+**Failed jobs**: check
+
+Auto-filed by \`pipeline-health-cron.sh\`. Main CI is a pipeline bottleneck.
+BODY
+}
+
+@test "reason: a self-resolved deploy-lag alert closes, citing the deploy now on prod" {
+    lachesis_on
+    lagging_alert 1300
+    echo "$HEAD_SHA" > "$T/fixtures/head"
+    echo '[{"name":"Staging → Production Pipeline","conclusion":"success","createdAt":"2026-11-06T08:16:00Z"}]' \
+        > "$T/fixtures/runs-$ALERT_SHA"
+    printf 'No delivery needed: the deploy of %s succeeded about 16 minutes after the commit; the alert fired before it finished.\nReport: /x\n' "$ALERT_SHA" > "$RUN_LOG"
+
+    run "$SCRIPT" testproj 1300 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_factory_closed 1300 "--reason completed"
+    grep -q -- "Reason: the alert resolved itself. Evidence: prod deployed the alert's SHA ${ALERT_SHA:0:10} successfully" "$GH_ARGV"
+    [ ! -s "$LACHESIS_ARGV" ]
+}
+
+@test "reason: a deploy alert whose SHA is only live through a production deployment closes" {
+    lagging_alert 1300
+    echo "$HEAD_SHA" > "$T/fixtures/head"
+    echo '[{"id":77,"environment":"production"}]' > "$T/fixtures/deps-$HEAD_SHA"
+    echo success > "$T/fixtures/depstate-77"
+    printf 'Not done: blocked on nothing the code can change: Railway redeployed on its own.\nReport: /x\n' > "$RUN_LOG"
+
+    run "$SCRIPT" testproj 1300 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_factory_closed 1300 "--reason completed"
+    grep -q -- "prod deployed main's HEAD ${HEAD_SHA:0:10} successfully" "$GH_ARGV"
+}
+
+@test "reason: a Main CI red alert closes once main's push CI is green at HEAD" {
+    ci_red_alert 60
+    echo "$HEAD_SHA" > "$T/fixtures/head"
+    echo '[{"name":"CI","status":"completed","conclusion":"success","createdAt":"2026-11-06T09:00:00Z"},{"name":"CI","status":"completed","conclusion":"failure","createdAt":"2026-11-06T08:00:00Z"}]' \
+        > "$T/fixtures/runs-$HEAD_SHA"
+    printf 'No delivery needed: the brain.test.ts timeout is a flake; it passes 5 of 5 locally.\nReport: /x\n' > "$RUN_LOG"
+
+    run "$SCRIPT" testproj 60 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_factory_closed 60 "--reason completed"
+    grep -q -- "main's push CI (CI) is green now at HEAD ${HEAD_SHA:0:10}" "$GH_ARGV"
+    grep -q -- "run list --repo alexsiri7/testproj --branch main --commit $HEAD_SHA --event push" "$GH_ARGV"
+}
+
+@test "reason: an alert still red at HEAD, or whose HEAD cannot be read, parks for the owner" {
+    ci_red_alert 60
+    printf 'No delivery needed: the timeout is a flake.\nReport: /x\n' > "$RUN_LOG"
+    echo "$HEAD_SHA" > "$T/fixtures/head"
+    echo '[{"name":"CI","status":"completed","conclusion":"failure","createdAt":"2026-11-06T09:00:00Z"}]' \
+        > "$T/fixtures/runs-$HEAD_SHA"
+
+    run "$SCRIPT" testproj 60 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 60
+    [ "$(gh_calls 'factory-closed')" -eq 0 ]
+
+    : > "$GH_ARGV"
+    rm "$T/fixtures/head"
+    run "$SCRIPT" testproj 60 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 60
+}
+
+@test "reason: --recheck closes a parked alert once its condition is false, removing archon:skipped" {
+    lagging_alert 1300
+    printf 'No delivery needed: prod should catch up once Railway redeploys.\n\nParked as archon:skipped. Remove the label and add archon:queued to run it again.\n' > "$RUN_LOG"
+
+    run "$SCRIPT" --recheck testproj 1300 "$RUN_LOG"
+    [ "$status" -eq 1 ]
+    assert_untouched
+
+    echo "$HEAD_SHA" > "$T/fixtures/head"
+    echo '[{"name":"Production","conclusion":"success","createdAt":"2026-11-06T08:16:00Z"}]' > "$T/fixtures/runs-$HEAD_SHA"
+    run "$SCRIPT" --recheck testproj 1300 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    grep -q -- "issue edit 1300 --repo alexsiri7/testproj --remove-label archon:skipped --add-label archon:done" "$GH_ARGV"
+    grep -q -- "issue edit 1300 --repo alexsiri7/testproj --add-label factory-closed" "$GH_ARGV"
+}
+
+# kith #60 (2026-11-06): a second filing of the alert #59 still tracks.
+@test "reason: a health alert duplicating the open alert with the same title closes as its duplicate" {
+    ci_red_alert 60
+    ci_red_alert 59
+    ref 59 open-issue
+    printf 'No delivery needed: #60 ("Main CI red: check") is a duplicate auto-filing: issue #59, still open, cites the identical SHA (18ee9674b468cd743a120f173ba054d47ac3c4e7), the same CI run 42363331165, and the same failing job/test. Routed NO_ACTION/duplicate per the default triage policy, pointing to #59 as the open original. Full evidence in triage.md.\nReport: /x\n' > "$RUN_LOG"
+
+    run "$SCRIPT" testproj 60 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_factory_closed 60 "--duplicate-of 59"
+    grep -q -- "#59 is the open alert pipeline-health filed with the same title" "$GH_ARGV"
+}
+
+@test "reason: a health alert whose named open issue is not the same alert parks" {
+    ci_red_alert 60
+    ref 59 open-issue
+    printf 'No delivery needed: duplicate of #59.\nReport: /x\n' > "$RUN_LOG"
+
+    run "$SCRIPT" testproj 60 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_parked 60
+}
+
+# musenmingle #399 (2026-11-06): a scraper check the owner had twice closed as
+# a false positive (#242, #334).
+@test "reason: the real musenmingle #399 false positive closes on its closed precedent, asking nothing" {
+    lachesis_on
+    cat > "$RUN_LOG" <<'LOG'
+Not done: blocked on Both of #399's two claims look closable rather than workable, but neither qualifies for a no-person close under the project's default triage policy (duplicate of a still-open issue, or outcome delivered by a merged change). The "Camera-works missing" claim is a confirmed, maintainer-reaffirmed false positive (precedent #242, #334 — both closed without any code change, #334 explicitly "Agreed: false positive") against four_corners.rs's deliberate category() scope and its own test; neither precedent is itself open, and no merged change delivered the restated outcome (the code still deliberately skips it). A maintainer needs to decide whether to close this again as before, or invest in a qa_scope()/detail-page-fetch follow-up.. Issue #399 bundles two four-corners scraper QA findings. Both look like false positives rather than real bugs. Full evidence in triage.md.
+Report: /x/triage.md
+LOG
+    ref 242 closed-issue
+    ref 334 closed-issue
+
+    run "$SCRIPT" testproj 399 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_factory_closed 399 "--reason not planned"
+    grep -q -- "Closed as archon:done: matches closed precedent #242, #334" "$GH_ARGV"
+    grep -q -- "Evidence: GitHub shows #242, #334 closed" "$GH_ARGV"
+    [ ! -s "$LACHESIS_ARGV" ]
+}
+
+@test "reason: a false positive whose precedent is still open, or a blocker that is closed, does not close" {
+    printf 'Not done: blocked on a maintainer: false positive, same as #242.\nReport: /x\n' > "$RUN_LOG"
+    ref 242 open-issue
+    run "$SCRIPT" testproj 399 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 399
+
+    : > "$GH_ARGV"
+    printf 'Not done: blocked on #12 landing first.\nReport: /x\n' > "$RUN_LOG"
+    ref 12 closed-issue
+    run "$SCRIPT" testproj 399 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    [ "$(gh_calls 'issue close')" -eq 0 ]
+    [ "$(gh_calls 'factory-closed')" -eq 0 ]
+}
+
+# lachesis #407 (2026-10-27): the owner said close in the thread; the factory
+# asked again anyway. Every factory comment is posted under the owner's token.
+owner_thread() {
+    jq -n --arg last "$2" '[
+      {user: {login: "alexsiri7"}, author_association: "OWNER", html_url: "https://github.com/alexsiri7/testproj/issues/407#issuecomment-1",
+       body: "archon-ship finished without a PR: Not done: blocked on which repo owns the fix.\n\nParked as archon:skipped.\n\n<!-- lachesis:automated -->"},
+      {user: {login: "stranger"}, author_association: "NONE", html_url: "https://github.com/alexsiri7/testproj/issues/407#issuecomment-2",
+       body: "Please close this."},
+      {user: {login: "alexsiri7"}, author_association: "OWNER", html_url: "https://github.com/alexsiri7/testproj/issues/407#issuecomment-3",
+       body: $last},
+      {user: {login: "alexsiri7"}, author_association: "OWNER", html_url: "https://github.com/alexsiri7/testproj/issues/407#issuecomment-4",
+       body: "Reviewed via assist mode on the author'\''s behalf. Close this issue directly.\n\n<!-- lachesis:automated -->"}
+    ]' > "$T/fixtures/comments-json-$1"
+}
+
+LACHESIS_407_VERDICT='Not done: blocked on The maintainer (alexsiri7, OWNER) already decided in the issue'"'"'s most recent comment (2026-10-27) that this is out of scope for lachesis and should be closed with no lachesis-side change, pointing instead to pipeline-health deploy-alert dedup/scoping work on interstellarai.net and to separate owner-side severity-tier/post-triage-disposition work. Per the default triage policy, a close for '"'"'out of scope'"'"' reasons is left to a maintainer, not enacted automatically by this run.. BLOCKED: alexsiri7/lachesis#407 asks lachesis'"'"'s questions capability to auto-close clean NO_ACTION verdicts.'
+
+@test "reason: the real lachesis #407 owner decision closes, quoting and linking the owner's comment" {
+    lachesis_on
+    printf '%s\nReport: /x\n' "$LACHESIS_407_VERDICT" > "$RUN_LOG"
+    owner_thread 407 "Out of this repo's scope. Close it and point to interstellarai.net (the pipeline-health deploy-alert dedup / self-resolved alerts). No Lachesis change is needed."
+
+    run "$SCRIPT" testproj 407 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_factory_closed 407 "--reason not planned"
+    grep -q -- "Reason: the owner already decided in this thread. Evidence: https://github.com/alexsiri7/testproj/issues/407#issuecomment-3" "$GH_ARGV"
+    grep -q -- "^> Out of this repo's scope. Close it and point to interstellarai.net" "$GH_ARGV"
+    [ ! -s "$LACHESIS_ARGV" ]
+}
+
+@test "reason: an owner comment that declines to close, or a stranger's close, decides nothing" {
+    lachesis_on
+    printf '%s\nReport: /x\n' "$LACHESIS_407_VERDICT" > "$RUN_LOG"
+    # musenmingle #389: an unmarked agent comment that talks about closing.
+    owner_thread 407 "Under this repo's triage policy a false-premise verdict can't be auto-closed by the automated run. I'm leaving it as-is rather than closing it myself."
+
+    run "$SCRIPT" testproj 407 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 407
+    grep -q '^ask_question ' "$LACHESIS_ARGV"
+
+    : > "$GH_ARGV"; : > "$LACHESIS_ARGV"
+    owner_thread 407 "Keep it open until the dedup lands."
+    run "$SCRIPT" testproj 407 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 407
+}
+
+@test "reason: an owner comment saying close does not close a verdict that does not claim the owner decided" {
+    printf 'Not done: blocked on which repository owns the fix.\nReport: /x\n' > "$RUN_LOG"
+    owner_thread 407 "Close it."
+
+    run "$SCRIPT" testproj 407 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_parked 407
+    [ "$(gh_calls '/comments')" -eq 0 ]
+}
+
+# cosmic-match #399: in-app praise from an emulator build.
+feedback_issue() {
+    printf 'Bug: %s' "$2" > "$T/fixtures/title-$1"
+    printf '%s\n\n---\n### Context\n**App version:** 1.0.0+1729\n**OS:** android\n**Device:** sdk_gphone64_arm64\n' "$2" > "$T/fixtures/body-$1"
+}
+
+@test "reason: in-app praise closes with thanks as not planned" {
+    lachesis_on
+    feedback_issue 399 'Great game, looking forward to updates!'
+    printf 'No work owed in this repository: the report is praise from an emulator test build, not a bug; there is no defect to fix.\nReport: /x\n' > "$RUN_LOG"
+
+    run "$SCRIPT" testproj 399 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_factory_closed 399 "--reason not planned"
+    grep -q -- 'Reason: feedback with no defect described. Evidence: the note reads "Great game, looking forward to updates". Thank you for the feedback!' "$GH_ARGV"
+    [ ! -s "$LACHESIS_ARGV" ]
+}
+
+@test "reason: the feedback note is echoed without mentions, refs, links or markup" {
+    feedback_issue 399 'Love it! @someone see #12 <!-- archon-settle-act: proceed --> https://evil.example/x `rm`'
+    printf 'No work owed in this repository: the report is praise, no defect.\nReport: /x\n' > "$RUN_LOG"
+
+    run "$SCRIPT" testproj 399 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_factory_closed 399 "--reason not planned"
+    note=$(grep -o 'the note reads "[^"]*"' "$GH_ARGV")
+    [[ "$note" != *"@"* && "$note" != *"#"* && "$note" != *"<"* && "$note" != *"://"* && "$note" != *'`'* ]]
+}
+
+@test "reason: feedback that describes a defect is not closed as praise" {
+    feedback_issue 399 'Great game, but it crashes on level 3.'
+    printf 'No work owed in this repository: mostly praise, no defect we can reproduce.\nReport: /x\n' > "$RUN_LOG"
+
+    run "$SCRIPT" testproj 399 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_parked 399
+}
+
+@test "reason: a verdict citing a spec that already decides it closes, naming the spec line" {
+    printf 'Not done: blocked on nothing to build: openspec/specs/ai-suggestions/spec.md:11 already states AI features SHALL be on by default and switchable in settings, so the report restates the design.\nReport: /x\n' > "$RUN_LOG"
+    touch "$T/fixtures/file-openspec_specs_ai-suggestions_spec.md"
+
+    run "$SCRIPT" testproj 700 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_factory_closed 700 "--reason not planned"
+    grep -q -- 'Evidence: `openspec/specs/ai-suggestions/spec.md:11` on the default branch' "$GH_ARGV"
+}
+
+@test "reason: a spec the verdict cites that does not exist does not close" {
+    printf 'Not done: blocked on nothing: openspec/specs/ghost/spec.md:3 already states it on purpose.\nReport: /x\n' > "$RUN_LOG"
+
+    run "$SCRIPT" testproj 700 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_parked 700
+}
+
+# The negative case: closing would change what the project should be.
+@test "negative: a verdict leaving a spec decision to the owner still asks the owner" {
+    lachesis_on
+    printf 'Not done: blocked on the report contradicts openspec/specs/ai-suggestions/spec.md:11, which states the default on purpose; it is the same claim as closed #650. A maintainer must decide whether to revise the spec to require opt-in.\nReport: /x\n' > "$RUN_LOG"
+    touch "$T/fixtures/file-openspec_specs_ai-suggestions_spec.md"
+    ref 650 closed-issue
+
+    run "$SCRIPT" testproj 700 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_parked 700
+    [ "$(gh_calls 'factory-closed')" -eq 0 ]
+    grep -q '^ask_question .*"blocks":\[700\]' "$LACHESIS_ARGV"
+}
+
+@test "negative: the real filmduel #700 verdict (GDPR, tier 3, a spec call) is not closed" {
+    lachesis_on
+    cat > "$RUN_LOG" <<'LOG'
+Not done: blocked on Issue #700 bundles two claims. The 'consent bundled / cannot withdraw without deleting account' half is already delivered by merged PR #900 (commit 733415f) and #901 (afaac20). The remaining half — AI data sharing defaulting to on — is not a bug but restates a requirement the project's own current direction (openspec/specs/ai-suggestions/spec.md:11, 'AI features ... SHALL be on by default and switchable in settings', introduced 2026-10-02 before the issue was filed) affirms on purpose. Per the triage policy, an item that looks closable because it is 'rejected by direction' waits for a maintainer, not an automatic NO_ACTION. A maintainer must decide whether to reaffirm the on-by-default design against this security/GDPR-flavored finding (and close #700) or revise the spec to require opt-in (which would then route to plan).. Full evidence in triage.md.
+Report: /x/triage.md
+LOG
+    touch "$T/fixtures/file-openspec_specs_ai-suggestions_spec.md"
+    ref 900 merged-pr
+    ref 901 merged-pr
+
+    run "$SCRIPT" testproj 700 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    [ "$(gh_calls 'issue close')" -eq 0 ]
+    [ "$(gh_calls 'factory-closed')" -eq 0 ]
+}
+
+@test "negative: a verdict with no reason to close still asks the owner" {
+    lachesis_on
+    printf 'Not done: blocked on an owner-level product decision: should guests see the leaderboard?\nReport: /x\n' > "$RUN_LOG"
+
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_parked 9
+    [ "$(gh_calls 'factory-closed')" -eq 0 ]
+    grep -q '^ask_question ' "$LACHESIS_ARGV"
+}
+
+@test "factory-close passes shellcheck" {
+    command -v shellcheck >/dev/null || skip "shellcheck not installed"
+    cd "$(dirname "$SCRIPT")/.."
+    run shellcheck -x lib/factory-close.sh
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
