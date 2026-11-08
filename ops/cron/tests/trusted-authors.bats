@@ -515,13 +515,15 @@ scoped_pr_at() { # scoped_pr_at <check-state> [mergeState]: scoped_pr, its head 
     [ -e "$HOME/.archon/state/held-review/proj-700" ]
 }
 
-@test "scope: an UNSTABLE or BLOCKED PR with no held-pr-review record is not merged or relabelled" {
+@test "scope: an UNSTABLE or BLOCKED PR with no held-pr-review record is not merged, but is labelled for held-pr-review" {
     for st in UNSTABLE BLOCKED; do
+        : > "$STUB_GH_ARGV"
         scoped_pr_at FAILURE "$st"
         run "$CRON_DIR/pr-maintenance-cron.sh"
+        [[ "$output" == *"PR #700 is $st — not auto-merged: unsafe-change check failed"* ]]
+        ! gh_called '^pr merge'
+        gh_called '^pr edit 700 --add-label needs-owner-review'
     done
-    ! gh_called '^pr merge'
-    ! gh_called '^pr edit'
 }
 
 @test "scope: an owner verdict the owner took the label off goes through the scope check like any PR" {

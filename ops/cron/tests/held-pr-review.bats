@@ -163,6 +163,31 @@ calls() { grep -c "^$1" "$T/argv" || true; }
     done
 }
 
+@test "floor: a rename off a protected path, or a workflow renamed off .yml, is caught on its old path" {
+    source "$CRON/lib/owner-paths.sh"
+    source <(awk '/^held_review_owner_hits\(\)/{p=1} p{print} p && /^}$/{p=0}' "$CRON/held-pr-review.sh")
+    # `gh pr diff --name-only` and a diff's own header give only the new path.
+    printf '.github/CODEOWNERS.old\n' > "$T/f"
+    printf 'diff --git a/.github/CODEOWNERS b/.github/CODEOWNERS.old\nsimilarity index 100%%\nrename from .github/CODEOWNERS\nrename to .github/CODEOWNERS.old\n' > "$T/d"
+    run held_review_owner_hits "$T/f" "$T/d" catscape
+    [ "$output" = ".github/CODEOWNERS (merge rules or branch protection)" ]
+    printf '.github/workflows/ci.yml.disabled\n' > "$T/f"
+    printf 'diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml.disabled\nsimilarity index 100%%\nrename from .github/workflows/ci.yml\nrename to .github/workflows/ci.yml.disabled\n' > "$T/d"
+    run held_review_owner_hits "$T/f" "$T/d" catscape
+    [ "$output" = ".github/workflows/ci.yml.disabled (a CI workflow renamed off .yml/.yaml, disabling it)" ]
+    # A rename between two ordinary paths, or within .github/workflows, is neither.
+    printf 'src/new-name.ts\n' > "$T/f"
+    printf 'diff --git a/src/old-name.ts b/src/new-name.ts\nsimilarity index 100%%\nrename from src/old-name.ts\nrename to src/new-name.ts\n' > "$T/d"
+    run held_review_owner_hits "$T/f" "$T/d" catscape
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+    printf '.github/workflows/ci2.yml\n' > "$T/f"
+    printf 'diff --git a/.github/workflows/ci.yml b/.github/workflows/ci2.yml\nsimilarity index 100%%\nrename from .github/workflows/ci.yml\nrename to .github/workflows/ci2.yml\n' > "$T/d"
+    run held_review_owner_hits "$T/f" "$T/d" catscape
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+}
+
 # ---------------------------------------------------------------- acceptance
 @test "acceptance (a): a denylisted-path PR in another repo is reviewed and handed back approved, no owner question" {
     held catscape 22 "$SHA1" needs-owner-review
@@ -267,6 +292,18 @@ calls() { grep -c "^$1" "$T/argv" || true; }
     [ ! -e "$HELD_REVIEW_STATE/catscape-18" ]
 }
 
+@test "hold_for_owner: a digest-queue write failure keeps the label and posts nothing" {
+    held catscape 47 "$SHA1" needs-owner-review
+    files 47 .github/CODEOWNERS
+    export OWNER_DIGEST_STATE=/proc/self/owner-digest-unwritable
+    review catscape
+    [ "$(calls claude)" -eq 0 ]
+    [ "$(calls 'gh pr comment')" -eq 0 ]
+    [ "$(calls 'gh pr edit')" -eq 0 ]
+    [ ! -e "$HELD_REVIEW_STATE/catscape-47" ]
+    [[ "$output" == *"PR #47: skipped: for the owner, but could not queue, comment or record it; next run"* ]]
+}
+
 # ---------------------------------------------------------------- gates
 @test "not reviewed: dependabot's, one with checks running, one already reviewed at its head" {
     held catscape 30 "$SHA1" hold UNSTABLE app/dependabot
@@ -294,7 +331,7 @@ calls() { grep -c "^$1" "$T/argv" || true; }
     [ "$(cut -d' ' -f2 "$HELD_REVIEW_STATE/catscape-36")" = approve ]
 }
 
-@test "unreviewable while held: needs-owner-review goes to the owner once per head, hold is skipped" {
+@test "unreviewable while held: needs-owner-review goes back to the factory, hold is skipped" {
     held catscape 40 "$SHA1" needs-owner-review BEHIND
     held catscape 41 "$SHA1" needs-owner-review
     view_set 41 '.statusCheckRollup += [{name: "lint", conclusion: "FAILURE"}]'
@@ -305,23 +342,49 @@ calls() { grep -c "^$1" "$T/argv" || true; }
     view_set 44 '.statusCheckRollup += [{name: "lint", conclusion: "FAILURE"}]'
     verdict approve
     review catscape
-    review catscape
     [ "$(calls claude)" -eq 0 ]
-    [ "$(calls 'gh pr edit')" -eq 0 ]
-    [ "$(calls 'gh pr comment')" -eq 3 ]
-    grep -q "Waiting for the owner's weekly review: it is BEHIND, and the factory does not update a held PR" "$T/comments"
-    grep -q "Waiting for the owner's weekly review: a check other than unsafe-change failed" "$T/comments"
-    grep -q "Waiting for the owner's weekly review: it has no checks other than unsafe-change" "$T/comments"
+    # None of this is a guardrail/access decision, so it is not the owner's:
+    # the label is dropped and nothing is queued for the weekly digest.
+    [ "$(calls 'gh pr comment')" -eq 0 ]
+    [ "$(calls 'gh issue create')" -eq 0 ]
+    [ "$(calls curl)" -eq 0 ]
     for n in 40 41 42; do
-        [ "$(cut -d' ' -f2,3 "$HELD_REVIEW_STATE/catscape-$n")" = "owner needs-owner-review" ]
-        [ -e "$OWNER_DIGEST_STATE/pending/catscape-$n" ]
+        grep -qx "gh pr edit $n --repo alexsiri7/catscape --remove-label needs-owner-review" "$T/argv"
+        [ ! -e "$HELD_REVIEW_STATE/catscape-$n" ]
+        [ ! -e "$OWNER_DIGEST_STATE/pending/catscape-$n" ]
     done
     for n in 43 44; do
         [ ! -e "$HELD_REVIEW_STATE/catscape-$n" ]
         [ ! -e "$OWNER_DIGEST_STATE/pending/catscape-$n" ]
     done
+    [[ "$output" == *"PR #40: returned — it is BEHIND, and the factory does not update a held PR — back to the factory, not the owner"* ]]
+    [[ "$output" == *"PR #41: returned — a check other than unsafe-change failed — back to the factory, not the owner"* ]]
+    [[ "$output" == *"PR #42: returned — it has no checks other than unsafe-change — back to the factory, not the owner"* ]]
     [[ "$output" == *"PR #43: skipped: it is DIRTY"* ]]
     [[ "$output" == *"PR #44: skipped: a check other than unsafe-change failed"* ]]
+    [[ "$output" == *"5 held, 0 approved, 0 blocked, 0 for the owner, 3 returned to the factory, 2 skipped"* ]]
+}
+
+@test "a held draft is never reviewed, approved or merged" {
+    held catscape 45 "$SHA1" needs-owner-review
+    jq -c '(.[] | select(.number == 45)).isDraft = true' "$GH/list-catscape.json" > "$T/l" && mv "$T/l" "$GH/list-catscape.json"
+    verdict approve
+    review catscape
+    [ "$(calls claude)" -eq 0 ]
+    [ "$(calls 'gh pr view')" -eq 0 ]
+    [ "$(calls 'gh pr edit')" -eq 0 ]
+    [[ "$output" == *"0 held, 0 approved, 0 blocked, 0 for the owner, 0 returned to the factory, 0 skipped"* ]]
+}
+
+@test "a second tick while one runs exits at the lock" {
+    held catscape 46 "$SHA1" hold
+    mkdir -p "$HELD_REVIEW_STATE"
+    ( flock 9; sleep 3 ) 9>"$HELD_REVIEW_STATE/held-pr-review.lock" &
+    sleep 0.5
+    review catscape
+    wait
+    [[ "$output" == *"another held-pr-review run holds"*"held-pr-review.lock"* ]]
+    [ "$(calls claude)" -eq 0 ]
 }
 
 @test "no held PR: no Claude call, no label created" {

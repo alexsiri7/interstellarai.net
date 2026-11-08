@@ -639,12 +639,31 @@ for PROJECT in "${PROJECTS[@]}"; do
   # --- Phase 1: Merge CLEAN PRs directly (bash only, zero AI cost) ---
   # Also an UNSTABLE or BLOCKED one held-pr-review handed back: GitHub never
   # reports CLEAN for a PR whose unsafe-change check failed. Only a record at
-  # its very head merges it (held_review_merge_gate).
+  # its very head merges it (held_review_merge_gate). One with no such record
+  # yet gets the scope check below instead, so it is labelled for
+  # held-pr-review.sh rather than silently never merged and never reviewed.
   CLEAN_PRS=$(list_prs merge '.isDraft == false and (.mergeStateStatus | IN("CLEAN", "UNSTABLE", "BLOCKED"))')
 
   while IFS=$'\t' read -r PR HEAD HOLD SHA STATE _ BODY; do
     [ -n "$PR" ] || continue
-    [ "$STATE" = CLEAN ] || held_review_get "$PROJECT" "$PR" >/dev/null || continue
+    if [ "$STATE" != CLEAN ] && ! held_review_get "$PROJECT" "$PR" >/dev/null; then
+      # Not CLEAN with no held-review record: this got here only because a
+      # required check (usually unsafe-change) failed, so it will never reach
+      # the merge attempt below — but a PR closing a screened issue still
+      # needs the label that routes it to held-pr-review.sh, or it never gets
+      # reviewed at all (#267 R1).
+      pr_on_hold "$PR" "$HOLD" && continue
+      if SCOPE_JSON=$(gh pr view "$PR" --json title,body,closingIssuesReferences,statusCheckRollup 2>/dev/null) && [ -n "$SCOPE_JSON" ]; then
+        SCOPE=$(pr_scope_decision "$PR" "$SCOPE_JSON")
+        case "$SCOPE" in
+          ok|wait) ;;
+          *)
+            log "$PROJECT: PR #$PR is $STATE — not auto-merged: ${SCOPE#hold }"
+            gh pr edit "$PR" --add-label "$TRUST_HELD_LABEL" >/dev/null 2>&1 || true ;;
+        esac
+      fi
+      continue
+    fi
     pr_on_hold "$PR" "$HOLD" && continue
     if pr_owned_by_live_run "$PR" "$HEAD" "$BODY"; then
       log "$PROJECT: PR #$PR ($HEAD) is owned by a live archon run — merging after it exits"

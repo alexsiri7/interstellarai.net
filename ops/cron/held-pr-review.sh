@@ -12,9 +12,12 @@
 # — is reviewed here, in a session apart from the run that wrote it (#267).
 # Makes no Claude call when no PR is held. Per PR, once per head:
 #   - It cannot be reviewed while it stays held (BEHIND or DIRTY, a check
-#     other than unsafe-change failed, or it has no other check): under
-#     needs-owner-review, it is left to the owner as below; under `hold`,
-#     skipped.
+#     other than unsafe-change failed, or it has no other check): none of
+#     that is a guardrail/access decision only the owner may make (#267), so
+#     under needs-owner-review the label is dropped and it goes back to the
+#     factory — pr-maintenance's Phase 2 updates or corrects it, and it is
+#     re-held, reviewable again, once it is CLEAN/UNSTABLE/BLOCKED with every
+#     other check green; under `hold`, skipped (left to whoever applied it).
 #   - It weakens the factory's own checks or grants access
 #     (held_review_owner_hits), or its diff is too large: no Claude call; the
 #     label stays, one comment, and the PR goes into the owner's weekly
@@ -85,6 +88,19 @@ HELD_REVIEW_SCHEMA='{"type":"object","properties":{
 
 log() { echo "$(date -Is) [held-pr-review] $*"; }
 
+# One run at a time: up to HELD_REVIEW_MAX reviews of HELD_REVIEW_TIMEOUT each
+# can run longer than the 30-minute cron interval, and two runs overlapping at
+# one PR's head would race held_review_set (last write wins, so a block can
+# be overwritten by an approve) and could send two owner-digest issues for
+# the same week.
+HELD_REVIEW_LOCK="${HELD_REVIEW_LOCK:-$HELD_REVIEW_STATE/held-pr-review.lock}"
+mkdir -p "$HELD_REVIEW_STATE"
+exec 9>"$HELD_REVIEW_LOCK"
+if ! flock -n 9; then
+  log "another held-pr-review run holds $HELD_REVIEW_LOCK — exiting"
+  exit 0
+fi
+
 if [ $# -gt 0 ]; then
   PROJECTS=("$@")
 else
@@ -98,9 +114,15 @@ held_review_owner_hits() {
   local path why hits
   local re_checker='^\.github/(unsafe|safe)-change(\.ya?ml$|/)|^\.github/workflows/[^/]*(unsafe|safe)-change[^/]*$'
   local re_rules='(^|/)CODEOWNERS$|^\.github/settings\.ya?ml$|^\.github/rulesets/'
+  local re_workflow='^\.github/workflows/[^/]+\.ya?ml$'
   local factory=""
   case " $ARCHON_RUNAS_PROTECTED_REPOS " in *" $3 "*) factory=factory ;; esac
   hits=$(
+    # `--name-only` and a diff's own `diff --git a/<old> b/<new>` header both
+    # give only the new path, so a rename off a protected path (CODEOWNERS ->
+    # CODEOWNERS.old) never reaches owner_only_path/re_rules/re_checker on
+    # the new path alone. `rename from` carries the old one.
+    { cat "$1"; awk '/^rename from /{sub(/^rename from /, ""); print}' "$2"; } |
     while IFS= read -r path; do
       [ -n "$path" ] || continue
       if [[ "$path" =~ $re_checker ]]; then why="the unsafe-change checker or its denylist"
@@ -108,8 +130,14 @@ held_review_owner_hits() {
       elif ! why=$(owner_only_path "$path" $factory); then continue
       fi
       echo "$path ($why)"
-    done < "$1"
-    awk '
+    done
+    awk -v workflow_re="$re_workflow" '
+      /^rename from / { from = $0; sub(/^rename from /, "", from); next }
+      /^rename to / {
+        to = $0; sub(/^rename to /, "", to)
+        if (from ~ workflow_re && to !~ workflow_re) print to " (a CI workflow renamed off .yml/.yaml, disabling it)"
+        next
+      }
       /^diff --git / { file = $NF; sub(/^b\//, "", file); next }
       /^\+\+\+ \/dev\/null/ { if (file ~ /^\.github\/workflows\//) print file " (a CI workflow removed)"; next }
       /^(\+\+\+|---) / { next }
@@ -161,6 +189,18 @@ decide() {
   args=$(jq -nc --arg repo "$TRUST_OWNER/$PROJECT" --argjson n "$NOTE_ON" --arg t "held-pr-review, PR #$NUM: $1 — $2" \
     '{repo: $repo, role: "held-reviewer", type: "decision", text: $t, issue: $n}') || return 0
   lachesis_call add_note "$args" >/dev/null 2>&1 || log "$PROJECT: PR #$NUM: lachesis note failed"
+}
+
+# return_to_factory <why> — the PR is unreviewable for a reason that is not a
+# guardrail/access decision (BEHIND, DIRTY, a non-scope check failed, or no
+# other check): drop needs-owner-review so pr-maintenance's Phase 2 can
+# update or correct it; the scope check re-holds and re-queues it here once
+# it is reviewable again. No held_review_set: this is not a verdict, so a
+# later tick must not treat it as "already reviewed at this head." Fails, to
+# be retried next run, when the label could not be dropped.
+return_to_factory() {
+  gh pr edit "$NUM" --repo "$REPO" --remove-label "$TRUST_HELD_LABEL" >/dev/null 2>&1 || return 1
+  decide returned "$1 — back to the factory, not the owner"
 }
 
 # hold_for_owner <why> — the label stays; the PR goes into the owner's weekly
@@ -272,7 +312,7 @@ field() { printf '%s' "$VIEW" | jq -r "$1" 2>/dev/null; }
 TMP=$(mktemp -d) || exit 1
 trap 'rm -rf "$TMP"' EXIT
 
-N_HELD=0 N_APPROVED=0 N_BLOCKED=0 N_OWNER=0 N_SKIPPED=0 REVIEWS=0 SECRETS_LOADED=""
+N_HELD=0 N_APPROVED=0 N_BLOCKED=0 N_OWNER=0 N_RETURNED=0 N_SKIPPED=0 REVIEWS=0 SECRETS_LOADED=""
 for PROJECT in "${PROJECTS[@]}"; do
   REPO="$TRUST_OWNER/$PROJECT"
   if ! LIST=$(gh pr list --repo "$REPO" --state open --limit 100 \
@@ -287,8 +327,10 @@ for PROJECT in "${PROJECTS[@]}"; do
     [[ "$n" =~ ^[0-9]+$ ]] || continue
     [[ "$OPEN" == *" $n "* ]] || rm -f "$f"
   done
+  # A draft is still its opening run's to finish; approving one here would let
+  # pr-maintenance's green-drafts step flip it ready and merge a placeholder.
   ROWS=$(trust_filter_prs "$PROJECT" full <<<"$LIST" \
-    | jq -r --arg h "$TRUST_HELD_LABEL" '.[] | select([.labels[]?.name] | index("hold") or index($h)) | .number' 2>/dev/null)
+    | jq -r --arg h "$TRUST_HELD_LABEL" '.[] | select(.isDraft != true and ([.labels[]?.name] | index("hold") or index($h))) | .number' 2>/dev/null)
   [ -n "$ROWS" ] || continue
   gh label create "$TRUST_APPROVED_LABEL" --repo "$REPO" --color "0E8A16" \
     --description "Approved for the factory" >/dev/null 2>&1 || true
@@ -315,9 +357,10 @@ for PROJECT in "${PROJECTS[@]}"; do
     fi
     if [ -n "$WHY" ]; then
       # Only the factory's own hold: a PR under `hold` waits for whoever put it there.
+      # needs-owner-review for a mundane reason is the factory's to fix, not the owner's.
       if [[ " ${HELD_LABELS[*]} " == *" hold "* ]]; then skip "$WHY"
-      elif hold_for_owner "$WHY"; then N_OWNER=$((N_OWNER + 1))
-      else skip "not reviewable ($WHY), but could not queue, comment or record it; next run"
+      elif return_to_factory "$WHY"; then N_RETURNED=$((N_RETURNED + 1))
+      else skip "not reviewable ($WHY), but could not drop $TRUST_HELD_LABEL; next run"
       fi
       continue
     fi
@@ -403,5 +446,5 @@ for PROJECT in "${PROJECTS[@]}"; do
 done
 
 owner_digest_send
-log "$N_HELD held, $N_APPROVED approved, $N_BLOCKED blocked, $N_OWNER for the owner, $N_SKIPPED skipped"
+log "$N_HELD held, $N_APPROVED approved, $N_BLOCKED blocked, $N_OWNER for the owner, $N_RETURNED returned to the factory, $N_SKIPPED skipped"
 exit 0
