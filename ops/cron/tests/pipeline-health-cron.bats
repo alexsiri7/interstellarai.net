@@ -1499,3 +1499,35 @@ load_trust() {
     check_cron_heartbeats
     [ "$(cat "$STATE_DIR/watched")" = "$(printf 'issue-pickup 15\npr-maintenance 15')" ]
 }
+
+@test "the per-project tick loop still calls release_lag_check (#248 R5: dropping it silently ends the only production trigger for the unreleased-main flag)" {
+    loop=$(awk '/pipeline health check/{p=1} p{print} p && /^done$/{exit}' "$SCRIPT_FILE")
+    [[ "$loop" == *'release_lag_check "$project"'* ]]
+}
+
+# Unlike the grep check above, this actually runs the tick loop: a future
+# comment-out or flag-gate of release_lag_check would keep the grep green
+# while this test catches the call never happening (#248 R2).
+@test "the per-project tick loop actually invokes release_lag_check" {
+    check_main_ci() { :; }
+    check_main_push_ci() { :; }
+    check_build_drift() { :; }
+    check_scheduled_workflows() { :; }
+    check_prod_deploy() { :; }
+    check_pr_ci_retry() { :; }
+    check_stuck_prs() { :; }
+    close_resolved_pr_escalations() { :; }
+    check_deploy_http() { :; }
+    check_staging_deploy_http() { :; }
+    check_shipped_prs() { :; }
+    check_published_prs() { :; }
+    sweep_stale_labels() { :; }
+    release_lag_check() { echo "called:$1" >> "$STATE_DIR/lag-calls"; }
+    # shellcheck disable=SC2034  # read by the sourced tick-loop snippet below
+    REPOS=(test-project)
+
+    # shellcheck disable=SC1090
+    source <(awk '/pipeline health check/{p=1} p{print} p && /^done$/{exit}' "$SCRIPT_FILE")
+
+    [ "$(cat "$STATE_DIR/lag-calls")" = "called:test-project" ]
+}
