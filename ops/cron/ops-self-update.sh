@@ -4,6 +4,7 @@
 #   ops/cron/ops-self-update.sh                 # the cron tick
 #   ops/cron/ops-self-update.sh --approve       # owner, at the console: review and release a held update
 #   ops/cron/ops-self-update.sh --dry-run       # say what a tick would do; changes nothing
+#   ops/cron/ops-self-update.sh --approve-reviewed <sha>   # ops-pr-review.sh: release exactly the commit it merged
 #
 # ARCHON_RUN_AS=asiri (default, lib/run-as.sh): exactly the old crontab line,
 #   git -C <checkout> pull --ff-only -q origin main
@@ -24,7 +25,14 @@
 #   (alexsiri7), as GitHub's API reports it. A direct push, a factory pull
 #   request, or an API failure holds it as before.
 #
-#   After such a fast-forward (a tick or --approve) whose range changes
+#   --approve-reviewed <sha> is --approve without the console: it approves
+#   origin/main only when <sha> is on it and is the one commit in HEAD..origin/main
+#   that touches ops/** (ops-pr-review.sh passes the squash merge it just made,
+#   so nothing it did not review rides along). Otherwise it changes nothing and
+#   exits 1. A <sha> HEAD already contains is live: exit 0; with no ops/** change
+#   pending it fast-forwards as a tick would.
+#
+#   After such a fast-forward (a tick, --approve or --approve-reviewed) whose range changes
 #   ops/host/** (or ops/cron/archon-projects.txt), the script installs it itself, as the owner did by hand
 #   (#182): `sudo -n archon-ops-promote`, then, only if that succeeded,
 #   `sudo -n archon-user-install` (asiri's NOPASSWD rules allow exactly these).
@@ -55,7 +63,13 @@ HOST_PATHS=(ops/host/ ops/cron/archon-projects.txt)
 OPS_PROMOTE="${OPS_PROMOTE:-/usr/local/sbin/archon-ops-promote}"
 OPS_USER_INSTALL="${OPS_USER_INSTALL:-/usr/local/sbin/archon-user-install}"
 DRY_RUN=0
-[ "${1:-}" = --dry-run ] && DRY_RUN=1
+APPROVE_REVIEWED=""
+case "${1:-}" in
+  --dry-run) DRY_RUN=1 ;;
+  --approve-reviewed)
+    [[ "${2:-}" =~ ^[0-9a-f]{40}$ ]] || { echo "usage: $0 --approve-reviewed <40-hex commit sha>" >&2; exit 2; }
+    APPROVE_REVIEWED="$2" ;;
+esac
 
 log() { echo "$(date -Is) [ops-self-update] $*"; }
 
@@ -76,7 +90,14 @@ fi
 git -C "$REPO" fetch -q origin main || { log "git fetch failed"; exit 1; }
 head=$(git -C "$REPO" rev-parse HEAD) || exit 1
 target=$(git -C "$REPO" rev-parse FETCH_HEAD) || exit 1
-[ "$head" = "$target" ] && { [ "${1:-}" = --approve ] && echo "already at origin/main ($target)"; exit 0; }
+if [ -n "$APPROVE_REVIEWED" ] && ! git -C "$REPO" merge-base --is-ancestor "$APPROVE_REVIEWED" "$target" 2>/dev/null; then
+  log "not approving: $APPROVE_REVIEWED is not on origin/main ${target:0:10}"
+  exit 1
+fi
+if [ "$head" = "$target" ]; then
+  if [ "${1:-}" = --approve ] || [ -n "$APPROVE_REVIEWED" ]; then echo "already at origin/main ($target)"; fi
+  exit 0
+fi
 if ! git -C "$REPO" merge-base --is-ancestor "$head" "$target"; then
   log "HEAD $head is not an ancestor of origin/main $target — not fast-forwarding (fix by hand)"
   exit 1
@@ -116,6 +137,25 @@ fast_forward() {
   install_host
   exit $?
 }
+
+if [ -n "$APPROVE_REVIEWED" ]; then
+  if git -C "$REPO" merge-base --is-ancestor "$APPROVE_REVIEWED" "$head"; then
+    echo "$APPROVE_REVIEWED is already live"
+    exit 0
+  fi
+  [ -n "$guarded" ] || fast_forward
+  pending=$(git -C "$REPO" rev-list "$head..$target" -- "${GUARDED_PATHS[@]}")
+  if [ "$pending" != "$APPROVE_REVIEWED" ]; then
+    log "not approving: ops/ changes in ${head:0:10}..${target:0:10} are $(printf '%s\n' "$pending" | cut -c1-10 | tr '\n' ' ')— not only ${APPROVE_REVIEWED:0:10}"
+    exit 1
+  fi
+  mkdir -p "$(dirname "$APPROVED_FILE")"
+  ( umask 077; echo "$target" >> "$APPROVED_FILE" )
+  git -C "$REPO" merge --ff-only -q "$target" || exit $?
+  log "approved reviewed commit ${APPROVE_REVIEWED:0:10}, fast-forwarded to $target"
+  install_host
+  exit $?
+fi
 
 if [ "${1:-}" = --approve ]; then
   if [ -z "$guarded" ]; then
