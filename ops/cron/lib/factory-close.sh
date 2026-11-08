@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The closes the factory takes without asking the owner, beyond the two the
 # SDLC pack's default triage policy allows (#259). Sourced by
-# lib/settle-ship-outcome.sh, which decides when each applies.
+# lib/settle-ship-outcome.sh, which decides when each applies, and by
+# pipeline-health-cron.sh, which labels the alerts it closes on recovery.
 #
 # The owner's rule (2026-11-08): the factory may close any issue when it can
 # say why, and the closing comment gives the reason and the evidence. It asks
