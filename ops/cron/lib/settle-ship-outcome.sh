@@ -15,9 +15,14 @@
 # A "No delivery needed" verdict closes the issue as archon:done, but only when
 # GitHub confirms it (#103): every sub-issue is closed, or the verdict names a
 # merged PR, or else exactly one same-repo issue that is still open (closed as
-# its duplicate, #212) while every other ref it names was looked up. A named
-# closed issue never closes it here: that is a maintainer's call (with pickup
-# on, a question whose default is to close it; see the tiers below).
+# its duplicate, #212) while every other ref it names was looked up.
+# Beyond those, any decided verdict closes when it gives a reason GitHub backs
+# (#259, lib/factory-close.sh): a self-resolved pipeline-health alert, the
+# owner's decision in the thread, a closed precedent for a false positive or
+# duplicate, a spec that already decides it, or feedback with no defect. A
+# named closed issue the verdict gives no such reason for parks, as a
+# maintainer's call (with pickup on, a question whose default is to close it;
+# see the tiers below). Every close here gets the factory-closed label.
 # It never closes on the model's prose alone, and "No delivery started" (an
 # undecided investigate/plan stop) never closes. Anything else, or any gh
 # failure on the way, parks the issue as archon:skipped with the verdict as a
@@ -32,9 +37,12 @@
 # parks.
 #
 # Issues pipeline-health-cron.sh files (Main CI red, Prod deploy failed/lagging)
-# are never closed (#107): they track live CI/deploy state, and a PR their
-# verdict names is usually what broke it, not a fix (un-reminder #450 cites
-# merged PR #449, the cause of the red). They are always parked for a human.
+# are never closed on the refs their verdict names (#107): they track live
+# CI/deploy state, and a PR their verdict names is usually what broke it, not
+# a fix (un-reminder #450 cites merged PR #449, the cause of the red). They
+# close only when the alert's condition is false now, when they duplicate the
+# open alert with the same title, or when the owner decided (#259); otherwise
+# they are parked for a human.
 #
 # With Lachesis pickup on, what none of that settles is sorted by severity tier
 # (lib/severity.sh, #237): the verdict's suggested action (close, record its
@@ -85,6 +93,8 @@ fi
 source "$(dirname "${BASH_SOURCE[0]}")/ship-verdict.sh"
 # shellcheck source=lib/severity.sh
 source "$(dirname "${BASH_SOURCE[0]}")/severity.sh"
+# shellcheck source=lib/factory-close.sh
+source "$(dirname "${BASH_SOURCE[0]}")/factory-close.sh"
 outcome_text="$run_log"
 outcome_json=$(grep -E '^\{.*"delivered" *:' "$run_log" \
   | jq -cR 'fromjson? | select(type == "object" and (.delivered | type) == "boolean")' 2>/dev/null \
@@ -111,12 +121,22 @@ repo="alexsiri7/$project"
 # Closes the issue as archon:done and exits; returns 1 if the close failed.
 # A tier-1 close (settle_act) sets act_marker, carried in the close comment,
 # and act_note, recorded in Lachesis once the close holds.
-act_marker="" act_note=""
+# Every close here is the factory's own call, so each also gets
+# FACTORY_CLOSED_LABEL (lib/factory-close.sh, #259), added in an edit of its
+# own after the label is ensured: a label the repo lacks would fail the whole
+# archon:done edit. close_detail, when set, is the evidence paragraph a
+# reason close (#259) adds to the comment.
+act_marker="" act_note="" close_detail=""
 close_as_done() {
   local evidence="$1"; shift
+  fc_ensure_label "$repo"
   gh issue close "$issue" --repo "$repo" "$@" --comment "archon-ship finished without a PR: ${verdict}
 
-Closed as archon:done: ${evidence}. Reopen and add archon:queued to run it again. ${close_note}
+Closed as archon:done: ${evidence}.${close_detail:+
+
+$close_detail}
+
+Closed by the factory without asking the owner (label \`$FACTORY_CLOSED_LABEL\`). Reopen and add archon:queued to run it again. ${close_note}
 ${act_marker:+
 $act_marker}
 <!-- lachesis:automated -->" >/dev/null 2>&1 || {
@@ -127,6 +147,8 @@ $act_marker}
   gh issue edit "$issue" --repo "$repo" \
     --remove-label "$from_label" --add-label "archon:done" >/dev/null 2>&1 \
     || echo "$(date -Is) [issue-pickup] $project: #$issue — closed, but could not relabel archon:done"
+  gh issue edit "$issue" --repo "$repo" --add-label "$FACTORY_CLOSED_LABEL" >/dev/null 2>&1 \
+    || echo "$(date -Is) [issue-pickup] $project: #$issue — closed, but could not add $FACTORY_CLOSED_LABEL"
   [ -n "$act_note" ] && ! lachesis_note "$project" "$issue" "$act_note" \
     && echo "$(date -Is) [issue-pickup] $project: #$issue — closed, but could not record the note in Lachesis"
   echo "$(date -Is) [issue-pickup] $project: #$issue settled as archon:done (${evidence})"
@@ -232,9 +254,10 @@ defers=0
 # lookup counts as health-filed, since any gh failure parks (and releases or
 # closes nothing).
 health_filed=1
-title=""
+title="" body="" view_ok=0
 if view=$(gh issue view "$issue" --repo "$repo" --json title,body 2>/dev/null) \
     && body=$(jq -r '.body // ""' <<<"$view" 2>/dev/null); then
+  view_ok=1
   title=$(jq -r '.title // ""' <<<"$view")
   # shellcheck disable=SC2016  # the backticks are issue markdown, not shell
   [[ "$body" == *'Auto-filed by `pipeline-health-cron.sh`'* ]] || health_filed=0
@@ -253,14 +276,13 @@ all_refs_known=1
 [ "${#refs[@]}" -gt 5 ] && { all_refs_known=0; refs=("${refs[@]:0:5}"); }
 
 declare -A kind=()
-if [ "$health_filed" = 0 ] && [[ "$verdict" == "No delivery needed: "* ]]; then
-  read -r sub_total sub_open < <(gh api "repos/$repo/issues/$issue/sub_issues?per_page=100" \
-    --jq '[length, ([.[] | select(.state == "open")] | length)] | @tsv' 2>/dev/null)
-  if [[ "${sub_total:-}" =~ ^[0-9]+$ && "${sub_open:-}" =~ ^[0-9]+$ ]] \
-      && [ "$sub_total" -ge 1 ] && [ "$sub_open" -eq 0 ]; then
-    close_as_done "all $sub_total sub-issues are closed" --reason completed
-  fi
-
+kinds_looked_up=0
+# lookup_ref_kinds — what each ref is on GitHub (merged-pr, pr, open-issue,
+# closed-issue; empty when the lookup failed), once per settle.
+lookup_ref_kinds() {
+  [ "$kinds_looked_up" = 1 ] && return
+  kinds_looked_up=1
+  local ref
   for ref in "${refs[@]}"; do
     kind[$ref]=$(gh api "repos/$repo/issues/$ref" --jq '
       if .pull_request then (if .pull_request.merged_at then "merged-pr" else "pr" end)
@@ -269,6 +291,17 @@ if [ "$health_filed" = 0 ] && [[ "$verdict" == "No delivery needed: "* ]]; then
     [ -n "${kind[$ref]}" ] || all_refs_known=0
     [ "${kind[$ref]}" = "closed-issue" ] && closed_refs+="${closed_refs:+, }#$ref"
   done
+}
+
+if [ "$health_filed" = 0 ] && [[ "$verdict" == "No delivery needed: "* ]]; then
+  read -r sub_total sub_open < <(gh api "repos/$repo/issues/$issue/sub_issues?per_page=100" \
+    --jq '[length, ([.[] | select(.state == "open")] | length)] | @tsv' 2>/dev/null)
+  if [[ "${sub_total:-}" =~ ^[0-9]+$ && "${sub_open:-}" =~ ^[0-9]+$ ]] \
+      && [ "$sub_total" -ge 1 ] && [ "$sub_open" -eq 0 ]; then
+    close_as_done "all $sub_total sub-issues are closed" --reason completed
+  fi
+
+  lookup_ref_kinds
   # The triage policy's two closes without a person: an outcome a merged change
   # already delivered, and a duplicate of an issue that is still open. The
   # verdict's refs are free prose, so a lone open issue is read as the original
@@ -283,6 +316,104 @@ if [ "$health_filed" = 0 ] && [[ "$verdict" == "No delivery needed: "* ]]; then
   done
   [ "${#open_refs[@]}" -eq 1 ] && [ "$all_refs_known" = 1 ] \
     && close_as_done "duplicate of #${open_refs[0]}, which is still open" --duplicate-of "${open_refs[0]}"
+fi
+
+# ── Closes with a reason (#259) ─────────────────────────────────────────────
+# The owner's rule of 2026-11-08: close any issue the run can give a reason
+# for, citing the evidence, and ask only for a spec decision or when there is
+# no reason. The pack's default triage policy still makes the run call these
+# closes a maintainer's ("Not done: blocked on …"), so the verdict's prose is
+# read for the reason and the evidence is looked up here (lib/factory-close.sh).
+# Only a decided verdict qualifies: No delivery needed, Not done: blocked on,
+# No work owed. Runs at settle time and under --recheck, pickup on or off,
+# before any release, tier action or question.
+fc_decided=0
+case "$verdict" in
+  "No delivery needed: "*|"Not done: blocked on "*|"No work owed in this repository: "*) fc_decided=1 ;;
+esac
+if [ "$fc_decided" = 1 ] && [ "$view_ok" = 1 ]; then
+  fc_tier=$(severity_tier "$declared_tier" "$verdict_block"$'\n'"$title")
+  # A judgment close (precedent, spec, feedback) is vetoed on tier 3 and on a
+  # verdict that leaves what the project should be to the owner.
+  fc_judge=1
+  [ "$fc_tier" = 3 ] && fc_judge=0
+  grep -qiE "$FC_SPEC_DECISION_RE" <<<"$verdict_block" && fc_judge=0
+
+  # self-resolved: an alert pipeline-health filed whose condition is false now
+  # (the one close a health-filed issue gets, #107: its verdict's refs are
+  # never read as fixes).
+  if [ "$health_filed" = 1 ] && fc_ev=$(fc_alert_resolved "$repo" "$title" "$body"); then
+    close_detail="Reason: the alert resolved itself. Evidence: ${fc_ev}, checked by settle-ship-outcome when the run ended."
+    close_as_done "the alert's condition is false now (${fc_ev})" --reason completed
+    close_detail=""
+  fi
+
+  # owner-decided: the owner already said to close it in the thread.
+  if grep -qiE "$FC_OWNER_CUE_RE" <<<"$verdict_block" \
+      && fc_dec=$(fc_owner_decision "$repo" "$issue"); then
+    close_detail="Reason: the owner already decided in this thread. Evidence: ${fc_dec%%$'\t'*}
+> ${fc_dec#*$'\t'}"
+    close_as_done "the owner already decided to close it" --reason "not planned"
+    close_detail=""
+  fi
+
+  fc_cue_precedent=0
+  grep -qiE "$FC_PRECEDENT_RE" <<<"$verdict_block" \
+    && ! grep -qiE "$FC_PRECEDENT_NEG_RE" <<<"$verdict_block" && fc_cue_precedent=1
+  fc_cue_spec=0
+  grep -qiE "$FC_SPEC_CUE_RE" <<<"$verdict_block" && fc_cue_spec=1
+  if [ "$health_filed" = 0 ] && [ "$fc_judge" = 1 ] && [ "${#refs[@]}" -gt 0 ] \
+      && { [ "$fc_cue_precedent" = 1 ] || [ "$fc_cue_spec" = 1 ]; }; then
+    lookup_ref_kinds
+  fi
+  # What the refs leave open: an open issue may be what the run waits on or
+  # the original, an open PR may still land, and a failed or skipped lookup
+  # may be either. Any of them keeps the judgment closes off.
+  fc_refs_settled=1
+  [ "$all_refs_known" = 1 ] || fc_refs_settled=0
+  for ref in "${refs[@]}"; do
+    case "${kind[$ref]:-}" in open-issue|pr) fc_refs_settled=0 ;; esac
+  done
+
+  # health duplicate: a health alert the verdict calls a duplicate of exactly
+  # one open alert pipeline-health filed with the same title (kith #60 → #59).
+  if [ "$health_filed" = 1 ] && [ "$fc_cue_precedent" = 1 ] && [ "${#refs[@]}" -gt 0 ]; then
+    lookup_ref_kinds
+    fc_open=()
+    for ref in "${refs[@]}"; do [ "${kind[$ref]}" = open-issue ] && fc_open+=("$ref"); done
+    if [ "$all_refs_known" = 1 ] && [ "${#fc_open[@]}" -eq 1 ] \
+        && fc_orig=$(gh issue view "${fc_open[0]}" --repo "$repo" --json title,body 2>/dev/null) \
+        && [ "$(jq -r '.title // ""' <<<"$fc_orig")" = "$title" ] \
+        && jq -e '(.body // "") | contains("Auto-filed by `pipeline-health-cron.sh`")' <<<"$fc_orig" >/dev/null 2>&1; then
+      close_detail="Reason: a duplicate alert. Evidence: #${fc_open[0]} is the open alert pipeline-health filed with the same title, \"${title}\"."
+      close_as_done "duplicate of open alert #${fc_open[0]}" --duplicate-of "${fc_open[0]}"
+      close_detail=""
+    fi
+  fi
+
+  if [ "$health_filed" = 0 ] && [ "$fc_judge" = 1 ]; then
+    # precedent: a false positive, duplicate or superseded item whose
+    # precedent is a closed same-repo issue the verdict names.
+    if [ "$fc_cue_precedent" = 1 ] && [ "$fc_refs_settled" = 1 ] && [ -n "$closed_refs" ]; then
+      close_detail="Reason: it matches closed precedent ${closed_refs} (a false positive, duplicate or superseded report). Evidence: GitHub shows ${closed_refs} closed; the verdict above says how this issue matches it."
+      close_as_done "matches closed precedent ${closed_refs}" --reason "not planned"
+      close_detail=""
+    fi
+    # spec: the spec already decides it.
+    if [ "$fc_cue_spec" = 1 ] && [ "$fc_refs_settled" = 1 ] \
+        && fc_spec=$(fc_spec_paths "$repo" "$verdict_block"); then
+      close_detail="Reason: the spec already decides it. Evidence: ${fc_spec} on the default branch, as the verdict above cites."
+      close_as_done "the spec already decides it (${fc_spec})" --reason "not planned"
+      close_detail=""
+    fi
+    # feedback: a note that describes no defect.
+    if grep -qiE "$FC_FEEDBACK_CUE_RE" <<<"$verdict_block" \
+        && fc_note=$(fc_feedback_text "$title" "$body"); then
+      close_detail="Reason: feedback with no defect described. Evidence: the note reads \"${fc_note}\". Thank you for the feedback!"
+      close_as_done "feedback with no defect described" --reason "not planned"
+      close_detail=""
+    fi
+  fi
 fi
 [ "$recheck" = 1 ] && exit 1
 
