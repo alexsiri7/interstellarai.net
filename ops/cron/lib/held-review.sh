@@ -28,7 +28,7 @@ HELD_REVIEW_STATE="${HELD_REVIEW_STATE:-$HOME/.archon/state/held-review}"
 
 held_review_get() {
   local sha verdict label extra
-  read -r sha verdict label extra < "$HELD_REVIEW_STATE/$1-$2" 2>/dev/null || return 1
+  read -r sha verdict label extra 2>/dev/null < "$HELD_REVIEW_STATE/$1-$2" || return 1
   [ -z "${extra:-}" ] && [[ "${sha:-}" =~ ^[0-9a-f]{40}$ ]] || return 1
   case "${verdict:-}" in approve|block|owner) ;; *) return 1 ;; esac
   case "${label:-}" in hold|"${TRUST_HELD_LABEL:-needs-owner-review}") ;; *) return 1 ;; esac

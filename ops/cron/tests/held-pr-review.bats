@@ -15,7 +15,7 @@ setup() {
     export HOME="$T/home"
     STUB_BIN="$HOME/.local/bin"
     mkdir -p "$STUB_BIN" "$T/gh"
-    unset _ARCHON_TRUST_SH _ARCHON_SCREEN_SH _LACHESIS_SH _HELD_REVIEW_SH _OWNER_DIGEST_SH TRUSTED_AUTHORS TRUSTED_ISSUE_BOTS TRUSTED_MERGE_ONLY_AUTHORS TRUSTED_COMMENT_BOTS ARCHON_RUNAS_PROTECTED_REPOS OWNER_DIGEST_WEEK
+    unset _ARCHON_TRUST_SH _ARCHON_SCREEN_SH _LACHESIS_SH _HELD_REVIEW_SH _OWNER_DIGEST_SH _OWNER_PATHS_SH TRUSTED_AUTHORS TRUSTED_ISSUE_BOTS TRUSTED_MERGE_ONLY_AUTHORS TRUSTED_COMMENT_BOTS ARCHON_RUNAS_PROTECTED_REPOS OWNER_DIGEST_WEEK
     export ARCHON_CRON_TRUST_FILE="$T/no-trust.env"
     export NTFY_TOPIC=test-topic
     export TRUST_STATE_DIR="$T/trust"
@@ -65,9 +65,10 @@ SHA1=1111111111111111111111111111111111111111
 SHA2=2222222222222222222222222222222222222222
 
 # held <project> <pr> <sha> <label> [mergeState] [author] — an open PR held by
-# <label>, green but for a failed unsafe-change check, touching public/_headers.
+# <label>, green but for a failed unsafe-change check (so UNSTABLE, as GitHub
+# reports it), touching public/_headers.
 held() {
-    local p="$1" n="$2" sha="$3" label="$4" st="${5:-CLEAN}" author="${6:-alexsiri7}"
+    local p="$1" n="$2" sha="$3" label="$4" st="${5:-UNSTABLE}" author="${6:-alexsiri7}"
     local entry
     entry=$(jq -nc --argjson n "$n" --arg sha "$sha" --arg st "$st" --arg l "$label" --arg a "$author" \
       '{number: $n, state: "OPEN", isDraft: false, headRefOid: $sha, mergeStateStatus: $st,
@@ -94,11 +95,11 @@ view_set() { # view_set <pr> <jq> — change the PR's view
     jq -c "$2" "$GH/view-$1.json" > "$T/v" && mv "$T/v" "$GH/view-$1.json"
 }
 
-verdict() { # verdict approve|block|owner [blocking finding title]
+verdict() { # verdict approve|block|owner [blocking finding title] — MATCHES=false: off its issue
     local findings='[]'
     [ -n "${2:-}" ] && findings=$(jq -nc --arg t "$2" '[{severity: "blocking", file: "src/x.ts", line: 3, title: $t, detail: "it breaks"}]')
-    CLAUDE_OUT=$(jq -nc --arg v "$1" --argjson f "$findings" \
-      '{type: "result", is_error: false, structured_output: {verdict: $v, matches_issue: true, summary: "looked at it", findings: $f}}')
+    CLAUDE_OUT=$(jq -nc --arg v "$1" --argjson f "$findings" --argjson m "${MATCHES:-true}" \
+      '{type: "result", is_error: false, structured_output: {verdict: $v, matches_issue: $m, summary: "looked at it", findings: $f}}')
     export CLAUDE_OUT
 }
 
@@ -107,6 +108,7 @@ calls() { grep -c "^$1" "$T/argv" || true; }
 
 # ---------------------------------------------------------------- the floor
 @test "floor: guardrail and access changes are the owner's, ordinary ones are not" {
+    source "$CRON/lib/owner-paths.sh"
     source <(awk '/^held_review_owner_hits\(\)/{p=1} p{print} p && /^}$/{p=0}' "$CRON/held-pr-review.sh")
     ARCHON_RUNAS_PROTECTED_REPOS=interstellarai.net
     for f in .github/unsafe-change.yml .github/unsafe-change/check.py .github/workflows/unsafe-change.yml \
@@ -125,7 +127,7 @@ calls() { grep -c "^$1" "$T/argv" || true; }
     # The factory's own gates count on the factory repo only.
     files 1 ops/cron/held-pr-review.sh
     run held_review_owner_hits "$GH/files-1" "$GH/diff-1" interstellarai.net
-    [ "$output" = "ops/cron/held-pr-review.sh (the factory's own gates)" ]
+    [ "$output" = "ops/cron/held-pr-review.sh (the merge and approval gates)" ]
     # A workflow diff that adds permissions or reads a secret, or deletes a workflow.
     printf '.github/workflows/ci.yml\n' > "$T/f"
     printf 'diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\n--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n@@ -1 +1,3 @@\n-      - uses: actions/checkout@v3\n+      - uses: actions/checkout@v4\n+permissions:\n+  contents: write\n' > "$T/d"
@@ -138,6 +140,27 @@ calls() { grep -c "^$1" "$T/argv" || true; }
     printf 'diff --git a/.github/workflows/lint.yml b/.github/workflows/lint.yml\ndeleted file mode 100644\n--- a/.github/workflows/lint.yml\n+++ /dev/null\n@@ -1 +0,0 @@\n-name: lint\n' > "$T/d"
     run held_review_owner_hits "$T/f" "$T/d" catscape
     [ "$output" = ".github/workflows/lint.yml (a CI workflow removed)" ]
+}
+
+@test "floor: on the factory repo it holds every path ops-pr-review holds, and no other" {
+    source "$CRON/lib/owner-paths.sh"
+    source <(awk '/^held_review_owner_hits\(\)/{p=1} p{print} p && /^}$/{p=0}' "$CRON/held-pr-review.sh")
+    source <(awk '/^ops_review_sensitive\(\)/{p=1} p{print} p && /^}$/{p=0}' "$CRON/ops-pr-review.sh")
+    ARCHON_RUNAS_PROTECTED_REPOS=interstellarai.net
+    local f held ops
+    for f in $(git -C "$CRON/../.." ls-files ops .github) ops/cron/lib/archon-shim/archon .env.local; do
+        files 1 "$f"
+        held=0 ops=0
+        held_review_owner_hits "$GH/files-1" "$GH/diff-1" interstellarai.net >/dev/null && held=1
+        ops_review_sensitive <<<"$f" >/dev/null && ops=1
+        case "$f" in .github/*) continue ;; esac   # held-pr-review's own categories, on every repo
+        [ "$held" = "$ops" ] || { echo "disagree on $f: held-pr-review $held, ops-pr-review $ops"; false; }
+    done
+    for f in ops/cron/pr-maintenance-cron.sh ops/cron/archon-projects.txt ops/cron/lib/archon-shim/archon ops/cron/lib/owner-paths.sh; do
+        files 1 "$f"
+        run held_review_owner_hits "$GH/files-1" "$GH/diff-1" interstellarai.net
+        [ "$status" -eq 0 ] || { echo "not flagged: $f"; false; }
+    done
 }
 
 # ---------------------------------------------------------------- acceptance
@@ -227,6 +250,15 @@ calls() { grep -c "^$1" "$T/argv" || true; }
     [ "$(cat "$HELD_REVIEW_STATE/catscape-18")" = "$SHA1 block needs-owner-review" ]
 }
 
+@test "block: an approval of a PR that does not match its issue is a block" {
+    held catscape 19 "$SHA1" needs-owner-review
+    MATCHES=false verdict approve
+    review
+    [ "$(cat "$HELD_REVIEW_STATE/catscape-19")" = "$SHA1 block needs-owner-review" ]
+    grep -qx 'Verdict: not ready' "$T/comments"
+    ! grep -q -- "--add-label archon:approved" "$T/argv"
+}
+
 @test "block: a report that cannot be posted keeps the label and records nothing" {
     held catscape 18 "$SHA1" needs-owner-review
     verdict block "breaks the header"
@@ -236,25 +268,60 @@ calls() { grep -c "^$1" "$T/argv" || true; }
 }
 
 # ---------------------------------------------------------------- gates
-@test "not reviewed: dependabot's, a red one, a BEHIND one, one already reviewed at its head" {
-    held catscape 30 "$SHA1" hold CLEAN app/dependabot
-    held catscape 31 "$SHA1" hold
-    view_set 31 '.statusCheckRollup += [{name: "lint", conclusion: "FAILURE"}]'
-    held catscape 32 "$SHA1" needs-owner-review BEHIND
+@test "not reviewed: dependabot's, one with checks running, one already reviewed at its head" {
+    held catscape 30 "$SHA1" hold UNSTABLE app/dependabot
+    held catscape 31 "$SHA1" needs-owner-review
+    view_set 31 '.statusCheckRollup += [{name: "lint", status: "IN_PROGRESS", conclusion: ""}]'
     held catscape 33 "$SHA1" needs-owner-review
     mkdir -p "$HELD_REVIEW_STATE"
     echo "$SHA1 block needs-owner-review" > "$HELD_REVIEW_STATE/catscape-33"
     verdict approve
     review catscape
     [ "$(calls claude)" -eq 0 ]
+    [ "$(calls 'gh pr comment')" -eq 0 ]
     [ "$(calls 'gh pr view 30')" -eq 0 ]
-    [[ "$output" == *"PR #31: skipped: checks not all green"* ]]
-    [[ "$output" == *"PR #32: skipped: BEHIND, not CLEAN"* ]]
+    [[ "$output" == *"PR #31: skipped: UNSTABLE, checks pending: not reviewable yet"* ]]
     [[ "$output" == *"PR #33: skipped: already block at "* ]]
-    # Positive control: a failed unsafe-change check alone does not stop the review.
-    held catscape 34 "$SHA1" needs-owner-review
+}
+
+@test "reviewed in every state GitHub gives a failed unsafe-change check: CLEAN, UNSTABLE, BLOCKED" {
+    held catscape 34 "$SHA1" needs-owner-review CLEAN
+    held catscape 35 "$SHA1" needs-owner-review UNSTABLE
+    held catscape 36 "$SHA1" hold BLOCKED
+    verdict approve
     review catscape
-    [ "$(calls claude)" -eq 1 ]
+    [ "$(calls claude)" -eq 3 ]
+    [ "$(cut -d' ' -f2 "$HELD_REVIEW_STATE/catscape-36")" = approve ]
+}
+
+@test "unreviewable while held: needs-owner-review goes to the owner once per head, hold is skipped" {
+    held catscape 40 "$SHA1" needs-owner-review BEHIND
+    held catscape 41 "$SHA1" needs-owner-review
+    view_set 41 '.statusCheckRollup += [{name: "lint", conclusion: "FAILURE"}]'
+    held catscape 42 "$SHA1" needs-owner-review
+    view_set 42 '.statusCheckRollup = [{name: "unsafe-change", conclusion: "FAILURE"}]'
+    held catscape 43 "$SHA1" hold DIRTY
+    held catscape 44 "$SHA1" hold
+    view_set 44 '.statusCheckRollup += [{name: "lint", conclusion: "FAILURE"}]'
+    verdict approve
+    review catscape
+    review catscape
+    [ "$(calls claude)" -eq 0 ]
+    [ "$(calls 'gh pr edit')" -eq 0 ]
+    [ "$(calls 'gh pr comment')" -eq 3 ]
+    grep -q "Waiting for the owner's weekly review: it is BEHIND, and the factory does not update a held PR" "$T/comments"
+    grep -q "Waiting for the owner's weekly review: a check other than unsafe-change failed" "$T/comments"
+    grep -q "Waiting for the owner's weekly review: it has no checks other than unsafe-change" "$T/comments"
+    for n in 40 41 42; do
+        [ "$(cut -d' ' -f2,3 "$HELD_REVIEW_STATE/catscape-$n")" = "owner needs-owner-review" ]
+        [ -e "$OWNER_DIGEST_STATE/pending/catscape-$n" ]
+    done
+    for n in 43 44; do
+        [ ! -e "$HELD_REVIEW_STATE/catscape-$n" ]
+        [ ! -e "$OWNER_DIGEST_STATE/pending/catscape-$n" ]
+    done
+    [[ "$output" == *"PR #43: skipped: it is DIRTY"* ]]
+    [[ "$output" == *"PR #44: skipped: a check other than unsafe-change failed"* ]]
 }
 
 @test "no held PR: no Claude call, no label created" {

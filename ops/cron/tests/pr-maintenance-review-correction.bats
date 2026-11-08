@@ -134,3 +134,22 @@ launches() { grep -c "^workflow run " "$STUB_ARCHON_ARGV" || true; }
     tick
     [ "$(launches)" -eq 0 ]
 }
+
+@test "a PR held-pr-review blocked at its head is corrected in its UNSTABLE or BLOCKED state; a BLOCKED one without is left" {
+    local a b c
+    a=$(printf 'a%.0s' {1..40}); b=$(printf 'b%.0s' {1..40}); c=$(printf 'c%.0s' {1..40})
+    export GH_PR_LIST="[$(pr 600 "$a" UNSTABLE), $(pr 601 "$b" BLOCKED), $(pr 602 "$c" BLOCKED)]"
+    mkdir -p "$HOME/.archon/state/held-review"
+    echo "$a block needs-owner-review" > "$HOME/.archon/state/held-review/proj-600"
+    echo "$b block needs-owner-review" > "$HOME/.archon/state/held-review/proj-601"
+    correct 600 "$a"
+    correct 601 "$b"
+    correct 602 "$c"
+    tick
+    grep -q "^workflow run archon-assist --cwd $BASE_DIR/proj PR #600 " "$STUB_ARCHON_ARGV"
+    tick
+    grep -q "^workflow run archon-assist --cwd $BASE_DIR/proj PR #601 " "$STUB_ARCHON_ARGV"
+    tick
+    [ "$(launches)" -eq 2 ]
+    ! grep -q "PR #602" "$STUB_ARCHON_ARGV"
+}

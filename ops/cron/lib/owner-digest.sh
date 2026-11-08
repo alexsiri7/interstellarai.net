@@ -3,8 +3,9 @@
 # owner, in one Lachesis question a week that blocks nothing else (#267).
 #
 # held-pr-review.sh and ops-pr-review.sh add a PR here when only the owner may
-# merge it: it weakens the factory's own checks or grants access, or it is too
-# large to review automatically. Neither tells the owner per PR any more.
+# merge it: it weakens the factory's own checks or grants access, it is too
+# large to review automatically, or (held-pr-review.sh) it cannot be reviewed
+# while it stays held. Neither tells the owner per PR any more.
 #
 #   source "$SCRIPT_DIR/lib/owner-digest.sh"
 #   owner_digest_add <project> <pr> <sha> <title> <verdict>
@@ -76,10 +77,10 @@ _owner_digest_lines() {
 }
 
 owner_digest_send() {
-  local week filed_week issue prev lines n body
+  local week filed_week issue prev lines n body asked=1
   week="${OWNER_DIGEST_WEEK:-$(date -u +%G-W%V)}"
   [ "$(cat "$OWNER_DIGEST_STATE/asked" 2>/dev/null)" = "$week" ] && return 0
-  read -r filed_week issue < "$OWNER_DIGEST_STATE/filed" 2>/dev/null || true
+  read -r filed_week issue 2>/dev/null < "$OWNER_DIGEST_STATE/filed" || true
   if [ "${filed_week:-}" != "$week" ]; then
     lines=$(_owner_digest_lines)
     prev="${issue:-}"
@@ -91,7 +92,7 @@ owner_digest_send() {
       return 0
     fi
     n=$(printf '%s\n' "$lines" | grep -c '')
-    body="The factory's reviewers left these pull requests for the owner: each weakens the factory's own checks, grants access, or was too large to review automatically. Only these wait; the factory keeps working on everything else.
+    body="The factory's reviewers left these pull requests for the owner: each weakens the factory's own checks, grants access, was too large to review automatically, or cannot be reviewed while it is held. Only these wait; the factory keeps working on everything else.
 
 $lines
 
@@ -122,7 +123,7 @@ Merge or close each one by hand. Next week's question lists whatever still waits
          "Pull requests wait for your review ($week): see the list on this issue. Merge or close each one by hand." \
          "Filed by the owner's weekly digest (lib/owner-digest.sh, #267). It blocks only this issue."; then
       _owner_digest_log "could not record the $week question in Lachesis — retrying next run"
-      return 0
+      asked=""
     fi
   else
     _owner_digest_log "no LACHESIS_FACTORY_TOKEN — the $week question is not recorded"
@@ -130,5 +131,5 @@ Merge or close each one by hand. Next week's question lists whatever still waits
   trust_notify_once owner-digest week "$week" \
     "Pull requests wait for your review ($week): https://github.com/$OWNER_DIGEST_REPO/issues/$issue" \
     "Owner's weekly review"
-  _owner_digest_write "$OWNER_DIGEST_STATE/asked" "$week" || true
+  [ -z "$asked" ] || _owner_digest_write "$OWNER_DIGEST_STATE/asked" "$week" || true
 }

@@ -45,6 +45,7 @@ if [ "$1 $2" = "pr list" ]; then
   if [ -n "$jqf" ]; then printf '%s' "$GH_PR_LIST" | jq -r "$jqf"; else printf '%s' "$GH_PR_LIST"; fi
 fi
 [ "$1 $2" = "pr view" ] && printf '%s' "$GH_PR_VIEW"
+[ "$1 $2" = "pr merge" ] && [ -n "${GH_MERGE_FAILS:-}" ] && exit 1
 # issue view <n> --json labels: the linked issue's labels (fixture: names).
 if [ "$1 $2" = "issue view" ]; then
   { cat "$GH_COMMENTS_DIR/issue-labels-$3" 2>/dev/null || echo '[]'; } | jq -c '{labels: map({name: .})}'
@@ -446,8 +447,8 @@ load_trust() {
 # without the owner's archon:approved) merges only once the repo's unsafe-change
 # check passed.
 
-scoped_pr() { # scoped_pr <check-state or none>
-    export GH_PR_LIST="[$(pr 700 false CLEAN alexsiri7 false archon/task-x 'Add scraper')]"
+scoped_pr() { # scoped_pr <check-state or none> [mergeState]
+    export GH_PR_LIST="[$(pr 700 false "${2:-CLEAN}" alexsiri7 false archon/task-x 'Add scraper')]"
     local rollup='[]'
     [ "$1" != none ] && rollup='[{"name":"unsafe-change","conclusion":"'"$1"'"},{"name":"CI","conclusion":"SUCCESS"}]'
     export GH_PR_VIEW='{"title":"Add scraper","body":"Closes #44","closingIssuesReferences":[{"number":44}],"statusCheckRollup":'"$rollup"'}'
@@ -477,8 +478,8 @@ held_record() { # held_record <sha> <verdict>
     mkdir -p "$HOME/.archon/state/held-review"
     echo "$1 $2 needs-owner-review" > "$HOME/.archon/state/held-review/proj-700"
 }
-scoped_pr_at() { # scoped_pr_at <check-state>: scoped_pr, its head $SHA700
-    scoped_pr "$1"
+scoped_pr_at() { # scoped_pr_at <check-state> [mergeState]: scoped_pr, its head $SHA700
+    scoped_pr "$@"
     GH_PR_LIST=$(jq -c --arg s "$SHA700" '.[0].headRefOid = $s' <<<"$GH_PR_LIST")
     echo '["new-scraper","archon:auto-approved"]' > "$GH_COMMENTS_DIR/issue-labels-44"
 }
@@ -489,6 +490,47 @@ scoped_pr_at() { # scoped_pr_at <check-state>: scoped_pr, its head $SHA700
     run "$CRON_DIR/pr-maintenance-cron.sh"
     gh_called "^pr merge 700 --squash --auto --delete-branch --match-head-commit $SHA700 "
     ! gh_called '^pr edit'
+    [ ! -e "$HOME/.archon/state/held-review/proj-700" ]
+}
+
+@test "scope: a held-pr-review approval at the head of an UNSTABLE or BLOCKED PR merges it directly, pinned" {
+    for st in UNSTABLE BLOCKED; do
+        : > "$STUB_GH_ARGV"
+        scoped_pr_at FAILURE "$st"
+        held_record "$SHA700" approve
+        run "$CRON_DIR/pr-maintenance-cron.sh"
+        gh_called "^pr merge 700 --squash --delete-branch --match-head-commit $SHA700 "
+        ! gh_called '^pr merge .*--auto'
+        [ ! -e "$HOME/.archon/state/held-review/proj-700" ]
+    done
+}
+
+@test "scope: an approved held PR that will not merge is retried, with one ntfy" {
+    scoped_pr_at FAILURE BLOCKED
+    held_record "$SHA700" approve
+    GH_MERGE_FAILS=1 run "$CRON_DIR/pr-maintenance-cron.sh"
+    GH_MERGE_FAILS=1 run "$CRON_DIR/pr-maintenance-cron.sh"
+    [[ "$output" == *"PR #700 — could not merge, skipping"* ]]
+    [ "$(ntfys)" -eq 1 ]
+    [ -e "$HOME/.archon/state/held-review/proj-700" ]
+}
+
+@test "scope: an UNSTABLE or BLOCKED PR with no held-pr-review record is not merged or relabelled" {
+    for st in UNSTABLE BLOCKED; do
+        scoped_pr_at FAILURE "$st"
+        run "$CRON_DIR/pr-maintenance-cron.sh"
+    done
+    ! gh_called '^pr merge'
+    ! gh_called '^pr edit'
+}
+
+@test "scope: an owner verdict the owner took the label off goes through the scope check like any PR" {
+    scoped_pr_at FAILURE
+    held_record "$SHA700" owner
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    [[ "$output" == *"PR #700 — the owner took it off needs-owner-review after held-pr-review left it to them"* ]]
+    [[ "$output" == *"PR #700 — not merging: unsafe-change check failed"* ]]
+    ! gh_called '^pr merge'
     [ ! -e "$HOME/.archon/state/held-review/proj-700" ]
 }
 

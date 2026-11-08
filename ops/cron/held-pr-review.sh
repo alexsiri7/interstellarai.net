@@ -8,9 +8,13 @@
 #
 # A PR is held when it carries `hold` or needs-owner-review (pr-maintenance's
 # unsafe-change scope hold). One held only by that label — fully trusted
-# author, open, CLEAN, every check green but unsafe-change — is reviewed here,
-# in a session apart from the run that wrote it (#267). Makes no Claude call
-# when no PR is held. Per PR, once per head:
+# author, open, up to date with its base, every check green but unsafe-change
+# — is reviewed here, in a session apart from the run that wrote it (#267).
+# Makes no Claude call when no PR is held. Per PR, once per head:
+#   - It cannot be reviewed while it stays held (BEHIND or DIRTY, a check
+#     other than unsafe-change failed, or it has no other check): under
+#     needs-owner-review, it is left to the owner as below; under `hold`,
+#     skipped.
 #   - It weakens the factory's own checks or grants access
 #     (held_review_owner_hits), or its diff is too large: no Claude call; the
 #     label stays, one comment, and the PR goes into the owner's weekly
@@ -58,6 +62,8 @@ source "$SCRIPT_DIR/lib/lachesis.sh"
 source "$SCRIPT_DIR/lib/held-review.sh"
 # shellcheck source=lib/owner-digest.sh
 source "$SCRIPT_DIR/lib/owner-digest.sh"
+# shellcheck source=lib/owner-paths.sh
+source "$SCRIPT_DIR/lib/owner-paths.sh"
 
 HELD_REVIEW_CLAUDE_DIR="${HELD_REVIEW_CLAUDE_DIR:-$HOME/.claude}"
 HELD_REVIEW_MODEL="${HELD_REVIEW_MODEL:-opus}"
@@ -89,23 +95,19 @@ fi
 # "<path> (<category>)" for each change only the owner may approve: one that
 # weakens the factory's own checks or grants access. 0 when there is one.
 held_review_owner_hits() {
-  local path lower base why hits
+  local path why hits
   local re_checker='^\.github/(unsafe|safe)-change(\.ya?ml$|/)|^\.github/workflows/[^/]*(unsafe|safe)-change[^/]*$'
   local re_rules='(^|/)CODEOWNERS$|^\.github/settings\.ya?ml$|^\.github/rulesets/'
-  local re_factory='^ops/host/|^ops/cron/crontab$|^ops/cron/lib/(trust|screen|run-as|claude-auth|held-review|owner-digest)\.sh$|^ops/cron/(pr-maintenance-cron|ops-pr-review|held-pr-review|ops-self-update)\.sh$'
   local factory=""
-  case " $ARCHON_RUNAS_PROTECTED_REPOS " in *" $3 "*) factory=1 ;; esac
+  case " $ARCHON_RUNAS_PROTECTED_REPOS " in *" $3 "*) factory=factory ;; esac
   hits=$(
     while IFS= read -r path; do
       [ -n "$path" ] || continue
-      base="${path##*/}"; lower="${base,,}"
-      why=""
       if [[ "$path" =~ $re_checker ]]; then why="the unsafe-change checker or its denylist"
       elif [[ "$path" =~ $re_rules ]]; then why="merge rules or branch protection"
-      elif [[ "$lower" == .env* || "$lower" == *secret* || "$lower" == *credential* || "$lower" == *doppler* ]]; then why="secrets or credentials"
-      elif [ -n "$factory" ] && [[ "$path" =~ $re_factory || "${path,,}" == *sudoers* ]]; then why="the factory's own gates"
+      elif ! why=$(owner_only_path "$path" $factory); then continue
       fi
-      [ -z "$why" ] || echo "$path ($why)"
+      echo "$path ($why)"
     done < "$1"
     awk '
       /^diff --git / { file = $NF; sub(/^b\//, "", file); next }
@@ -119,14 +121,36 @@ held_review_owner_hits() {
   printf '%s\n' "$hits" | awk '!seen[$0]++'
 }
 
-# checks_green_but_scope <view-json> — at least one check, and every one other
-# than unsafe-change (or the legacy safe-change) success, neutral or skipped:
-# under needs-owner-review that check failed by definition.
-checks_green_but_scope() {
-  printf '%s' "$1" | jq -e '
+# checks_but_scope <view-json> — every check other than unsafe-change (or the
+# legacy safe-change), which failed by definition on a PR that gate holds:
+# green (success, neutral or skipped), failed, pending, or none.
+checks_but_scope() {
+  printf '%s' "$1" | jq -r '
     [.statusCheckRollup[]? | select((.name // .context // "") | IN("unsafe-change", "safe-change") | not)
      | ((.conclusion // .state // "") | ascii_upcase)]
-    | length > 0 and all(IN("SUCCESS", "NEUTRAL", "SKIPPED"))' >/dev/null 2>&1
+    | if length == 0 then "none"
+      elif all(IN("SUCCESS", "NEUTRAL", "SKIPPED")) then "green"
+      elif any(IN("FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE")) then "failed"
+      else "pending" end' 2>/dev/null
+}
+
+# unreviewable — why the PR the main loop is on cannot be reviewed at this
+# head for as long as it stays held, or nothing when it can. Fails while it
+# may still become reviewable on its own (checks running, state not computed).
+# GitHub reports a PR whose unsafe-change check failed as UNSTABLE, or BLOCKED
+# when that check is required, never CLEAN.
+unreviewable() {
+  case "$(field '.mergeStateStatus')" in
+    CLEAN|UNSTABLE|BLOCKED) ;;
+    BEHIND|DIRTY) echo "it is $(field '.mergeStateStatus'), and the factory does not update a held PR"; return 0 ;;
+    *) return 1 ;;
+  esac
+  case "$(checks_but_scope "$VIEW")" in
+    green) ;;
+    failed) echo "a check other than unsafe-change failed" ;;
+    none) echo "it has no checks other than unsafe-change" ;;
+    *) return 1 ;;
+  esac
 }
 
 # decide <decision> <text> — the log line and the Lachesis note, for the PR
@@ -139,13 +163,14 @@ decide() {
   lachesis_call add_note "$args" >/dev/null 2>&1 || log "$PROJECT: PR #$NUM: lachesis note failed"
 }
 
-# hold_for_owner <why> — the label stays; one comment, and the PR goes into
-# the owner's weekly question.
+# hold_for_owner <why> — the label stays; the PR goes into the owner's weekly
+# question, with one comment. Fails, to be retried next run, unless all of it
+# was done.
 hold_for_owner() {
+  owner_digest_add "$PROJECT" "$NUM" "$HEAD_SHA" "$(field '.title // ""')" "$1" || return 1
   gh pr comment "$NUM" --repo "$REPO" \
     --body "Waiting for the owner's weekly review: $1."$'\n\n<!-- lachesis:automated -->' >/dev/null 2>&1 || return 1
-  owner_digest_add "$PROJECT" "$NUM" "$HEAD_SHA" "$(field '.title // ""')" "$1" \
-    && held_review_set "$PROJECT" "$NUM" "$HEAD_SHA" owner "$LABEL" || return 1
+  held_review_set "$PROJECT" "$NUM" "$HEAD_SHA" owner "$LABEL" || return 1
   decide owner "$1"
 }
 
@@ -285,8 +310,17 @@ for PROJECT in "${PROJECTS[@]}"; do
     if held_review_at_head "$PROJECT" "$NUM" "$HEAD_SHA"; then
       skip "already $(held_review_get "$PROJECT" "$NUM" | cut -d' ' -f2) at ${HEAD_SHA:0:10}"; continue
     fi
-    if [ "$(field '.mergeStateStatus')" != CLEAN ]; then skip "$(field '.mergeStateStatus'), not CLEAN"; continue; fi
-    if ! checks_green_but_scope "$VIEW"; then skip "checks not all green"; continue; fi
+    if ! WHY=$(unreviewable); then
+      skip "$(field '.mergeStateStatus'), checks $(checks_but_scope "$VIEW"): not reviewable yet"; continue
+    fi
+    if [ -n "$WHY" ]; then
+      # Only the factory's own hold: a PR under `hold` waits for whoever put it there.
+      if [[ " ${HELD_LABELS[*]} " == *" hold "* ]]; then skip "$WHY"
+      elif hold_for_owner "$WHY"; then N_OWNER=$((N_OWNER + 1))
+      else skip "not reviewable ($WHY), but could not queue, comment or record it; next run"
+      fi
+      continue
+    fi
 
     ISSUES=$( { field '.closingIssuesReferences[]?.number'
                 field '.body // ""' | grep -oiE '(close[sd]?|fix(e[sd])?|resolve[sd]?|refs?) #[0-9]+' | grep -oE '[0-9]+$'
@@ -302,7 +336,7 @@ for PROJECT in "${PROJECTS[@]}"; do
       if hold_for_owner "it changes what only the owner approves — $HITS"; then
         N_OWNER=$((N_OWNER + 1))
       else
-        skip "for the owner, but could not comment or record it; next run"
+        skip "for the owner, but could not queue, comment or record it; next run"
       fi
       continue
     fi
@@ -310,7 +344,7 @@ for PROJECT in "${PROJECTS[@]}"; do
       if hold_for_owner "its diff is over $HELD_REVIEW_MAX_DIFF_BYTES bytes, too large to review automatically"; then
         N_OWNER=$((N_OWNER + 1))
       else
-        skip "too large, but could not comment or record it; next run"
+        skip "too large, but could not queue, comment or record it; next run"
       fi
       continue
     fi
@@ -362,7 +396,7 @@ for PROJECT in "${PROJECTS[@]}"; do
           rm -f "$ATTEMPTS"
           N_OWNER=$((N_OWNER + 1))
         else
-          skip "for the owner, but could not comment or record it; next run"
+          skip "for the owner, but could not queue, comment or record it; next run"
         fi ;;
     esac
   done

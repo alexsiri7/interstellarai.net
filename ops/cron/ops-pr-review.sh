@@ -55,6 +55,8 @@ source "$SCRIPT_DIR/lib/deadlines.sh"
 source "$SCRIPT_DIR/lib/ci-skip.sh"
 # shellcheck source=lib/lachesis.sh
 source "$SCRIPT_DIR/lib/lachesis.sh"
+# shellcheck source=lib/owner-paths.sh
+source "$SCRIPT_DIR/lib/owner-paths.sh"
 # shellcheck source=lib/owner-digest.sh
 source "$SCRIPT_DIR/lib/owner-digest.sh"
 
@@ -86,24 +88,10 @@ log() { echo "$(date -Is) [ops-pr-review] $*"; }
 # ops_review_sensitive — paths on stdin; prints "<path> (<category>)" for each
 # one the job must never merge. 0 when there is at least one.
 ops_review_sensitive() {
-  local path lower why hit=1
-  local re_trust='^ops/cron/lib/(trust|screen|claude-auth)\.sh$'
-  local re_secrets='(^|/)[^/]*(secret|doppler)[^/]*$'
-  local re_sandbox='^ops/cron/lib/run-as\.sh$|^ops/cron/lib/archon-shim/|^ops/cron/archon-projects\.txt$'
-  local re_gates='^ops/cron/ops-pr-review\.sh$|^ops/cron/ops-self-update\.sh$|^\.github/unsafe-change\.yml$|^ops/cron/held-pr-review\.sh$|^ops/cron/lib/(held-review|owner-digest)\.sh$'
+  local path why hit=1
   while IFS= read -r path; do
     [ -n "$path" ] || continue
-    lower="${path,,}"
-    why=""
-    if [[ "$path" == ops/host/* ]]; then why="host install and sandboxing"
-    elif [[ "$lower" == *sudoers* ]]; then why="sudoers"
-    elif [[ "$path" =~ $re_trust ]]; then why="trust, screening or Claude auth"
-    elif [[ "$lower" =~ $re_secrets ]]; then why="secrets loading"
-    elif [ "$path" = ops/cron/crontab ]; then why="crontab install"
-    elif [[ "$path" =~ $re_sandbox ]]; then why="archon-user sandboxing"
-    elif [[ "$path" =~ $re_gates ]]; then why="the merge and approval gates"
-    fi
-    if [ -n "$why" ]; then echo "$path ($why)"; hit=0; fi
+    if why=$(owner_only_path "$path" factory); then echo "$path ($why)"; hit=0; fi
   done
   return "$hit"
 }
@@ -139,12 +127,12 @@ decide() {
 }
 
 # hold_for_owner <pr> <issue> <decision> <why> — one comment that the owner
-# merges it by hand, and an entry in the owner's weekly question.
+# merges it by hand, and an entry in the owner's weekly question. Fails, to
+# be retried next run, when either could not be made.
 hold_for_owner() {
   local msg="Not merged by ops-pr-review: $4. The owner reviews and merges it by hand, then runs ops/cron/ops-self-update.sh --approve. It is on the owner's weekly review."
+  owner_digest_add "$PROJECT" "$1" "$HEAD_SHA" "$(field '.title // ""')" "$4" || return 1
   gh pr comment "$1" --repo "$OPS_REPO" --body "$msg"$'\n\n<!-- lachesis:automated -->' >/dev/null 2>&1 || return 1
-  owner_digest_add "$PROJECT" "$1" "$HEAD_SHA" "$(field '.title // ""')" "$4" \
-    || log "PR #$1: could not add it to the owner's weekly question"
   decide "$1" "$2" "$3" "$4"
 }
 
@@ -304,7 +292,7 @@ for row in "${ROWS[@]}"; do
         echo "$HEAD_SHA sensitive" > "$STATE/reviewed-$NUM"
         N_OWNER=$((N_OWNER + 1))
       else
-        skip "sensitive, but could not comment; next run"
+        skip "sensitive, but could not comment or add it to the weekly question; next run"
       fi
       continue
     fi
@@ -313,7 +301,7 @@ for row in "${ROWS[@]}"; do
         echo "$HEAD_SHA escalate" > "$STATE/reviewed-$NUM"
         N_OWNER=$((N_OWNER + 1))
       else
-        skip "too large, but could not comment; next run"
+        skip "too large, but could not comment or add it to the weekly question; next run"
       fi
       continue
     fi
@@ -352,7 +340,7 @@ for row in "${ROWS[@]}"; do
           echo "$HEAD_SHA escalate" > "$STATE/reviewed-$NUM"
           N_OWNER=$((N_OWNER + 1))
         else
-          skip "escalated, but could not comment; next run"
+          skip "escalated, but could not comment or add it to the weekly question; next run"
         fi
         continue ;;
     esac

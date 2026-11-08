@@ -60,8 +60,8 @@ teardown() {
 }
 
 pr() { # pr <number> <draft> <headRefName> — a CLEAN owner, same-repo PR
-    printf '{"number": %s, "isDraft": %s, "mergeStateStatus": "CLEAN", "headRefName": "%s", "body": "Fixes #74", "labels": [], "author": {"login": "alexsiri7"}, "isCrossRepository": false}' \
-        "$1" "$2" "$3"
+    printf '{"number": %s, "isDraft": %s, "mergeStateStatus": "CLEAN", "headRefName": "%s", "headRefOid": "sha%s", "body": "Fixes #74", "labels": [], "author": {"login": "alexsiri7"}, "isCrossRepository": false}' \
+        "$1" "$2" "$3" "$1"
 }
 
 failed_run() { # failed_run <id> <branch> — an unadopted failed run whose worktree is <branch>
