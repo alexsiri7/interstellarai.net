@@ -229,6 +229,13 @@ comments_carry() {
   grep -qE "$1" <<<"$bodies"
 }
 
+# this_runs_comments <bodies> — of the comments, one @json body per line, those
+# that name this run's log. Matched on its file name, which unstick_stale
+# passes as an absolute path and the ship wrapper as a relative one.
+this_runs_comments() {
+  grep -F "${run_log##*/}\`" <<<"$1"
+}
+
 # release_if_stale — exits 0 having released the issue to run again when every
 # ref the deferring verdict names is stale or neutral and at least one is
 # stale (#211). The release comment's marker bounds this to once per PR: a run
@@ -370,18 +377,19 @@ fi
 # Only a decided verdict qualifies: No delivery needed, Not done: blocked on,
 # No work owed. Runs at settle time and under --recheck, pickup on or off,
 # before any release, tier action or question.
+tier=$(severity_tier "$declared_tier" "$verdict_block"$'\n'"$title")
+[ "$health_filed" = 1 ] && tier=3
 fc_decided=0
 case "$verdict" in
   "No delivery needed: "*|"Not done: blocked on "*|"No work owed in this repository: "*) fc_decided=1 ;;
 esac
 if [ "$fc_decided" = 1 ] && [ "$view_ok" = 1 ]; then
-  fc_tier=$(severity_tier "$declared_tier" "$verdict_block"$'\n'"$title")
   # A judgment close (precedent, spec, feedback) is vetoed on tier 3, on a
   # verdict that leaves what the project should be to the owner, and on a
   # scope call (#270): the #259 stop cites "precedent issue #212" for where its
   # fix once landed, and closed #212 would close it as matching that precedent.
   fc_judge=1
-  [ "$fc_tier" = 3 ] && fc_judge=0
+  [ "$tier" = 3 ] && fc_judge=0
   grep -qiE "$FC_SPEC_DECISION_RE" <<<"$verdict_block" && fc_judge=0
   { [[ "$verdict" =~ $SPLIT_RE ]] || land_here_stop; } && fc_judge=0
 
@@ -465,8 +473,6 @@ fi
 
 # shellcheck source=lib/lachesis.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lachesis.sh"
-tier=$(severity_tier "$declared_tier" "$verdict_block"$'\n'"$title")
-[ "$health_filed" = 1 ] && tier=3
 
 # ── Scope and ownership calls the factory makes itself (#270) ───────────────
 # Splitting off a part that waits on another issue, and landing a change in
@@ -481,10 +487,9 @@ tier=$(severity_tier "$declared_tier" "$verdict_block"$'\n'"$title")
 # exits 0. Returns when the verdict is no split it can confirm, the issue was
 # split before, or the new issue could not be filed. The comment lands before
 # the release, so a release that fails leaves the marker, and the next settle
-# of this run (matched on its log's file name, as settle_resume_act does)
-# finishes the release. A comment that fails releases nothing and exits 1; the
-# issue it filed carries archon-split-from, so the next settle reuses it
-# instead of filing the part again, and records its dependency again.
+# of this run finishes the release. A comment that fails releases nothing and
+# exits 1; the issue it filed carries archon-split-from, so the next settle
+# reuses it instead of filing the part again, and records its dependency again.
 settle_split() {
   [[ "$verdict" =~ $SPLIT_RE ]] || return 0
   local keeps="${BASH_REMATCH[1]}" waits="${BASH_REMATCH[2]}" blocker="${BASH_REMATCH[3]}"
@@ -492,7 +497,7 @@ settle_split() {
   [ "$blocker" != "$issue" ] || return 0
   bodies=$(gh api --paginate "repos/$repo/issues/$issue/comments" --jq '.[].body | @json' 2>/dev/null) || return 0
   if grep -qF '<!-- archon-settle-split: ' <<<"$bodies"; then
-    grep -F "${run_log##*/}\`" <<<"$bodies" | grep -qF '<!-- archon-settle-split: ' || return 0
+    this_runs_comments "$bodies" | grep -qF '<!-- archon-settle-split: ' || return 0
     if ! release_for_rerun; then
       echo "$(date -Is) [issue-pickup] $project: #$issue — split by this run, but could not release to run again"
       exit 1
@@ -700,10 +705,8 @@ settle_release() {
 
 # settle_resume_act — exits through settle_release when this run's tier-1
 # act comment is already on the issue: the act was taken and only its release
-# failed, so the marker must not turn it into a question. Matched on the run
-# log's file name, which unstick_stale passes as an absolute path and the
-# ship wrapper as a relative one. A close is no resume: a close that landed
-# leaves no open issue to settle. Exits 1 when the comments cannot be read:
+# failed, so the marker must not turn it into a question. A close is no
+# resume: a close that landed leaves no open issue to settle. Exits 1 when the comments cannot be read:
 # asking then could ask about an act already taken.
 settle_resume_act() {
   local bodies action
@@ -711,7 +714,7 @@ settle_resume_act() {
     echo "$(date -Is) [issue-pickup] $project: #$issue — could not read its comments to check for a tier-1 action already taken"
     exit 1
   fi
-  action=$(grep -F "${run_log##*/}\`" <<<"$bodies" \
+  action=$(this_runs_comments "$bodies" \
     | grep -oE '<!-- archon-settle-act: [^ ]+ -->' | grep -v ': close-' | tail -1)
   [ -n "$action" ] || return 0
   action=${action#<!-- archon-settle-act: } action=${action% -->}
