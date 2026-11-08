@@ -2,7 +2,7 @@
 # End-to-end tests for ops/cron/archon-update.sh against a fixture of real git
 # repos — a bare "upstream" with release tags, a bare "origin" (the fork) and
 # a "live" clone on upstream-sync-0.10 with one factory commit on top — and
-# stubs for bun, archon, systemctl, curl (ntfy + health), gh and pgrep.
+# stubs for bun, archon, systemctl, curl (ntfy + health), gh, pgrep and claude.
 #
 # Run: bunx bats ops/cron/tests/archon-update.bats
 
@@ -46,6 +46,7 @@ setup() {
     export STUB_ARCHON_RUNS_FAIL=0       # 1: the run listing is unreadable
     export STUB_PGREP_HIT=0
     export STUB_GH_CLOSE_FAIL=""         # issue URL whose `gh issue close` fails
+    export STUB_RESOLVE=ok               # claude's resolution: ok|fail|error|markers|stray
 
     write_stubs
     build_repos
@@ -146,6 +147,24 @@ printf '%s\n' "$*" >> "$GH_ARGV"
 [ "$1 $2" = "issue close" ] && [ "$3" = "$STUB_GH_CLOSE_FAIL" ] && { echo "stub: close failed" >&2; exit 1; }
 n=$(grep -c '^issue create' "$GH_ARGV")
 echo "https://github.com/alexsiri7/Archon/issues/$((100 + n))"
+STUB
+    # The resolver: ok rewrites the conflicted README.md with both sides; fail
+    # exits 1; error resolves but reports is_error; markers leaves the file;
+    # stray resolves and also edits a file outside the conflict.
+    cat > "$T/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+echo "$PWD :: $* :: CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR" >> "$T/claude-argv"
+cat > "$T/claude-prompt"
+cp README.md "$T/claude-saw-README.md"
+resolve() { printf 'readme v2 (%s)\nfactory line\n' "$(cat VERSION)" > README.md; }
+case "$STUB_RESOLVE" in
+    ok) resolve ;;
+    fail) exit 1 ;;
+    error) resolve; echo '{"is_error":true,"result":"API Error"}'; exit 0 ;;
+    markers) ;;
+    stray) resolve; echo x >> FACTORY.md ;;
+esac
+echo '{"is_error":false,"result":"done"}'
 STUB
     cat > "$T/bin/pgrep" <<'STUB'
 #!/usr/bin/env bash
@@ -288,6 +307,7 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
     [ ! -d "$wt" ]
     [ "$(git -C "$T/live" worktree list | wc -l)" -eq 1 ]
     [ "$(issues_filed)" -eq 0 ]
+    [ ! -f "$T/claude-argv" ]                            # a clean merge needs no resolver
     # the old branch stays as the rollback target
     git -C "$T/live" show-ref --verify --quiet refs/heads/upstream-sync-0.10
 
@@ -299,41 +319,103 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
     [ ! -f "$NTFY_LOG" ]
 }
 
-@test "merge conflict: aborted, worktree removed, ntfy with the files, one issue per tag" {
+@test "merge conflict: resolved by claude in the worktree, committed, proven, pushed, swapped, no issue" {
+    publish_release 0.11.0 conflict
+    run "$SCRIPT"
+    echo "$output"
+    [ "$status" -eq 0 ]
+    wt="$T/wt/archon-update-v0.11.0"
+    [[ "$output" == *"conflicting files: README.md — resolving"* ]]
+    [[ "$output" == *"resolved the conflicts in README.md"* ]]
+    # one restricted, file-tools-only session in the worktree, on the owner's account
+    [ "$(grep -c '' "$T/claude-argv")" -eq 1 ]
+    grep -q "^$wt :: -p --model opus --restricted --tools Read,Edit,Write,Glob,Grep --permission-mode acceptEdits --strict-mcp-config --no-session-persistence --output-format json :: CLAUDE_CONFIG_DIR=$HOME/.claude\$" "$T/claude-argv"
+    # the prompt names the file and carries the factory's side; zdiff3 markers
+    grep -q '^  README.md$' "$T/claude-prompt"
+    grep -q 'carry local factory customizations' "$T/claude-prompt"
+    grep -q '^+factory line$' "$T/claude-prompt"
+    grep -q '^||||||| ' "$T/claude-saw-README.md"
+    # proven and swapped like a clean merge
+    grep -q "^$wt :: --filter \* test\$" "$BUN_ARGV"
+    [ "$(live_branch)" = "upstream-sync-0.11.0" ]
+    [ "$(printf 'readme v2 (0.11.0)\nfactory line')" = "$(cat "$T/live/README.md")" ]
+    [ -f "$T/live/FACTORY.md" ]
+    git -C "$T/live" log --merges --format=%s | grep -q "^Merge tag 'v0.11.0'"
+    [ "$(git -C "$T/live" rev-parse origin/upstream-sync-0.11.0)" = "$(live_sha)" ]
+    [ "$(status_field outcome)" = "updated" ]
+    [ "$(issues_filed)" -eq 0 ]
+    [ "$(grep -c '' "$NTFY_LOG")" -eq 1 ]
+    grep -q '^Archon updated v0.10.1 → v0.11.0 |' "$NTFY_LOG"
+}
+
+@test "conflict resolved but the tests fail: exactly one issue per tag, naming the resolution" {
     unset ARCHON_UPDATE_ISSUE_REPO      # the default: the ops repo (issues are off on the fork)
     publish_release 0.11.0 conflict
+    export STUB_TEST_FAIL="provider > keeps the factory model pin"
     before=$(live_sha)
     run "$SCRIPT"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"conflicting files: README.md"* ]]
-    [ "$(status_field last_run_status)" = "failed" ]
-    [ "$(status_field last_run_failed)" = "merge" ]
-    [ "$(status_field last_ok)" = "0" ]
-    grep -q '^Archon update FAILED: merge | merge conflicts' "$NTFY_LOG"
+    [ "$(status_field last_run_failed)" = "test" ]
     [ "$(issues_filed)" -eq 1 ]
-    grep -q '^issue create --repo alexsiri7/interstellarai.net --title Upstream v0.11.0 merge conflicts --body ' "$GH_ARGV"
+    grep -q '^issue create --repo alexsiri7/interstellarai.net --title Upstream v0.11.0 package tests failed --body ' "$GH_ARGV"
     grep -q -- '--label manual-review$' "$GH_ARGV"
-    grep -q '^label create manual-review --repo alexsiri7/interstellarai.net' "$GH_ARGV"
-    grep -q 'README.md' "$GH_ARGV"
-    grep -q 'it adopts origin/upstream-sync-0.11.0 instead of merging again' "$GH_ARGV"
-    grep -q 'ARCHON-0.10-CUTOVER.md' "$GH_ARGV"
-    [ "$(cat "$T/state/archon-update-issue-v0.11.0")" = "https://github.com/alexsiri7/Archon/issues/101" ]
-    # nothing left behind, live untouched, nothing ran in the worktree
-    [ ! -d "$T/wt/archon-update-v0.11.0" ]
-    ! git -C "$T/live" show-ref --verify --quiet refs/heads/upstream-sync-0.11.0
+    grep -q "The merge had conflicts in README.md, resolved by archon-update.sh's resolver" "$GH_ARGV"
+    grep -q 'provider > keeps the factory model pin' "$GH_ARGV"
+    [ -d "$T/wt/archon-update-v0.11.0" ]
     [ "$(live_sha)" = "$before" ]
-    [ "$(live_branch)" = "upstream-sync-0.10" ]
-    [ ! -f "$BUN_ARGV" ]
-    [ ! -f "$SYSTEMCTL_ARGV" ]
     ! git -C "$T/origin.git" show-ref --verify --quiet refs/heads/upstream-sync-0.11.0
 
-    # second run, same tag: ntfy again, no second issue
+    # next week, same failure: resolved again, still one issue
     rm -f "$NTFY_LOG"
     run "$SCRIPT"
     [ "$status" -eq 1 ]
     [[ "$output" == *"issue for v0.11.0 already filed: https://github.com/alexsiri7/Archon/issues/101"* ]]
     [ "$(issues_filed)" -eq 1 ]
-    grep -q '^Archon update FAILED: merge' "$NTFY_LOG"
+    [ "$(grep -c '' "$T/claude-argv")" -eq 2 ]
+}
+
+@test "a resolver that fails, errors, leaves markers or edits outside the conflict: no issue, status resolve, nothing left behind" {
+    publish_release 0.11.0 conflict
+    before=$(live_sha)
+    for mode in fail error markers stray; do
+        case $mode in
+            fail) reason="claude exited 1" ;;
+            error) reason="claude reported an error" ;;
+            markers) reason="conflict markers left in README.md" ;;
+            stray) reason="edited files outside the conflict: FACTORY.md" ;;
+        esac
+        export STUB_RESOLVE=$mode
+        rm -f "$NTFY_LOG" "$T/state/archon-update-status"
+        run "$SCRIPT"
+        echo "$mode: $output"
+        [ "$status" -eq 1 ]
+        [ "$(status_field last_run_status)" = "failed" ]
+        [ "$(status_field last_run_failed)" = "resolve" ]
+        grep -qF "Archon update FAILED: resolve | could not resolve the merge conflicts in README.md: $reason. No issue filed; the next run retries" "$NTFY_LOG"
+        [ "$(issues_filed)" -eq 0 ]
+        [ ! -d "$T/wt/archon-update-v0.11.0" ]
+        ! git -C "$T/live" show-ref --verify --quiet refs/heads/upstream-sync-0.11.0
+        ! git -C "$T/origin.git" show-ref --verify --quiet refs/heads/upstream-sync-0.11.0
+        [ "$(live_sha)" = "$before" ]
+        [ "$(live_branch)" = "upstream-sync-0.10" ]
+        [ ! -f "$BUN_ARGV" ]
+    done
+}
+
+@test "a successful update closes the escalations filed for this and older tags" {
+    publish_release 0.11.0
+    echo "https://github.com/alexsiri7/interstellarai.net/issues/258" > "$T/state/archon-update-issue-v0.10.9"
+    echo "https://github.com/alexsiri7/interstellarai.net/issues/271" > "$T/state/archon-update-issue-v0.11.0"
+    echo "https://github.com/alexsiri7/interstellarai.net/issues/300" > "$T/state/archon-update-issue-v0.12.0"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    grep -q '^issue close https://github.com/alexsiri7/interstellarai.net/issues/258 --comment ' "$GH_ARGV"
+    grep -q '^issue close https://github.com/alexsiri7/interstellarai.net/issues/271 --comment ' "$GH_ARGV"
+    ! grep -q 'issues/300' "$GH_ARGV"
+    [ ! -f "$T/state/archon-update-issue-v0.10.9" ]
+    [ ! -f "$T/state/archon-update-issue-v0.11.0" ]
+    [ -f "$T/state/archon-update-issue-v0.12.0" ]
+    [[ "$output" == *"closed earlier escalation https://github.com/alexsiri7/interstellarai.net/issues/271 (v0.11.0)"* ]]
 }
 
 @test "a newer tag's escalation closes the older tags' open ones as superseded; a failed close keeps its marker" {
@@ -491,9 +573,10 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
 
 @test "conflict resolved by hand and pushed to the fork: adopted, merge skipped, proven, swapped" {
     publish_release 0.11.0 conflict
+    export STUB_RESOLVE=fail
     run "$SCRIPT"
     [ "$status" -eq 1 ]
-    [ "$(status_field last_run_failed)" = "merge" ]
+    [ "$(status_field last_run_failed)" = "resolve" ]
     old_sha=$(live_sha)
 
     # the resolution, made where the issue says: a worktree of the live repo
