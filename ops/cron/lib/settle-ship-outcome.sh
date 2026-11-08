@@ -149,6 +149,7 @@ $close_detail}
 Closed by the factory without asking the owner (label \`$FACTORY_CLOSED_LABEL\`). Reopen and add archon:queued to run it again. ${close_note}
 ${act_marker:+
 $act_marker}
+<!-- archon-settle-closed -->
 <!-- lachesis:automated -->" >/dev/null 2>&1 || {
     [ "$recheck" = 1 ] \
       && echo "$(date -Is) [issue-pickup] $project: #$issue — GitHub confirms ${evidence}, but the close failed"
@@ -439,31 +440,58 @@ source "$(dirname "${BASH_SOURCE[0]}")/lachesis.sh"
 
 # owner_comments — the owner's comments in the `gh issue view --json comments`
 # JSON on stdin, oldest first, one JSON {url, body, close} per line: those the
-# owner wrote, and (close: true) the factory's settle closes, after which an
-# earlier owner comment is spent (the close comment invites a reopen to run
-# the issue again). The factory posts under the owner's token, so its other
-# comments are told apart by their markers and dropped.
+# owner wrote, and (close: true) the factory's settle closes (close_as_done's
+# marker), after which an earlier owner comment is spent (the close comment
+# invites a reopen to run the issue again). The factory posts under the
+# owner's token, so its other comments are told apart by their markers and
+# dropped.
 owner_comments() {
   # shellcheck source=lib/trust.sh
   source "$(dirname "${BASH_SOURCE[0]}")/trust.sh"
   jq -c --arg owner "${TRUST_OWNER,,}" '.comments // [] | .[]
     | select((.author.login // "" | ascii_downcase) == $owner)
     | (.body // "") as $b
-    | ($b | startswith("archon-ship finished without a PR: ") and contains("\n\nClosed as archon:done: ")) as $close
+    | ($b | contains("<!-- archon-settle-closed -->")) as $close
     | select($close or ($b | contains("<!-- lachesis:automated -->") or contains("<!-- archon-")
                          or startswith("archon-ship finished") or startswith("Automated screening:") | not))
     | {url, body: $b, close: $close}'
 }
 
-# close_directive <text> — true when some sentence of <text> is an
-# unconditional "close" ("Close it.", "Yes, close it as a duplicate of #5."),
-# not a question, a condition ("Close it once #12 lands.") or a refusal.
+# sentences <text> — <text> one sentence per line, leading list and emphasis
+# markup stripped, its quoted lines ("> …", a reply quoting the question)
+# dropped.
+sentences() {
+  printf '%s\n' "$1" | grep -vE '^[[:space:]]*>' \
+    | sed -E 's/([.!?;])([[:space:]]|$)/\1\n/g' \
+    | sed -E 's/^[[:space:]*_-]+//'
+}
+
+# close_directive <text> — true when <text> tells the factory to close
+# ("Close it.", "Yes, close it as a duplicate of #5.") and nowhere asks, sets
+# a condition ("Close it once #12 lands."), offers an alternative or refuses
+# ("No, leave it open. Close the other one."): a sentence elsewhere in the
+# comment can take the close back, so the whole of it is judged.
 close_directive() {
-  printf '%s\n' "$1" | sed -E 's/([.!?;])([[:space:]]|$)/\1\n/g' \
-    | sed -E 's/^[[:space:]>*_-]+//' \
-    | grep -vE '[?][[:space:]]*$' \
-    | grep -iE '^((please|ok|okay|yes|so|just|then),?[[:space:]]+)*close([[:space:]]|[.!,:;]|$)' \
-    | grep -viqE '\b(if|once|when|after|until|unless|before|but|do not|don.?t|never|later)\b'
+  local text
+  text=$(sentences "$1")
+  [[ "$text" == *'?'* ]] && return 1
+  grep -qiE '\b(if|once|when|after|until|unless|before|but|or|instead|not|yet|never|later|wait|keep|leave|do not|don.?t|won.?t|can.?t)\b|^(no|nope|nah)([,.!]|$)' \
+    <<<"$text" && return 1
+  grep -qiE '^((please|ok|okay|yes|so|just|then),?[[:space:]]+)*close([[:space:]]|[.!,:;]|$)' <<<"$text"
+}
+
+# false_positive_confirmed <text> — true when <text> says the issue is a false
+# positive ("False positive: …", "Yes, this is a false positive."), not asking,
+# denying ("This is not a false positive") or hedging ("maybe a false
+# positive").
+false_positive_confirmed() {
+  local text
+  text=$(sentences "$1")
+  [[ "$text" == *'?'* ]] && return 1
+  grep -qiE "\b(no|not|isn.?t|wasn.?t|never)[[:space:]]+(an?[[:space:]]+)?false[ -]positive|\b(if|unless|maybe|perhaps|possibly|probably|might|could)\b" \
+    <<<"$text" && return 1
+  grep -qiE '^((yes|yep|confirmed|agreed|right|correct|indeed)[,:]?[[:space:]]+)*((this|it|that)([[:space:]]+(is|was)|.s)[[:space:]]+)?(an?[[:space:]]+)?false[ -]positive' \
+    <<<"$text"
 }
 
 # title_stem <title> — the title before its first " — ", trimmed and
@@ -483,6 +511,7 @@ close_without_asking() {
   close_extra_label=factory-closed
   lachesis_pickup_enabled && act_note="Closed without asking (#259): $1."
   close_as_done "$1: \"${quote:0:300}\"" --reason "not planned"
+  echo "$(date -Is) [issue-pickup] $project: #$issue — $1, but the close failed; asking instead"
   close_extra_label="" act_note=""
   return 1
 }
@@ -514,9 +543,11 @@ close_if_false_positive_precedent() {
     ref_view=$(gh issue view "$ref" --repo "$repo" --json url,state,title,comments 2>/dev/null \
       | jq -c 'select(.state == "CLOSED" and (.url | contains("/issues/")))' 2>/dev/null)
     [ -n "$ref_view" ] && [ "$(title_stem "$(jq -r '.title // ""' <<<"$ref_view")")" = "$stem" ] || continue
+    # The owner's latest word on it, so a later retraction wins.
     hit=$(owner_comments <<<"$ref_view" \
-      | jq -sc 'map(select((.close | not) and (.body | test("false[ -]positive"; "i")))) | first // empty')
+      | jq -sc 'map(select((.close | not) and (.body | test("false[ -]positive"; "i")))) | last // empty')
     [ -n "$hit" ] || continue
+    false_positive_confirmed "$(jq -r .body <<<"$hit")" || continue
     close_without_asking "a false positive the owner already confirmed on #$ref ($(jq -r .url <<<"$hit"))" \
       "$(jq -r .body <<<"$hit")"
     return

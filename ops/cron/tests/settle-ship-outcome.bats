@@ -1766,12 +1766,19 @@ assert_closed_without_asking() {
     local variant
     lachesis_on
     decided_verdict
-    for variant in factory-question conditional refusal question superseded spent other-author; do
+    for variant in factory-question quoted-question conditional refusal refused-elsewhere \
+            not-yet alternative question superseded spent other-author; do
         : > "$GH_ARGV"; : > "$LACHESIS_ARGV"
         case "$variant" in
             factory-question) thread 9 alexsiri7 "$FACTORY_QUESTION" ;;
             conditional) thread 9 alexsiri7 "Close it once #12 lands." ;;
+            quoted-question) thread 9 alexsiri7 "> Close the issue, or answer this question to let the factory run it again.
+
+Still seeing this on Android." ;;
             refusal) thread 9 alexsiri7 "Don't close this; the crash still reproduces." ;;
+            refused-elsewhere) thread 9 alexsiri7 "No, leave it open. Close the other one." ;;
+            not-yet) thread 9 alexsiri7 "Not yet. Close it next week." ;;
+            alternative) thread 9 alexsiri7 "Close the issue, or answer this question to let the factory run it again." ;;
             question) thread 9 alexsiri7 "Close it? Not sure yet." ;;
             superseded) thread 9 alexsiri7 "Close it." alexsiri7 "Still seeing this on Android." ;;
             # Reopened after an earlier settle closed it on this decision.
@@ -1779,6 +1786,7 @@ assert_closed_without_asking() {
 
 Closed as archon:done: already fixed by merged PR #5. Reopen and add archon:queued to run it again.
 
+<!-- archon-settle-closed -->
 <!-- lachesis:automated -->" ;;
             other-author) thread 9 someone-else "Close it." ;;
         esac
@@ -1801,6 +1809,17 @@ Closed as archon:done: already fixed by merged PR #5. Reopen and add archon:queu
     [ "$status" -eq 0 ]
     grep -q -- "issue edit 9 --repo alexsiri7/testproj --remove-label archon:in-progress --add-label archon:skipped" "$GH_ARGV"
     [ "$(gh_calls 'factory-closed')" -eq 0 ]
+    [[ "$output" == *"#9 — the owner already decided in https://github.com/alexsiri7/testproj/issues/9#issuecomment-1, but the close failed; asking instead"* ]]
+}
+
+@test "every settle close carries the marker that spends the owner's earlier close decision" {
+    printf 'No delivery needed: already fixed by PR #50.\nReport: /x\n' > "$RUN_LOG"
+    ref 50 merged-pr
+
+    run "$SCRIPT" testproj 7 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    grep -qx -- '<!-- archon-settle-closed -->' "$GH_ARGV"
 }
 
 # musenmingle#399: its verdict cited #242 and #334, and on #334 the owner had
@@ -1832,13 +1851,19 @@ scraper_precedents() {
 @test "a false positive with no owner-confirmed same-stem precedent still goes to the owner" {
     local variant
     lachesis_on
-    for variant in unconfirmed other-stem open pr health-filed; do
+    for variant in unconfirmed denied asked retracted undecided-verdict other-stem open pr health-filed; do
         rm -f "$T"/fixtures/*; : > "$GH_ARGV"; : > "$LACHESIS_ARGV"
         scraper_precedents
         case "$variant" in
             unconfirmed) thread 334 alexsiri7 'Agreed: false positive.
 
 <!-- lachesis:automated -->' ;;
+            denied) thread 334 alexsiri7 'This is NOT a false positive: the scraper dropped a real event.' ;;
+            asked) thread 334 alexsiri7 'False positive? Camera-works may be an event after all.' ;;
+            retracted) thread 334 alexsiri7 'False positive: Camera-works is a course.' \
+                alexsiri7 'Not a false positive after all, Camera-works runs a screening too.' ;;
+            # An undecided stop never closes, whatever it calls the issue.
+            undecided-verdict) printf 'No delivery started: false positive, as the owner confirmed on #334.\nReport: /x\n' > "$RUN_LOG" ;;
             other-stem) fixture title-334 'Scraper check: kino-lounge — 1 event missing from the listing' ;;
             open) fixture viewstate-334 OPEN ;;
             pr) fixture kind-334 pull ;;
