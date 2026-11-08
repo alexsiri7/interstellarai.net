@@ -53,6 +53,14 @@
 # 3. Each action is taken or offered once per issue (a comment marker). With
 # pickup off nothing here changes.
 #
+# Before release_if_stale and the tiers, two scope and ownership calls are the
+# factory's own (#270), pickup on or off: a triage split verdict (the grammar
+# in this project's triage policy) files the part that waits as a new issue
+# blocked on its open blocker and runs the issue again for the part it keeps;
+# a stop on where to land the change is answered "land it here" and run again.
+# Each is commented on the issue, asks nothing, is taken once per issue, and
+# never on tier 3 or a pipeline-health issue.
+#
 # Exit 0 when a verdict was found and recorded, 1 when the log carries none
 # (crash, rate limit, delivered PR) so the caller keeps its existing handling.
 # A verdict whose reason is a placeholder (lib/ship-verdict.sh, #209) counts as
@@ -199,6 +207,28 @@ ref_hold_state() {
   esac
 }
 
+# release_for_rerun — drops archon:in-progress so the issue runs again (with
+# pickup off, re-queued as archon:queued) and sets requeue_note to say how;
+# false when GitHub refused the edit.
+requeue_note=""
+release_for_rerun() {
+  local -a relabel=(--remove-label "archon:in-progress")
+  requeue_note="Lachesis next_issue decides when it runs again."
+  if ! lachesis_pickup_enabled; then
+    relabel+=(--add-label "archon:queued")
+    requeue_note="Re-queued as archon:queued."
+  fi
+  gh issue edit "$issue" --repo "$repo" "${relabel[@]}" >/dev/null 2>&1
+}
+
+# comments_carry <ERE> — true when a comment on the issue matches, or when its
+# comments cannot be read.
+comments_carry() {
+  local bodies
+  bodies=$(gh api --paginate "repos/$repo/issues/$issue/comments" --jq '.[].body' 2>/dev/null) || return 0
+  grep -qE "$1" <<<"$bodies"
+}
+
 # release_if_stale — exits 0 having released the issue to run again when every
 # ref the deferring verdict names is stale or neutral and at least one is
 # stale (#211). The release comment's marker bounds this to once per PR: a run
@@ -206,7 +236,7 @@ ref_hold_state() {
 # does any hold, unknown, or a comment listing that cannot be read.
 release_if_stale() {
   local ref state stale_lines="" prior
-  local -a stale=() again=() relabel=(--remove-label "archon:in-progress")
+  local -a stale=() again=()
   for ref in "${refs[@]}"; do
     state=$(ref_hold_state "$ref")
     case "$state" in
@@ -228,12 +258,7 @@ release_if_stale() {
     return
   fi
 
-  local requeue_note="Lachesis next_issue decides when it runs again."
-  if ! lachesis_pickup_enabled; then
-    relabel+=(--add-label "archon:queued")
-    requeue_note="Re-queued as archon:queued."
-  fi
-  if ! gh issue edit "$issue" --repo "$repo" "${relabel[@]}" >/dev/null 2>&1; then
+  if ! release_for_rerun; then
     echo "$(date -Is) [issue-pickup] $project: #$issue — could not release to run again"
     exit 1
   fi
@@ -419,6 +444,118 @@ fi
 
 # shellcheck source=lib/lachesis.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lachesis.sh"
+tier=$(severity_tier "$declared_tier" "$verdict_block"$'\n'"$title")
+[ "$health_filed" = 1 ] && tier=3
+
+# ── Scope and ownership calls the factory makes itself (#270) ───────────────
+# Splitting off a part that waits on another issue, and landing a change in
+# this repository rather than a shared one, are not the owner's calls: each is
+# taken here, recorded in a comment, and the issue runs again, pickup on or
+# off, asking nothing. Never under --recheck, on tier 3 or a pipeline-health
+# issue, and each at most once per issue (its comment marker); anything that
+# does not hold falls through to the handling below.
+
+# The blocked_reason grammar this project's triage policy
+# (.archon/sdlc/policy/triage.md) gives a split, as outcome.ts prints it.
+SPLIT_RE='^Not done: blocked on a split: this issue keeps "([^"]+)"; "([^"]+)" waits on #([0-9]+)'
+
+# settle_split — files the waiting part as a new issue blocked on its blocker,
+# comments the split here and releases this issue for the part it keeps, then
+# exits 0. Returns when the verdict is no split it can confirm, or the new
+# issue could not be filed. The comment lands before the release, so a release
+# that fails leaves the marker and a re-settle does not split twice.
+settle_split() {
+  [[ "$verdict" =~ $SPLIT_RE ]] || return 0
+  local keeps="${BASH_REMATCH[1]}" waits="${BASH_REMATCH[2]}" blocker="${BASH_REMATCH[3]}"
+  local state id new_title url new dep_note="" today
+  [ "$blocker" != "$issue" ] || return 0
+  read -r state id < <(gh api "repos/$repo/issues/$blocker" \
+    --jq 'if .pull_request then "pr" else "\(.state) \(.id)" end' 2>/dev/null)
+  [ "${state:-}" = open ] || return 0
+  comments_carry '<!-- archon-settle-split: ' && return 0
+
+  new_title=$waits
+  [ "${#new_title}" -gt 100 ] && new_title="${new_title:0:99}…"
+  url=$(gh issue create --repo "$repo" --title "$new_title" --body "Split from #$issue by the factory (#270): ${waits}
+
+**Blocked on:** #$blocker. It runs once #$blocker closes.
+
+#$issue keeps the rest of its outcome: ${keeps}. Its body holds the why, invariants and acceptance this part shares.
+
+<!-- archon-split-from: $issue -->
+<!-- lachesis:automated -->" 2>/dev/null) || return 0
+  new=${url##*/}
+  [[ "$new" =~ ^[0-9]+$ ]] || return 0
+
+  # Each pickup reads its own record: Lachesis next_issue its dependencies,
+  # the label queue GitHub's native blocked_by links.
+  if lachesis_pickup_enabled; then
+    lachesis_depend "$project" "$new" "$blocker"
+  else
+    [[ "${id:-}" =~ ^[0-9]+$ ]] && gh api --method POST "repos/$repo/issues/$new/dependencies/blocked_by" \
+      -F issue_id="$id" >/dev/null 2>&1
+  fi || dep_note=" The dependency of #$new on #$blocker could not be recorded; its body names it."
+
+  today=$(date +%F)
+  gh issue comment "$issue" --repo "$repo" --body "**Scope (factory split, ${today}):** #$issue now covers only: ${keeps}. The part that waits on #$blocker — ${waits} — moved to #$new, blocked on #$blocker.
+
+Decided by the factory without asking (#270): it splits off a part blocked on another issue instead of asking the owner.${dep_note} Released to run again for the part it keeps. Run log: \`${run_log}\`
+
+<!-- archon-settle-split: $new -->
+<!-- lachesis:automated -->" >/dev/null 2>&1 \
+    || echo "$(date -Is) [issue-pickup] $project: #$issue — split off #$new, but could not comment the split"
+  if ! release_for_rerun; then
+    echo "$(date -Is) [issue-pickup] $project: #$issue — split off #$new, but could not release to run again"
+    exit 1
+  fi
+  lachesis_pickup_enabled && ! lachesis_note "$project" "$issue" \
+      "Split \"${waits}\" off #$issue into #$new, blocked on #$blocker; #$issue runs again for \"${keeps}\". Taken without asking (#270)." \
+    && echo "$(date -Is) [issue-pickup] $project: #$issue — could not record the note in Lachesis"
+  echo "$(date -Is) [issue-pickup] $project: #$issue split: \"${waits}\" moved to #$new (waits on #$blocker)"
+  exit 0
+}
+
+# A stop on where the change should land: here or in a shared repository.
+LAND_HERE_RE='(whether|where) to land|land(ing)? it (there|here|locally|upstream)|project-local (override|change)|(shared|separate|upstream) [A-Za-z0-9/._ -]{0,40}(repo|repository|pack)'
+# A ref to another repository's issue: a real dependency on its work.
+CROSS_REPO_REF_RE='[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+'
+
+# settle_land_here — answers a stop on where to land the change with "land it
+# here", releases the issue to run again with that as direction and exits 0.
+# Returns when the verdict is not such a stop or it was answered before. The
+# release comes first, so one that fails posts nothing and a re-settle retries.
+settle_land_here() {
+  case "$verdict" in
+    "Not done: blocked on "*|"Not done: planning stopped on calls only a person can make"*) ;;
+    *) return 0 ;;
+  esac
+  grep -qiE "$LAND_HERE_RE" <<<"$verdict_block" || return 0
+  grep -qE "$CROSS_REPO_REF_RE" <<<"$verdict_block" && return 0
+  comments_carry '<!-- archon-settle-land-here -->' && return 0
+  if ! release_for_rerun; then
+    echo "$(date -Is) [issue-pickup] $project: #$issue — could not release to run again"
+    exit 1
+  fi
+  gh issue comment "$issue" --repo "$repo" --body "archon-ship finished without a PR: ${verdict}
+
+**Decision (factory, $(date +%F)): land it here.** The change lands in $repo, the repository this run works in (as a project-local override or change), and the shared repository the verdict names stays unchanged. Decided without asking (#270, the owner's #259 precedent).
+Released to run again with this as direction. ${requeue_note} Run log: \`${run_log}\`
+
+<!-- archon-settle-land-here -->
+<!-- lachesis:automated -->" >/dev/null 2>&1 \
+    || echo "$(date -Is) [issue-pickup] $project: #$issue — released, but could not comment the land-here decision"
+  lachesis_pickup_enabled && ! lachesis_note "$project" "$issue" \
+      "Land #$issue in $repo, not in a shared repository; released to run again. Taken without asking (#270). The run's verdict: ${verdict:0:300}" \
+    && echo "$(date -Is) [issue-pickup] $project: #$issue — could not record the note in Lachesis"
+  echo "$(date -Is) [issue-pickup] $project: #$issue — decided to land it here; released to run again"
+  exit 0
+}
+
+if [ "$health_filed" = 0 ] && [ "$tier" != 3 ]; then
+  settle_split
+  settle_land_here
+fi
+
 stale_note=""
 [ "$health_filed" = 0 ] && [ "$defers" = 1 ] && [ "${#refs[@]}" -gt 0 ] && release_if_stale
 
@@ -467,9 +604,7 @@ suggested_action() {
 # settle_marked <action> — true when <action> was already taken or offered on
 # the issue, or when its comments cannot be read.
 settle_marked() {
-  local bodies
-  bodies=$(gh api --paginate "repos/$repo/issues/$issue/comments" --jq '.[].body' 2>/dev/null) || return 0
-  grep -qE "<!-- archon-settle-(act|default): $1 -->" <<<"$bodies"
+  comments_carry "<!-- archon-settle-(act|default): $1 -->"
 }
 
 # default_text <action> — the action as a question's answer.
@@ -559,8 +694,6 @@ action=wait tier_log=""
 ask_defaults=()
 if lachesis_pickup_enabled; then
   settle_resume_act
-  tier=$(severity_tier "$declared_tier" "$verdict_block"$'\n'"$title")
-  [ "$health_filed" = 1 ] && tier=3
   [ "$tier" = 3 ] || action=$(suggested_action)
   [ "$action" != wait ] && settle_marked "$action" && action="wait"
   [ "$action" != wait ] && [ "$tier" = 1 ] && ! settle_act "$action" && action="wait"
