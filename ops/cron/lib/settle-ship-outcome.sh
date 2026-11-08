@@ -44,6 +44,16 @@
 # open alert with the same title, or when the owner decided (#259); otherwise
 # they are parked for a human.
 #
+# Two more closes need no person (#259), each confirmed on GitHub, labelled
+# factory-closed and quoting its evidence, and closed as not planned: the
+# owner's newest comment of their own (not one the factory posted under their
+# token) tells the factory to close it, even on a health-filed issue, since
+# the owner decided it; or the verdict calls the issue a false positive and
+# names a closed issue under the same title stem whose thread has the owner
+# confirming that false positive, never on a health-filed issue. An issue
+# that is already closed (pipeline-health closes the deploy issues it filed
+# once they recover) is not settled at all.
+#
 # With Lachesis pickup on, what none of that settles is sorted by severity tier
 # (lib/severity.sh, #237): the verdict's suggested action (close, record its
 # blocker as a dependency, run it again) is taken at once on tier 1, offered as
@@ -126,7 +136,7 @@ repo="alexsiri7/$project"
 # own after the label is ensured: a label the repo lacks would fail the whole
 # archon:done edit. close_detail, when set, is the evidence paragraph a
 # reason close (#259) adds to the comment.
-act_marker="" act_note="" close_detail=""
+act_marker="" act_note="" close_detail="" close_extra_label=""
 close_as_done() {
   local evidence="$1"; shift
   fc_ensure_label "$repo"
@@ -145,7 +155,8 @@ $act_marker}
     return 1
   }
   gh issue edit "$issue" --repo "$repo" \
-    --remove-label "$from_label" --add-label "archon:done" >/dev/null 2>&1 \
+    --remove-label "$from_label" --add-label "archon:done" \
+    ${close_extra_label:+--add-label "$close_extra_label"} >/dev/null 2>&1 \
     || echo "$(date -Is) [issue-pickup] $project: #$issue — closed, but could not relabel archon:done"
   gh issue edit "$issue" --repo "$repo" --add-label "$FACTORY_CLOSED_LABEL" >/dev/null 2>&1 \
     || echo "$(date -Is) [issue-pickup] $project: #$issue — closed, but could not add $FACTORY_CLOSED_LABEL"
@@ -255,12 +266,16 @@ defers=0
 # closes nothing).
 health_filed=1
 title="" body="" view_ok=0
-if view=$(gh issue view "$issue" --repo "$repo" --json title,body 2>/dev/null) \
+if view=$(gh issue view "$issue" --repo "$repo" --json title,body,state,comments 2>/dev/null) \
     && body=$(jq -r '.body // ""' <<<"$view" 2>/dev/null); then
   view_ok=1
   title=$(jq -r '.title // ""' <<<"$view")
   # shellcheck disable=SC2016  # the backticks are issue markdown, not shell
   [[ "$body" == *'Auto-filed by `pipeline-health-cron.sh`'* ]] || health_filed=0
+  if [ "$(jq -r '.state // "OPEN"' <<<"$view")" = CLOSED ]; then
+    echo "$(date -Is) [issue-pickup] $project: #$issue — already closed, nothing to settle (${verdict:0:120})"
+    exit 0
+  fi
 fi
 closed_refs=""
 sub_open=""
@@ -419,6 +434,100 @@ fi
 
 # shellcheck source=lib/lachesis.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lachesis.sh"
+
+# ── Closes without asking (#259) ───────────────────────────────────────────
+
+# owner_comments — the owner's comments in the `gh issue view --json comments`
+# JSON on stdin, oldest first, one JSON {url, body, close} per line: those the
+# owner wrote, and (close: true) the factory's settle closes, after which an
+# earlier owner comment is spent (the close comment invites a reopen to run
+# the issue again). The factory posts under the owner's token, so its other
+# comments are told apart by their markers and dropped.
+owner_comments() {
+  # shellcheck source=lib/trust.sh
+  source "$(dirname "${BASH_SOURCE[0]}")/trust.sh"
+  jq -c --arg owner "${TRUST_OWNER,,}" '.comments // [] | .[]
+    | select((.author.login // "" | ascii_downcase) == $owner)
+    | (.body // "") as $b
+    | ($b | startswith("archon-ship finished without a PR: ") and contains("\n\nClosed as archon:done: ")) as $close
+    | select($close or ($b | contains("<!-- lachesis:automated -->") or contains("<!-- archon-")
+                         or startswith("archon-ship finished") or startswith("Automated screening:") | not))
+    | {url, body: $b, close: $close}'
+}
+
+# close_directive <text> — true when some sentence of <text> is an
+# unconditional "close" ("Close it.", "Yes, close it as a duplicate of #5."),
+# not a question, a condition ("Close it once #12 lands.") or a refusal.
+close_directive() {
+  printf '%s\n' "$1" | sed -E 's/([.!?;])([[:space:]]|$)/\1\n/g' \
+    | sed -E 's/^[[:space:]>*_-]+//' \
+    | grep -vE '[?][[:space:]]*$' \
+    | grep -iE '^((please|ok|okay|yes|so|just|then),?[[:space:]]+)*close([[:space:]]|[.!,:;]|$)' \
+    | grep -viqE '\b(if|once|when|after|until|unless|before|but|do not|don.?t|never|later)\b'
+}
+
+# title_stem <title> — the title before its first " — ", trimmed and
+# lowercased: what issues one check files about one subject share
+# ("Scraper check: four-corners — …").
+title_stem() {
+  local s="${1%% — *}"
+  s="${s#"${s%%[![:space:]]*}"}" s="${s%"${s##*[![:space:]]}"}"
+  echo "${s,,}"
+}
+
+# close_without_asking <evidence> <quote> — closes as not planned, labelled
+# factory-closed, quoting the owner's comment the evidence names. Returns 1
+# when the close failed, so the caller parks as before.
+close_without_asking() {
+  local quote="${2//[$'\r\n']/ }"
+  close_extra_label=factory-closed
+  lachesis_pickup_enabled && act_note="Closed without asking (#259): $1."
+  close_as_done "$1: \"${quote:0:300}\"" --reason "not planned"
+  close_extra_label="" act_note=""
+  return 1
+}
+
+# close_if_owner_decided — closes when the owner's newest comment of their own,
+# since any earlier settle close, tells the factory to close the issue.
+close_if_owner_decided() {
+  local last
+  last=$(owner_comments <<<"$view" \
+    | jq -sc 'reduce .[] as $c ([]; if $c.close then [] else . + [$c] end) | last // empty') || return
+  [ -n "$last" ] && close_directive "$(jq -r .body <<<"$last")" || return
+  close_without_asking "the owner already decided in $(jq -r .url <<<"$last")" "$(jq -r .body <<<"$last")"
+}
+
+# close_if_false_positive_precedent — closes a verdict calling the issue a
+# false positive when one of its refs is a closed issue with the same title
+# stem on which the owner confirmed that false positive.
+close_if_false_positive_precedent() {
+  local ref ref_view hit stem
+  [ "$health_filed" = 0 ] || return
+  case "$verdict" in
+    "No delivery needed: "*|"Not done: blocked on "*|"No work owed in this repository: "*) ;;
+    *) return ;;
+  esac
+  grep -qiE 'false[ -]positive' <<<"$verdict_block" || return
+  stem=$(title_stem "$title")
+  for ref in "${refs[@]}"; do
+    # issue view answers for a PR number too; its url tells them apart.
+    ref_view=$(gh issue view "$ref" --repo "$repo" --json url,state,title,comments 2>/dev/null \
+      | jq -c 'select(.state == "CLOSED" and (.url | contains("/issues/")))' 2>/dev/null)
+    [ -n "$ref_view" ] && [ "$(title_stem "$(jq -r '.title // ""' <<<"$ref_view")")" = "$stem" ] || continue
+    hit=$(owner_comments <<<"$ref_view" \
+      | jq -sc 'map(select((.close | not) and (.body | test("false[ -]positive"; "i")))) | first // empty')
+    [ -n "$hit" ] || continue
+    close_without_asking "a false positive the owner already confirmed on #$ref ($(jq -r .url <<<"$hit"))" \
+      "$(jq -r .body <<<"$hit")"
+    return
+  done
+}
+
+if [ "$view_ok" = 1 ]; then
+  close_if_owner_decided
+  close_if_false_positive_precedent
+fi
+
 stale_note=""
 [ "$health_filed" = 0 ] && [ "$defers" = 1 ] && [ "${#refs[@]}" -gt 0 ] && release_if_stale
 

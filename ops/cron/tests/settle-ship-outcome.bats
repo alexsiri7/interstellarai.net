@@ -13,8 +13,11 @@ setup() {
     # Stub gh: records argv, answers sub_issues with what its --jq would print,
     # "<total>\t<open>" (absent = no sub-issues), and runs the script's own --jq
     # over the ref-<N> GitHub JSON for a single issue or PR (see ref()).
-    # `issue view` prints {title, body} from the title-<issue> and body-<issue>
-    # fixtures (default: an ordinary issue), or fails with GH_VIEW_RC. The deferral checks (#211) read state-<N>
+    # `issue view` prints {title, body, state, url, comments} from the
+    # title-<n>, body-<n>, viewstate-<n> and thread-<n> fixtures (default: an
+    # ordinary open issue with no comments), or fails with GH_VIEW_RC; thread-<n>
+    # is gh's comments array ({author: {login}, url, body}), and kind-<n> "pull"
+    # makes the url a PR's. The deferral checks (#211) read state-<N>
     # ("issue|pr<TAB>open|closed") and pull-<N> ("<state><TAB><merged><TAB>
     # <cross><TAB><login>"); gone-<N> makes both answer 404; comments-<N>
     # is the issue's one comment body, which the script's --jq reads, and
@@ -60,7 +63,10 @@ case "$*" in
     n=$(sed -E 's/^issue view ([0-9]+).*/\1/' <<<"$*")
     jq -n --arg t "$(cat "$GH_FIXTURES/title-$n" 2>/dev/null || echo 'An ordinary issue')" \
       --arg b "$(cat "$GH_FIXTURES/body-$n" 2>/dev/null || echo 'An ordinary issue.')" \
-      '{title: $t, body: $b}' ;;
+      --arg s "$(cat "$GH_FIXTURES/viewstate-$n" 2>/dev/null || echo OPEN)" \
+      --arg u "https://github.com/alexsiri7/testproj/$(cat "$GH_FIXTURES/kind-$n" 2>/dev/null || echo issues)/$n" \
+      --argjson c "$(cat "$GH_FIXTURES/thread-$n" 2>/dev/null || echo '[]')" \
+      '{title: $t, body: $b, state: $s, url: $u, comments: $c}' ;;
   *"issue close"*)    exit "${GH_CLOSE_RC:-0}" ;;
   *"issue edit"*)     exit "${GH_EDIT_RC:-0}" ;;
   *"issue comment"*)  exit "${GH_COMMENT_RC:-0}" ;;
@@ -1338,7 +1344,7 @@ tier_outcome() {
     run "$SCRIPT" testproj 9 "$RUN_LOG"
     [ "$status" -eq 0 ]
     assert_parked 9
-    [ "$(gh_calls 'comments')" -eq 0 ]
+    [ "$(gh_calls '/comments')" -eq 0 ]
     [[ "$output" != *"tier"* ]]
 }
 
@@ -1701,4 +1707,164 @@ LOG
     cd "$(dirname "$SCRIPT")/.."
     run shellcheck -x lib/factory-close.sh
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+# ── Closes without asking (#259) ─────────────────────────────────────────────
+
+# thread <n> <login> <body> [<login> <body> ...]: #<n>'s comments, oldest
+# first, as gh issue view --json comments answers them.
+thread() {
+    local n="$1"; shift
+    jq -n --arg n "$n" '[$ARGS.positional | _nwise(2)] | to_entries
+        | map({author: {login: .value[0]}, body: .value[1],
+               url: "https://github.com/alexsiri7/testproj/issues/\($n)#issuecomment-\(.key + 1)"})' \
+        --args "$@" > "$T/fixtures/thread-$n"
+}
+
+# What Lachesis posted on lachesis#407 under the owner's token: it reads as a
+# close directive, so only its marker keeps it from counting as the owner's.
+FACTORY_QUESTION='archon-ship finished on #9 without a PR, and GitHub does not confirm that nothing is needed. Close the issue, or answer this question to let the factory run it again.
+
+<!-- lachesis:automated -->'
+OWNER_DECISION="Out of this repo's scope. Close it and point to interstellarai.net (the pipeline-health deploy-alert dedup), which already covers it. No Lachesis change is needed."
+decided_verdict() { printf 'Not done: blocked on The maintainer (alexsiri7, OWNER) already decided in the thread that this issue is out of scope and should be closed.\nReport: /x\n' > "$RUN_LOG"; }
+
+assert_closed_without_asking() {
+    grep -q -- "issue close $1 --repo alexsiri7/testproj --reason not planned --comment" "$GH_ARGV"
+    grep -q -- "issue edit $1 --repo alexsiri7/testproj --remove-label archon:in-progress --add-label archon:done --add-label factory-closed" "$GH_ARGV"
+    [ "$(gh_calls 'archon:skipped')" -eq 0 ]
+}
+
+# lachesis#407: the owner said to close it, and the next run's verdict knew,
+# yet settle asked again.
+@test "the owner's newest comment telling the factory to close closes, quoting it, asking nothing" {
+    lachesis_on
+    decided_verdict
+    thread 9 alexsiri7 "$FACTORY_QUESTION" alexsiri7 "$OWNER_DECISION"
+
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_closed_without_asking 9
+    grep -q -- "Closed as archon:done: the owner already decided in https://github.com/alexsiri7/testproj/issues/9#issuecomment-2: \"Out of this repo's scope. Close it and point to" "$GH_ARGV"
+    [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 0 ]
+    sed -n 's/^add_note //p' "$LACHESIS_ARGV" | jq -e '.text | startswith("Closed without asking (#259): the owner already decided in https://github.com/alexsiri7/testproj/issues/9#issuecomment-2")'
+}
+
+@test "the owner's close decision closes a health-filed issue too" {
+    decided_verdict
+    fixture body-9 'Auto-filed by `pipeline-health-cron.sh`.'
+    thread 9 alexsiri7 "Yes, close it."
+
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_closed_without_asking 9
+}
+
+@test "no close decision of the owner's own still goes to the owner" {
+    local variant
+    lachesis_on
+    decided_verdict
+    for variant in factory-question conditional refusal question superseded spent other-author; do
+        : > "$GH_ARGV"; : > "$LACHESIS_ARGV"
+        case "$variant" in
+            factory-question) thread 9 alexsiri7 "$FACTORY_QUESTION" ;;
+            conditional) thread 9 alexsiri7 "Close it once #12 lands." ;;
+            refusal) thread 9 alexsiri7 "Don't close this; the crash still reproduces." ;;
+            question) thread 9 alexsiri7 "Close it? Not sure yet." ;;
+            superseded) thread 9 alexsiri7 "Close it." alexsiri7 "Still seeing this on Android." ;;
+            # Reopened after an earlier settle closed it on this decision.
+            spent) thread 9 alexsiri7 "Close it." alexsiri7 "archon-ship finished without a PR: No delivery needed: x
+
+Closed as archon:done: already fixed by merged PR #5. Reopen and add archon:queued to run it again.
+
+<!-- lachesis:automated -->" ;;
+            other-author) thread 9 someone-else "Close it." ;;
+        esac
+
+        run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+        [ "$status" -eq 0 ] || { echo "variant: $variant"; return 1; }
+        assert_parked 9 || { echo "variant: $variant"; return 1; }
+        grep -q '^ask_question ' "$LACHESIS_ARGV" || { echo "variant: $variant"; return 1; }
+    done
+}
+
+@test "a close decision whose close fails parks as before" {
+    decided_verdict
+    thread 9 alexsiri7 "Close it."
+    export GH_CLOSE_RC=1
+
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    grep -q -- "issue edit 9 --repo alexsiri7/testproj --remove-label archon:in-progress --add-label archon:skipped" "$GH_ARGV"
+    [ "$(gh_calls 'factory-closed')" -eq 0 ]
+}
+
+# musenmingle#399: its verdict cited #242 and #334, and on #334 the owner had
+# confirmed the same false positive.
+SCRAPER_VERDICT='No delivery needed: false positive — the same four-corners listing gap as precedent #242 and #334, which the owner confirmed as a false positive. Full evidence in triage.md.
+Report: /x'
+scraper_precedents() {
+    printf '%s\n' "$SCRAPER_VERDICT" > "$RUN_LOG"
+    fixture title-399 'Scraper check: four-corners — 3 events missing from the listing'
+    ref 242 closed-issue; ref 334 closed-issue
+    fixture title-242 'Scraper check: four-corners — 2 events missing from the listing'
+    fixture viewstate-242 CLOSED
+    thread 242 alexsiri7 'archon-ship finished without a PR: No delivery needed: a false positive.'
+    fixture title-334 'Scraper check: Four-Corners — 1 event missing from the listing'
+    fixture viewstate-334 CLOSED
+    thread 334 alexsiri7 "False positive: Camera-works is a course, not an event, so the listing rightly leaves it out."
+}
+
+@test "a false positive the owner confirmed on a closed same-stem issue it names closes, citing it" {
+    scraper_precedents
+
+    run "$SCRIPT" testproj 399 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_closed_without_asking 399
+    grep -q -- 'Closed as archon:done: a false positive the owner already confirmed on #334 (https://github.com/alexsiri7/testproj/issues/334#issuecomment-1): "False positive: Camera-works is a course' "$GH_ARGV"
+}
+
+@test "a false positive with no owner-confirmed same-stem precedent still goes to the owner" {
+    local variant
+    lachesis_on
+    for variant in unconfirmed other-stem open pr health-filed; do
+        rm -f "$T"/fixtures/*; : > "$GH_ARGV"; : > "$LACHESIS_ARGV"
+        scraper_precedents
+        case "$variant" in
+            unconfirmed) thread 334 alexsiri7 'Agreed: false positive.
+
+<!-- lachesis:automated -->' ;;
+            other-stem) fixture title-334 'Scraper check: kino-lounge — 1 event missing from the listing' ;;
+            open) fixture viewstate-334 OPEN ;;
+            pr) fixture kind-334 pull ;;
+            health-filed) fixture body-399 'Auto-filed by `pipeline-health-cron.sh`.' ;;
+        esac
+
+        run "$SCRIPT" testproj 399 "$RUN_LOG"
+
+        [ "$status" -eq 0 ] || { echo "variant: $variant"; return 1; }
+        assert_parked 399 || { echo "variant: $variant"; return 1; }
+        grep -q '^ask_question ' "$LACHESIS_ARGV" || { echo "variant: $variant"; return 1; }
+    done
+}
+
+@test "an issue already closed is not settled" {
+    lachesis_on
+    decided_verdict
+    fixture viewstate-9 CLOSED
+    thread 9 alexsiri7 "Close it."
+
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    [ "$(gh_calls 'issue close')" -eq 0 ]
+    [ "$(gh_calls 'issue edit')" -eq 0 ]
+    [ "$(gh_calls 'issue comment')" -eq 0 ]
+    [ ! -s "$LACHESIS_ARGV" ]
+    [[ "$output" == *"#9 — already closed, nothing to settle"* ]]
 }
