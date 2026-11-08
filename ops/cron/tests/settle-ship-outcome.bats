@@ -23,7 +23,8 @@ setup() {
     # deps-<sha> (deployments) with depstate-<id> (its latest state), and
     # file-<path with / as _> (a file that exists). GH_COMMENT_RC fails `issue comment`.
     # `issue create` prints issue GH_CREATE_NUM's URL (default 99), or fails
-    # with GH_CREATE_RC; GH_DEP_RC fails the native blocked_by POST.
+    # with GH_CREATE_RC; GH_DEP_RC fails the native blocked_by POST. `issue list`
+    # prints the issue-list fixture (default: none).
     cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_ARGV"
@@ -58,6 +59,7 @@ case "$*" in
     cat "$GH_FIXTURES/state-${2##*/}" 2>/dev/null || exit 1 ;;
   "api --method POST "*/dependencies/blocked_by*) exit "${GH_DEP_RC:-0}" ;;
   "api "*/issues/*)   [ "$3" = --jq ] && jq -r "$4" "$GH_FIXTURES/ref-${2##*/}" 2>/dev/null ;;
+  *"issue list"*)     cat "$GH_FIXTURES/issue-list" 2>/dev/null || echo '[]' ;;
   *"issue create"*)
     [ -n "${GH_CREATE_RC:-}" ] && exit "$GH_CREATE_RC"
     echo "https://github.com/alexsiri7/testproj/issues/${GH_CREATE_NUM:-99}" ;;
@@ -1860,9 +1862,11 @@ assert_landed_here() {
     [[ "$output" == *"#259 — decided to land it here; released to run again"* ]]
 }
 
+# #212 is closed, as on GitHub: the #259 precedent close must not take this stop.
 @test "local-landing choice, pickup on: the real #259 stop is answered land it here and runs again, asking nothing" {
     lachesis_on
     land_here_verdict
+    ref 212 closed-issue
 
     run "$SCRIPT" testproj 259 "$RUN_LOG"
 
@@ -1876,6 +1880,7 @@ assert_landed_here() {
 @test "local-landing choice, pickup off: re-queued with the decision as direction" {
     export LACHESIS_CALL_CMD="$T/no-such-lachesis"
     land_here_verdict
+    ref 212 closed-issue
 
     run "$SCRIPT" testproj 259 "$RUN_LOG"
 
@@ -1884,13 +1889,14 @@ assert_landed_here() {
     grep -q -- "Re-queued as archon:queued" "$GH_ARGV"
 }
 
-@test "land-here not taken: decided before, a cross-repo blocker, or a decided No delivery needed takes today's path" {
+@test "land-here not taken: decided before, a cross-repo blocker, tier 3, or a decided No delivery needed takes today's path" {
     lachesis_on
-    for case in marker cross-repo no-delivery-needed; do
+    for case in marker cross-repo tier3 no-delivery-needed; do
         : > "$GH_ARGV"; : > "$LACHESIS_ARGV"; rm -f "$T/fixtures/"*
         land_here_verdict
         case "$case" in
             marker) fixture comments-259 '<!-- archon-settle-land-here -->' ;;
+            tier3) sed -i 's/closure logic/billing logic/' "$RUN_LOG" ;;
             cross-repo) sed -i 's/precedent issue #212/alexsiri7\/lachesis#301/' "$RUN_LOG" ;;
             no-delivery-needed) sed -i '1s/^Not done: blocked on /No delivery needed: /' "$RUN_LOG" ;;
         esac
@@ -1911,4 +1917,70 @@ assert_landed_here() {
 
     [ "$status" -eq 1 ]
     [ "$(gh_calls 'issue comment')" -eq 0 ]
+}
+
+@test "local-landing choice from plan: a planning stop on where to land is answered land it here" {
+    lachesis_on
+    printf '%s\n' '{"delivered":false,"reason":"blocked","pr_url":"","summary":"Not done: planning stopped on calls only a person can make. The triage policy lives in the shared SDLC pack.\n- Land it here as a project-local override, or upstream in alexsiri7/Archon?\nReport: /x/plan.md"}' > "$RUN_LOG"
+
+    run "$SCRIPT" testproj 259 "$RUN_LOG"
+
+    assert_landed_here
+    assert_released 259
+    [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 0 ]
+}
+
+# A same-repo block that only mentions a shared pack is no stop on where to land.
+@test "land-here not taken: a block on an open issue here that mentions a shared pack" {
+    lachesis_on
+    printf 'Not done: blocked on #45, which changes the shared deploy pack first.\nReport: /x\n' > "$RUN_LOG"
+    ref 45 open-issue
+
+    run "$SCRIPT" testproj 259 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    [ "$(gh_calls 'archon-settle-land-here')" -eq 0 ]
+    assert_parked 259
+}
+
+@test "split whose release failed is released by the next settle of the same run, not split again" {
+    lachesis_on
+    split_verdict
+    ref 246 open-issue
+    fixture comments-9 "Released to run again for the part it keeps. Run log: \`/elsewhere/run.log\`
+
+<!-- archon-settle-split: 99 -->"
+
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    [ "$(gh_calls 'issue create')" -eq 0 ]
+    [ "$(gh_calls 'issue comment')" -eq 0 ]
+    assert_released 9
+    [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 0 ]
+    [[ "$output" == *"#9 — split already taken by this run; released to run again"* ]]
+}
+
+@test "split whose comment fails releases nothing; the next settle reuses the issue it filed" {
+    lachesis_on
+    split_verdict
+    ref 246 open-issue
+
+    GH_COMMENT_RC=1 run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    [ "$status" -eq 1 ]
+    [ "$(gh_calls 'issue create')" -eq 1 ]
+    [ "$(gh_calls 'issue edit')" -eq 0 ]
+
+    : > "$GH_ARGV"; : > "$LACHESIS_ARGV"
+    fixture issue-list '[{"number":99,"body":"Split from #9 by the factory (#270)\n\n<!-- archon-split-from: 9 -->"}]'
+
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    [ "$(gh_calls 'issue create')" -eq 0 ]
+    [ "$(grep -c '^add_dependency' "$LACHESIS_ARGV")" -eq 0 ]
+    grep -q -- "moved to #99, blocked on #246" "$GH_ARGV"
+    grep -qx -- "<!-- archon-settle-split: 99 -->" "$GH_ARGV"
+    assert_released 9
 }
