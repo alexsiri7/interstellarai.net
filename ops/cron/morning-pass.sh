@@ -185,16 +185,28 @@ snap_fuel() {
 }
 
 # The reference crontab's job lines that the live crontab lacks, verbatim.
+# A job the live crontab has in another form (commented out, another schedule
+# or redirect: its command and arguments, from field 6 or after an @keyword up
+# to the first redirect, appear in a live line) is a "variant present", which the session must never add.
 snap_crontab() {
-  local live
+  local live line cmd variant missing="" variants=""
   if ! live=$(crontab -l 2>&1); then echo "crontab -l failed: $live"; return; fi
   echo "reference: $REPO/ops/cron/crontab"
-  local missing
-  missing=$(grep -vE '^[[:space:]]*(#|$)' "$REPO/ops/cron/crontab" | while IFS= read -r line; do
-    grep -qxF -- "$line" <<<"$live" || printf '%s\n' "$line"
-  done)
-  if [ -n "$missing" ]; then echo "missing from the live crontab:"; printf '%s\n' "$missing"
+  while IFS= read -r line; do
+    grep -qxF -- "$line" <<<"$live" && continue
+    if [[ "$line" == @* ]]; then cmd=$(tr -s ' \t' ' ' <<<"$line" | cut -d' ' -f2-)
+    else cmd=$(tr -s ' \t' ' ' <<<"$line" | cut -d' ' -f6-); fi
+    cmd=$(sed -E 's/[[:space:]]*(>>|>|2>&1).*$//' <<<"$cmd")
+    variant=$(grep -F -- "$cmd" <<<"$live" | head -n 1)
+    if [ -n "$cmd" ] && [ -n "$variant" ]; then
+      variants+="variant present: live has \"$variant\" for reference \"$line\" — do not add"$'\n'
+    else
+      missing+="$line"$'\n'
+    fi
+  done < <(grep -vE '^[[:space:]]*(#|$)' "$REPO/ops/cron/crontab")
+  if [ -n "$missing" ]; then printf 'missing from the live crontab:\n%s' "$missing"
   else echo "missing from the live crontab: none"; fi
+  [ -z "$variants" ] || printf '%s' "$variants"
 }
 
 snap_pickup() {
@@ -238,7 +250,9 @@ run_remote() {
   printf -v cmd 'cd %q && exec env -u CLAUDECODE CLAUDECODE=0 TERM=xterm-256color timeout --foreground %q claude --remote-control %q --permission-mode bypassPermissions --model %q %q' \
     "$MORNING_PASS_CWD" "$MORNING_PASS_KEEP_SECONDS" "Morning pass $(date +%F)" "$MORNING_PASS_MODEL" \
     "Read $1/prompt.md and follow it exactly."
-  if ! env -u CLAUDECODE -u TMUX tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 200 -y 50 "$cmd"; then
+  # 9>&-: the tmux server must not inherit the lock, or a kept-open session
+  # would hold it for hours.
+  if ! env -u CLAUDECODE -u TMUX tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 200 -y 50 "$cmd" 9>&-; then
     log "tmux new-session failed — falling back to claude -p"; return 1
   fi
   while [ "$waited" -lt "$MORNING_PASS_URL_WAIT" ]; do

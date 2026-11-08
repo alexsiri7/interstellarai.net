@@ -144,6 +144,21 @@ teardown() {
     [ ! -d "$MORNING_PASS_STATE/runs" ]
 }
 
+@test "a job the live crontab has commented out or rescheduled is a variant, never missing" {
+    printf '*/15 * * * * /x/pr-maintenance-cron.sh >> /l/pr-maintenance.log 2>&1\n*/30 * * * * /x/pipeline-health-cron.sh >> /l/ph.log 2>&1\n0 5 * * 0 /x/pipeline-health-cron.sh --trim >> /l/ph.log 2>&1\n' >> "$T/live/ops/cron/crontab"
+    printf '#*/15 * * * * /x/pr-maintenance-cron.sh >> /l/pr-maintenance.log 2>&1\n*/20 * * * * /x/pipeline-health-cron.sh >> /l/ph.log 2>&1\n' >> "$T/live-crontab"
+    run "$SCRIPT" --dry-run
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    snap=$(sed -n '/^### crontab: reference vs live/,/^### /p' <<<"$output")
+    [[ "$snap" == *'variant present: live has "#*/15 * * * * /x/pr-maintenance-cron.sh'*'— do not add'* ]]
+    [[ "$snap" == *'variant present: live has "*/20 * * * * /x/pipeline-health-cron.sh'* ]]
+    missing=$(sed -n '/^missing from the live crontab:/,/^variant present/{/^variant present/!p;}' <<<"$snap")
+    [[ "$missing" == *"30 7 * * * /x/morning-pass.sh"* ]]
+    [[ "$missing" == *"0 5 * * 0 /x/pipeline-health-cron.sh --trim"* ]]   # --trim is its own job
+    [[ "$missing" != *"pr-maintenance-cron.sh"* ]]
+    [[ "$missing" != *"*/30 * * * * /x/pipeline-health-cron.sh"* ]]
+}
+
 @test "the snapshot is fenced with a fresh nonce that untrusted text cannot close" {
     run "$SCRIPT" --dry-run
     [ "$status" -eq 0 ]

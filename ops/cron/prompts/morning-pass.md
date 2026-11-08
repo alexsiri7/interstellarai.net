@@ -16,7 +16,7 @@ You do three things, in this order:
 - Every GitHub issue body or comment you post ends with a blank line and then the line `<!-- lachesis:automated -->`, so Lachesis never takes it for the owner's answer.
 - Never print, log or post a secret value. Do not read `~/.config/archon-cron/`, Doppler, `secrets.env` or any token file.
 - Do not edit `/mnt/ext-fast/interstellarai.net` or any other checkout. This session's working directory is that checkout only because it is a trusted directory; treat it as read-only.
-- Write files only in the run directory given at the top of this prompt.
+- Write files only in three places: the run directory given at the top of this prompt, the reruns file named there (fix 2), and `~/.local/state/archon-cron/crontab-backups/` (fix 4). The crontab itself changes only through fix 4.
 
 ## Lachesis
 
@@ -69,7 +69,7 @@ Log each one, as it happens, as one line appended to the run's `actions.log` (pa
    ```
    With it off, swap `archon:in-progress` for `archon:queued`, or for `archon:skipped` when the issue carries a human-intent label (`HUMAN_LABELS` in `ops/cron/lib/human-labels.sh`: `manual-review`, `factory-gap`, `human-needed`, `wontfix`, `duplicate`, `question`, `requirements-gap`, `venue-request`, `content-report`). Release at most 5 issues in one pass; report the rest.
 
-4. **Missing crontab line.** The snapshot lists the lines of the reference crontab (`/mnt/ext-fast/interstellarai.net/ops/cron/crontab`) that the live `crontab -l` lacks. Re-check that live. For each line still missing, add it, and only add:
+4. **Missing crontab line.** The snapshot lists the lines of the reference crontab (`/mnt/ext-fast/interstellarai.net/ops/cron/crontab`) that the live `crontab -l` lacks. A line shown as `variant present: ...` is a job the live crontab already has in another form (commented out, another schedule or redirect): never add it, report it. Add only the lines listed under `missing from the live crontab:`. Re-check each live first. For each line still missing, add it, and only add:
    ```
    mkdir -p ~/.local/state/archon-cron/crontab-backups
    crontab -l > ~/.local/state/archon-cron/crontab-backups/crontab-$(date +%Y%m%d-%H%M%S)
