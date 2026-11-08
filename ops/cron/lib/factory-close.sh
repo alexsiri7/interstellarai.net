@@ -180,13 +180,18 @@ fc_spec_paths() {
 # fc_feedback_text <title> <body> — echoes the sender's note when the issue is
 # in-app feedback (workers/feedback: title "Bug: …"/"Feature: …", or the
 # **App version:** context block) whose note is short and names no defect.
+# The note is a stranger's text going into a comment under the owner's token,
+# so it is echoed through screening's restatement charset (lib/screen.sh): no
+# #refs, @mentions, links, backticks, markup or HTML comments survive.
 fc_feedback_text() {
   local title="$1" body="$2" note
   [[ "$title" =~ ^(Bug|Feature):\  || "$body" == *"**App version:**"* ]] || return 1
-  note=$(awk '/^---[[:space:]]*$/ || /^### Context/ {exit} {print}' <<<"$body" | tr '\n' ' ' \
+  note=$(awk '/^---[ \t]*$/ || /^### Context/ {exit} {print}' <<<"$body" | tr '\n' ' ' \
     | sed -E 's/ +/ /g; s/^ //; s/ $//')
   [ -n "$note" ] || note="${title#*: }"
   [ "${#note}" -le 300 ] || return 1
   grep -qiE "$FC_DEFECT_RE" <<<"$note" && return 1
+  note=$(tr -cd "A-Za-z0-9 .,:;_/=+'-" <<<"$note" | sed -E 's#://##g; s/ +/ /g; s/^ //; s/ $//')
+  [ -n "$note" ] || return 1
   echo "$note"
 }
