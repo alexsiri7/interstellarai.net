@@ -2306,11 +2306,14 @@ check_deadlines() {
   for project in "${REPOS[@]}"; do
     if json=$(gh issue list --repo "alexsiri7/$project" --state open --label needs-author --limit 100 \
           --json number,labels,createdAt,author,title,body 2>/dev/null); then
+      # The owner's weekly question (lib/owner-digest.sh) is asked once a week;
+      # a needs-author deadline would re-ntfy it every 24h.
       while IFS=$'\t' read -r num title; do
         [ -n "$num" ] || continue
         deadline_mark needs-author "$project" "$num" - "" "waiting on its author: $title"
       done < <(printf '%s' "$json" | TRUST_QUIET=1 trust_filter_issues "$project" 2>/dev/null \
-                 | jq -r '.[] | [(.number | tostring), ((.title // "") | gsub("[\t\r\n]"; " "))] | @tsv' 2>/dev/null)
+                 | jq -r '.[] | select([.labels[]?.name] | index("owner-digest") | not)
+                          | [(.number | tostring), ((.title // "") | gsub("[\t\r\n]"; " "))] | @tsv' 2>/dev/null)
     else
       log "$project: could not list needs-author issues"
     fi

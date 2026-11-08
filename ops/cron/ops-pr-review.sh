@@ -12,7 +12,8 @@
 # open, trusted, unlabelled, CLEAN and green:
 #   - It touches the sensitive set (ops_review_sensitive), adds a network host
 #     main does not name, or closes an issue only screening vetted: one comment
-#     and one ntfy (per PR), never a merge, no Claude call.
+#     and an entry in the owner's weekly question (lib/owner-digest.sh), never
+#     a merge, no Claude call.
 #   - Otherwise `claude -p`, with no tools and no MCP servers in an empty
 #     directory, reviews the PR text, its linked issues and the diff:
 #       merge    squash-merge pinned to the reviewed head, then
@@ -21,7 +22,7 @@
 #                (another would make the range unapprovable) until it passes.
 #       block    a review-report comment ("Verdict: not ready", action:
 #                correct) that pr-maintenance Phase 2's correction picks up.
-#       escalate one comment and one ntfy, as for the sensitive set.
+#       escalate one comment and a weekly-question entry, as for the sensitive set.
 # A PR that went DIRTY or BEHIND is Phase 2's to rebase; its next mark brings
 # it back here. Each decision is logged, and written as a Lachesis note on the
 # PR's linked issue (or the PR).
@@ -54,6 +55,8 @@ source "$SCRIPT_DIR/lib/deadlines.sh"
 source "$SCRIPT_DIR/lib/ci-skip.sh"
 # shellcheck source=lib/lachesis.sh
 source "$SCRIPT_DIR/lib/lachesis.sh"
+# shellcheck source=lib/owner-digest.sh
+source "$SCRIPT_DIR/lib/owner-digest.sh"
 
 REPO="${OPS_CHECKOUT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 OPS_REPO="${OPS_REPO:-alexsiri7/interstellarai.net}"
@@ -87,7 +90,7 @@ ops_review_sensitive() {
   local re_trust='^ops/cron/lib/(trust|screen|claude-auth)\.sh$'
   local re_secrets='(^|/)[^/]*(secret|doppler)[^/]*$'
   local re_sandbox='^ops/cron/lib/run-as\.sh$|^ops/cron/lib/archon-shim/|^ops/cron/archon-projects\.txt$'
-  local re_gates='^ops/cron/ops-pr-review\.sh$|^ops/cron/ops-self-update\.sh$|^\.github/unsafe-change\.yml$'
+  local re_gates='^ops/cron/ops-pr-review\.sh$|^ops/cron/ops-self-update\.sh$|^\.github/unsafe-change\.yml$|^ops/cron/held-pr-review\.sh$|^ops/cron/lib/(held-review|owner-digest)\.sh$'
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     lower="${path,,}"
@@ -135,13 +138,14 @@ decide() {
   lachesis_call add_note "$args" >/dev/null 2>&1 || log "PR #$1: lachesis note failed"
 }
 
-# hold_for_owner <pr> <issue> <ntfy-kind> <decision> <why> — one comment and
-# one ntfy (per PR and kind) that the owner merges it by hand.
+# hold_for_owner <pr> <issue> <decision> <why> — one comment that the owner
+# merges it by hand, and an entry in the owner's weekly question.
 hold_for_owner() {
-  local msg="Not merged by ops-pr-review: $5. The owner reviews and merges it by hand, then runs ops/cron/ops-self-update.sh --approve."
+  local msg="Not merged by ops-pr-review: $4. The owner reviews and merges it by hand, then runs ops/cron/ops-self-update.sh --approve. It is on the owner's weekly review."
   gh pr comment "$1" --repo "$OPS_REPO" --body "$msg"$'\n\n<!-- lachesis:automated -->' >/dev/null 2>&1 || return 1
-  trust_notify_once "$PROJECT" "$3" "$1" "$msg https://github.com/$OPS_REPO/pull/$1" "Ops PR needs the owner"
-  decide "$1" "$2" "$4" "$5"
+  owner_digest_add "$PROJECT" "$1" "$HEAD_SHA" "$(field '.title // ""')" "$4" \
+    || log "PR #$1: could not add it to the owner's weekly question"
+  decide "$1" "$2" "$3" "$4"
 }
 
 # run_review <prompt-file> — the verdict object, compact, on stdout. Fails when
@@ -296,7 +300,7 @@ for row in "${ROWS[@]}"; do
     HITS=$(printf '%s\n' "$HITS" | sed '/^$/d' | tr '\n' ';' | sed 's/;$//; s/;/; /g')
 
     if [ -n "$HITS" ]; then
-      if hold_for_owner "$NUM" "$NOTE_ON" ops-review-sensitive sensitive "it touches the sensitive set — $HITS"; then
+      if hold_for_owner "$NUM" "$NOTE_ON" sensitive "it touches the sensitive set — $HITS"; then
         echo "$HEAD_SHA sensitive" > "$STATE/reviewed-$NUM"
         N_OWNER=$((N_OWNER + 1))
       else
@@ -305,7 +309,7 @@ for row in "${ROWS[@]}"; do
       continue
     fi
     if [ "$(wc -c < "$TMP/diff")" -gt "$OPS_REVIEW_MAX_DIFF_BYTES" ]; then
-      if hold_for_owner "$NUM" "$NOTE_ON" ops-review-escalate escalated "its diff is over $OPS_REVIEW_MAX_DIFF_BYTES bytes, too large to review here"; then
+      if hold_for_owner "$NUM" "$NOTE_ON" escalated "its diff is over $OPS_REVIEW_MAX_DIFF_BYTES bytes, too large to review here"; then
         echo "$HEAD_SHA escalate" > "$STATE/reviewed-$NUM"
         N_OWNER=$((N_OWNER + 1))
       else
@@ -344,7 +348,7 @@ for row in "${ROWS[@]}"; do
         fi
         continue ;;
       escalate)
-        if hold_for_owner "$NUM" "$NOTE_ON" ops-review-escalate escalated "the review escalated it — $SUMMARY"; then
+        if hold_for_owner "$NUM" "$NOTE_ON" escalated "the review escalated it — $SUMMARY"; then
           echo "$HEAD_SHA escalate" > "$STATE/reviewed-$NUM"
           N_OWNER=$((N_OWNER + 1))
         else

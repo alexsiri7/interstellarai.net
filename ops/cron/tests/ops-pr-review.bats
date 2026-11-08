@@ -16,13 +16,14 @@ setup() {
     export HOME="$T/home"
     STUB_BIN="$HOME/.local/bin"
     mkdir -p "$STUB_BIN" "$T/gh"
-    unset _ARCHON_TRUST_SH _ARCHON_DEADLINES_SH TRUSTED_AUTHORS TRUSTED_ISSUE_BOTS TRUSTED_MERGE_ONLY_AUTHORS TRUSTED_COMMENT_BOTS DEADLINE_FRESH_SECONDS DEADLINE_NOW
+    unset _ARCHON_TRUST_SH _ARCHON_DEADLINES_SH _OWNER_DIGEST_SH TRUSTED_AUTHORS TRUSTED_ISSUE_BOTS TRUSTED_MERGE_ONLY_AUTHORS TRUSTED_COMMENT_BOTS DEADLINE_FRESH_SECONDS DEADLINE_NOW
     export ARCHON_RUN_AS=archon
     export ARCHON_CRON_TRUST_FILE="$T/no-trust.env"
     export NTFY_TOPIC=test-topic
     export TRUST_STATE_DIR="$T/trust"
     export DEADLINE_STATE_DIR="$T/deadlines"
     export OPS_REVIEW_STATE="$T/state"
+    export OWNER_DIGEST_STATE="$T/digest"
     export OPS_REPO=alexsiri7/interstellarai.net
     export OPS_SELF_UPDATE="$T/self-update"
     export LACHESIS_CALL_CMD="$T/lachesis"
@@ -106,7 +107,8 @@ calls() { grep -c "^$1" "$T/argv" || true; }
              ops/cron/lib/trust.sh ops/cron/lib/screen.sh ops/cron/lib/claude-auth.sh ops/cron/lib/secrets.sh \
              secrets.env ops/cron/doppler-push.sh ops/cron/crontab ops/cron/lib/run-as.sh \
              ops/cron/lib/archon-shim/archon ops/cron/archon-projects.txt \
-             ops/cron/ops-pr-review.sh ops/cron/ops-self-update.sh .github/unsafe-change.yml; do
+             ops/cron/ops-pr-review.sh ops/cron/ops-self-update.sh .github/unsafe-change.yml \
+             ops/cron/held-pr-review.sh ops/cron/lib/held-review.sh ops/cron/lib/owner-digest.sh; do
         run ops_review_sensitive <<<"$f"
         [ "$status" -eq 0 ] || { echo "not flagged: $f"; false; }
         [[ "$output" == "$f ("*")" ]]
@@ -149,15 +151,17 @@ calls() { grep -c "^$1" "$T/argv" || true; }
 }
 
 # ---------------------------------------------------------------- decisions
-@test "a sensitive PR is never merged: one comment, one ntfy, no review" {
+@test "a sensitive PR is never merged: one comment, one entry in the owner's weekly question, no review" {
     mark 500 "$SHA1"; pr 500 "$SHA1" CLEAN ops/cron/lib/trust.sh
     review
     review
     [ "$(calls 'gh pr merge')" -eq 0 ]
     [ "$(calls claude)" -eq 0 ]
     [ "$(calls 'gh pr comment')" -eq 1 ]
-    [ "$(calls curl)" -eq 1 ]
+    [ "$(calls curl)" -eq 0 ]
     grep -q "ops/cron/lib/trust.sh (trust, screening or Claude auth)" "$T/comments"
+    jq -e --arg s "$SHA1" '.project == "interstellarai.net" and .pr == 500 and .sha == $s and (.verdict | startswith("it touches the sensitive set"))' \
+      "$OWNER_DIGEST_STATE/pending/interstellarai.net-500"
 }
 
 @test "a PR closing an issue only screening vetted waits for the owner" {

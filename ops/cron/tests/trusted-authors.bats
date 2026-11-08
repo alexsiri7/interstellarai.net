@@ -460,15 +460,53 @@ scoped_pr() { # scoped_pr <check-state or none>
     gh_called '^pr merge 700 '
 }
 
-@test "scope: a failed unsafe-change check holds the PR, labels it and tells the owner once" {
+@test "scope: a failed unsafe-change check holds the PR and labels it, for held-pr-review" {
     scoped_pr FAILURE
     echo '["new-scraper","archon:auto-approved"]' > "$GH_COMMENTS_DIR/issue-labels-44"
     run "$CRON_DIR/pr-maintenance-cron.sh"
+    [[ "$output" == *"PR #700 — not merging: unsafe-change check failed"* ]]
     run "$CRON_DIR/pr-maintenance-cron.sh"
     ! gh_called '^pr merge'
     gh_called '^pr edit 700 --add-label needs-owner-review'
-    [ "$(ntfys)" -eq 1 ]
-    grep -q 'PR #700 on proj not auto-merged: unsafe-change check failed' "$STUB_CURL_ARGV"
+    [ "$(ntfys)" -eq 0 ]
+}
+
+# held-pr-review.sh's record (lib/held-review.sh) on PR 700, whose head is $SHA700.
+SHA700=7777777777777777777777777777777777777777
+held_record() { # held_record <sha> <verdict>
+    mkdir -p "$HOME/.archon/state/held-review"
+    echo "$1 $2 needs-owner-review" > "$HOME/.archon/state/held-review/proj-700"
+}
+scoped_pr_at() { # scoped_pr_at <check-state>: scoped_pr, its head $SHA700
+    scoped_pr "$1"
+    GH_PR_LIST=$(jq -c --arg s "$SHA700" '.[0].headRefOid = $s' <<<"$GH_PR_LIST")
+    echo '["new-scraper","archon:auto-approved"]' > "$GH_COMMENTS_DIR/issue-labels-44"
+}
+
+@test "scope: a held-pr-review approval at the head merges pinned to it, past the failed check" {
+    scoped_pr_at FAILURE
+    held_record "$SHA700" approve
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    gh_called "^pr merge 700 --squash --auto --delete-branch --match-head-commit $SHA700 "
+    ! gh_called '^pr edit'
+    [ ! -e "$HOME/.archon/state/held-review/proj-700" ]
+}
+
+@test "scope: a held-pr-review approval at another head re-holds the PR and takes archon:approved off" {
+    scoped_pr_at SUCCESS
+    held_record "$(printf '6%.0s' {1..40})" approve
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    gh_called '^pr edit 700 --add-label needs-owner-review --remove-label archon:approved$'
+    ! gh_called '^pr merge'
+}
+
+@test "scope: a held-pr-review block at the head neither merges nor relabels" {
+    scoped_pr_at SUCCESS
+    held_record "$SHA700" block
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    [[ "$output" == *"PR #700 — held-pr-review returned it for correction at 7777777, not merging"* ]]
+    ! gh_called '^pr merge'
+    ! gh_called '^pr edit'
 }
 
 @test "scope: a pending check waits; a repo with no policy holds (fail closed)" {

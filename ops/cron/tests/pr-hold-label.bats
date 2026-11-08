@@ -264,6 +264,36 @@ review_fired() { # review_fired <pr-number>
     [ ! -f "$HOME/.archon/state/pr-review/proj-299.pid" ]
 }
 
+# held-pr-review.sh's record (lib/held-review.sh): "<sha> <verdict> <label>".
+held_record() { # held_record <pr> <sha> <verdict> <label>
+    mkdir -p "$HOME/.archon/state/held-review"
+    echo "$2 $3 $4" > "$HOME/.archon/state/held-review/proj-$1"
+}
+
+@test "review: a PR held-pr-review handed back at this head gets no review; at another head it does" {
+    local sha300 sha301
+    sha300=$(printf '3%.0s' {1..40}); sha301=$(printf '4%.0s' {1..40})
+    held_record 300 "$sha300" block hold
+    held_record 301 "$(printf '5%.0s' {1..40})" approve hold
+    export GH_PR_LIST="[$(pr 300 false CLEAN '[]' | jq -c --arg s "$sha300" '.headRefOid = $s'), $(pr 301 false CLEAN '[]' | jq -c --arg s "$sha301" '.headRefOid = $s')]"
+    run "$CRON_DIR/pr-review-cron.sh"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"proj: PR #300 — reviewed by held-pr-review at this head, skipping"* ]]
+    [[ "$output" == *"1 on-hold, 0 ship-merging, 1 fired"* ]]
+    review_fired 301
+    run ! grep -q 'review PR #300' "$STUB_ARCHON_ARGV"
+}
+
+@test "maintenance: a PR that moved since held-pr-review handed it back is held again, not merged" {
+    held_record 300 "$(printf '3%.0s' {1..40})" block hold
+    export GH_PR_LIST="[$(pr 300 false CLEAN '[]')]"
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"proj: PR #300 moved since held-pr-review's block at 3333333 — holding it (hold) for another review"* ]]
+    gh_called '^pr edit 300 --add-label hold$'
+    ! gh_called '^pr merge'
+}
+
 # ── review/merge race (interstellarai.net#71) ────────────────────────────────
 
 @test "review: a CLEAN non-draft archon-ship PR does not get a review fired" {
