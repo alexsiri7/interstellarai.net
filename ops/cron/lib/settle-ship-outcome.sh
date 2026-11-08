@@ -44,15 +44,13 @@
 # they duplicate the open alert with the same title, or when the owner
 # decided (#259); otherwise they are parked for a human.
 #
-# Two more closes need no person (#259), each confirmed on GitHub, labelled
+# One more close needs no person (#259), confirmed on GitHub, labelled
 # factory-closed and quoting its evidence, and closed as not planned: the
 # owner's newest comment of their own (not one the factory posted under their
-# token) tells the factory to close it, even on a health-filed issue, since
-# the owner decided it; or the verdict calls the issue a false positive and
-# names a closed issue under the same title stem whose thread has the owner
-# confirming that false positive, never on a health-filed issue. An issue
-# that is already closed (pipeline-health closes the deploy issues it filed
-# once they recover) is not settled at all.
+# token) tells the factory to close it, with no condition, refusal or
+# question anywhere in it, even on a health-filed issue, since the owner
+# decided it. An issue that is already closed (pipeline-health closes the
+# deploy issues it filed once they recover) is not settled at all.
 #
 # With Lachesis pickup on, what none of that settles is sorted by severity tier
 # (lib/severity.sh, #237): the verdict's suggested action (close, record its
@@ -480,29 +478,6 @@ close_directive() {
   grep -qiE '^((please|ok|okay|yes|so|just|then),?[[:space:]]+)*close([[:space:]]|[.!,:;]|$)' <<<"$text"
 }
 
-# false_positive_confirmed <text> — true when <text> says the issue is a false
-# positive ("False positive: …", "Yes, this is a false positive."), not asking,
-# denying ("This is not a false positive") or hedging ("maybe a false
-# positive").
-false_positive_confirmed() {
-  local text
-  text=$(sentences "$1")
-  [[ "$text" == *'?'* ]] && return 1
-  grep -qiE "\b(no|not|isn.?t|wasn.?t|never)[[:space:]]+(an?[[:space:]]+)?false[ -]positive|\b(if|unless|maybe|perhaps|possibly|probably|might|could)\b" \
-    <<<"$text" && return 1
-  grep -qiE '^((yes|yep|confirmed|agreed|right|correct|indeed)[,:]?[[:space:]]+)*((this|it|that)([[:space:]]+(is|was)|.s)[[:space:]]+)?(an?[[:space:]]+)?false[ -]positive' \
-    <<<"$text"
-}
-
-# title_stem <title> — the title before its first " — ", trimmed and
-# lowercased: what issues one check files about one subject share
-# ("Scraper check: four-corners — …").
-title_stem() {
-  local s="${1%% — *}"
-  s="${s#"${s%%[![:space:]]*}"}" s="${s%"${s##*[![:space:]]}"}"
-  echo "${s,,}"
-}
-
 # close_without_asking <evidence> <quote> — closes as not planned, labelled
 # factory-closed, quoting the owner's comment the evidence names. Returns 1
 # when the close failed, so the caller parks as before.
@@ -526,38 +501,7 @@ close_if_owner_decided() {
   close_without_asking "the owner already decided in $(jq -r .url <<<"$last")" "$(jq -r .body <<<"$last")"
 }
 
-# close_if_false_positive_precedent — closes a verdict calling the issue a
-# false positive when one of its refs is a closed issue with the same title
-# stem on which the owner confirmed that false positive.
-close_if_false_positive_precedent() {
-  local ref ref_view hit stem
-  [ "$health_filed" = 0 ] || return
-  case "$verdict" in
-    "No delivery needed: "*|"Not done: blocked on "*|"No work owed in this repository: "*) ;;
-    *) return ;;
-  esac
-  grep -qiE 'false[ -]positive' <<<"$verdict_block" || return
-  stem=$(title_stem "$title")
-  for ref in "${refs[@]}"; do
-    # issue view answers for a PR number too; its url tells them apart.
-    ref_view=$(gh issue view "$ref" --repo "$repo" --json url,state,title,comments 2>/dev/null \
-      | jq -c 'select(.state == "CLOSED" and (.url | contains("/issues/")))' 2>/dev/null)
-    [ -n "$ref_view" ] && [ "$(title_stem "$(jq -r '.title // ""' <<<"$ref_view")")" = "$stem" ] || continue
-    # The owner's latest word on it, so a later retraction wins.
-    hit=$(owner_comments <<<"$ref_view" \
-      | jq -sc 'map(select((.close | not) and (.body | test("false[ -]positive"; "i")))) | last // empty')
-    [ -n "$hit" ] || continue
-    false_positive_confirmed "$(jq -r .body <<<"$hit")" || continue
-    close_without_asking "a false positive the owner already confirmed on #$ref ($(jq -r .url <<<"$hit"))" \
-      "$(jq -r .body <<<"$hit")"
-    return
-  done
-}
-
-if [ "$view_ok" = 1 ]; then
-  close_if_owner_decided
-  close_if_false_positive_precedent
-fi
+[ "$view_ok" = 1 ] && close_if_owner_decided
 
 stale_note=""
 [ "$health_filed" = 0 ] && [ "$defers" = 1 ] && [ "${#refs[@]}" -gt 0 ] && release_if_stale

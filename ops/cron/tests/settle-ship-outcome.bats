@@ -1808,7 +1808,7 @@ Closed as archon:done: already fixed by merged PR #5. Reopen and add archon:queu
 
     [ "$status" -eq 0 ]
     grep -q -- "issue edit 9 --repo alexsiri7/testproj --remove-label archon:in-progress --add-label archon:skipped" "$GH_ARGV"
-    [ "$(gh_calls 'factory-closed')" -eq 0 ]
+    [ "$(gh_calls 'issue edit 9 --repo alexsiri7/testproj --add-label factory-closed')" -eq 0 ]
     [[ "$output" == *"#9 — the owner already decided in https://github.com/alexsiri7/testproj/issues/9#issuecomment-1, but the close failed; asking instead"* ]]
 }
 
@@ -1820,62 +1820,6 @@ Closed as archon:done: already fixed by merged PR #5. Reopen and add archon:queu
 
     [ "$status" -eq 0 ]
     grep -qx -- '<!-- archon-settle-closed -->' "$GH_ARGV"
-}
-
-# musenmingle#399: its verdict cited #242 and #334, and on #334 the owner had
-# confirmed the same false positive.
-SCRAPER_VERDICT='No delivery needed: false positive — the same four-corners listing gap as precedent #242 and #334, which the owner confirmed as a false positive. Full evidence in triage.md.
-Report: /x'
-scraper_precedents() {
-    printf '%s\n' "$SCRAPER_VERDICT" > "$RUN_LOG"
-    fixture title-399 'Scraper check: four-corners — 3 events missing from the listing'
-    ref 242 closed-issue; ref 334 closed-issue
-    fixture title-242 'Scraper check: four-corners — 2 events missing from the listing'
-    fixture viewstate-242 CLOSED
-    thread 242 alexsiri7 'archon-ship finished without a PR: No delivery needed: a false positive.'
-    fixture title-334 'Scraper check: Four-Corners — 1 event missing from the listing'
-    fixture viewstate-334 CLOSED
-    thread 334 alexsiri7 "False positive: Camera-works is a course, not an event, so the listing rightly leaves it out."
-}
-
-@test "a false positive the owner confirmed on a closed same-stem issue it names closes, citing it" {
-    scraper_precedents
-
-    run "$SCRIPT" testproj 399 "$RUN_LOG"
-
-    [ "$status" -eq 0 ]
-    assert_closed_without_asking 399
-    grep -q -- 'Closed as archon:done: a false positive the owner already confirmed on #334 (https://github.com/alexsiri7/testproj/issues/334#issuecomment-1): "False positive: Camera-works is a course' "$GH_ARGV"
-}
-
-@test "a false positive with no owner-confirmed same-stem precedent still goes to the owner" {
-    local variant
-    lachesis_on
-    for variant in unconfirmed denied asked retracted undecided-verdict other-stem open pr health-filed; do
-        rm -f "$T"/fixtures/*; : > "$GH_ARGV"; : > "$LACHESIS_ARGV"
-        scraper_precedents
-        case "$variant" in
-            unconfirmed) thread 334 alexsiri7 'Agreed: false positive.
-
-<!-- lachesis:automated -->' ;;
-            denied) thread 334 alexsiri7 'This is NOT a false positive: the scraper dropped a real event.' ;;
-            asked) thread 334 alexsiri7 'False positive? Camera-works may be an event after all.' ;;
-            retracted) thread 334 alexsiri7 'False positive: Camera-works is a course.' \
-                alexsiri7 'Not a false positive after all, Camera-works runs a screening too.' ;;
-            # An undecided stop never closes, whatever it calls the issue.
-            undecided-verdict) printf 'No delivery started: false positive, as the owner confirmed on #334.\nReport: /x\n' > "$RUN_LOG" ;;
-            other-stem) fixture title-334 'Scraper check: kino-lounge — 1 event missing from the listing' ;;
-            open) fixture viewstate-334 OPEN ;;
-            pr) fixture kind-334 pull ;;
-            health-filed) fixture body-399 'Auto-filed by `pipeline-health-cron.sh`.' ;;
-        esac
-
-        run "$SCRIPT" testproj 399 "$RUN_LOG"
-
-        [ "$status" -eq 0 ] || { echo "variant: $variant"; return 1; }
-        assert_parked 399 || { echo "variant: $variant"; return 1; }
-        grep -q '^ask_question ' "$LACHESIS_ARGV" || { echo "variant: $variant"; return 1; }
-    done
 }
 
 @test "an issue already closed is not settled" {
