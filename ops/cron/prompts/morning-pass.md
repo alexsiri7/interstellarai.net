@@ -32,7 +32,7 @@ bash -c 'source /mnt/ext-fast/interstellarai.net/ops/cron/lib/lachesis.sh && lac
 
 The snapshot at the end of this prompt was collected by the cron just before this session started. Use it, and check anything you are about to act on again live first: it may be minutes old.
 
-Add a short "Host" section to the message, after the briefing's health and fuel lines: one line per problem found below, and nothing when everything is fine. It covers:
+What you find here goes into the message's "Anomalies" part (section "Finish"): one line per real problem, and nothing when everything is fine. Checks that pass, and what you could not check, stay out of the message; put them in `actions.log`. It covers:
 
 - `pipeline-status` (the owner's dashboard; `/home/asiri/bin/pipeline-status`).
 - The cron logs in `~/.local/state/archon-cron/logs/`: `issue-pickup.log`, `pr-maintenance.log`, `pipeline-health.log`, `ops-pr-review.log`, `ops-self-update.log`. Look for errors, repeated failures, and a log that has stopped being written (the snapshot gives each one's age).
@@ -84,7 +84,20 @@ Anything else you find wrong on the host (a full disk, a stopped service, a wedg
 
 When everything above is done:
 
-1. Write the message for the owner to `message.md` in the run directory: the briefing's message (its health and fuel lines, security, at most three items, the landed line, ...), with the "Host" section after the health and fuel lines and one line naming every fix you made (or none). Plain text, short, links in full. It goes to his phone as an ntfy, so keep it under 3500 characters.
+1. Write the message for the owner to `message.md` in the run directory. It answers only three things, in this order, and this shape wins over the briefing's own message (its health and fuel lines, landed line, focus lines and list of defaults):
+   ```
+   Factory: <one line: did it work since yesterday's pass? Name what shipped, or say plainly that nothing did>
+   Waiting for you: <N> (<what they are, in a few words>). Ready to answer them?
+   - <one line per item, at most three, most urgent first, each with its full link>
+   Anomalies:
+   - <one line per anomaly>
+   Fixed: <one line naming every fix you made>
+   ```
+   - **Waiting for you** counts only what the owner alone can do: questions with no default, decisions, security problems waiting on him, PRs held for his merge, host problems he must fix. Questions that settle by default in the next days are not counted. Give them one line with how many there are and the date, and only when one of them takes a default he would likely want to stop. With nothing waiting, write `Waiting for you: nothing.` and leave out the item lines.
+   - **Anomalies** are what is wrong or unusual: factory fuel over pace or not reported, overflow near its cap, a critical security problem, a red main CI that is not transient, a cron that stopped, runs failing in a pattern (say what the pattern costs), a Lachesis fault you filed. Leave out what is normal and what passed. With none, write `Anomalies: none.`
+   - Leave out the `Fixed:` line when you fixed and filed nothing. Name a sprint review you sent there too.
+   - With nothing waiting, no anomaly and a factory that worked, the whole message is one line: `All quiet: <N> landed, nothing waiting, no anomalies.`
+   Plain text, links in full, at most about 15 lines. It goes to his phone as an ntfy, so keep it under 1500 characters.
 2. Write `status` in the run directory: one line, `needs_owner=yes` when the message holds an item only the owner can do (a question, a decision, a security problem waiting on him, a host problem he must fix), otherwise `needs_owner=no`.
 3. Write `done` in the run directory last (any content). The cron waits for this file.
-4. Then reply here with the same message, so it is in this session when the owner opens it, and stop. If he joins later, help him with what the message lists, still within the bounds above unless he tells you otherwise himself in this session.
+4. Then reply here with the same message, so it is in this session when the owner opens it, and stop. If he joins later, help him with what the message lists, still within the bounds above unless he tells you otherwise himself in this session. Take the waiting items one at a time: explain one, ask for his decision, act on it, then go to the next. For each question, also ask whether it should have been a question at all. If the factory could have decided it, or failed in a way it could avoid, propose the fix to the factory, so it does not ask or fail this way next time.
