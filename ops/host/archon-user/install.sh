@@ -75,12 +75,10 @@ cd / || exit 1
 
 ARCHON_USER=archon
 OWNER=asiri
-AH=/mnt/ext-fast/archon-home
 BASE=/mnt/ext-fast
 ENGINE=/mnt/ext-fast/archon
 UNIT=archon-serve.service
 UNIT_DST=/etc/systemd/system/$UNIT
-WRAPPER_DST=/usr/local/bin/archon-as-archon
 LIBDIR=/usr/local/lib/archon-user
 SANDBOX="${ARCHON_USER_INSTALL_SANDBOX:-}"
 if [ "$(id -u)" -eq 0 ]; then
@@ -88,6 +86,8 @@ if [ "$(id -u)" -eq 0 ]; then
     SANDBOX=""
     unset ARCHON_USER_MIN_ROOT_MB ARCHON_USER_MIN_BASE_MB
 fi
+AH="${SANDBOX:+$SANDBOX/archon-home}"; AH="${AH:-/mnt/ext-fast/archon-home}"
+WRAPPER_DST="${SANDBOX:+$SANDBOX/bin/archon-as-archon}"; WRAPPER_DST="${WRAPPER_DST:-/usr/local/bin/archon-as-archon}"
 ETC="${SANDBOX:+$SANDBOX/etc-archon-user}"; ETC="${ETC:-/etc/archon-user}"
 CONFIG="$ETC/config"
 SUDOERS_D="${SANDBOX:+$SANDBOX/sudoers.d}"; SUDOERS_D="${SUDOERS_D:-/etc/sudoers.d}"
@@ -326,7 +326,7 @@ if [ "$MODE" = allow-all-repos ] || [ "$MODE" = no-allow-all-repos ]; then
     finish
 fi
 
-if [ -n "$SANDBOX" ]; then   # test hook: the sudoers step only (+ entrypoints with --install-sudo-ops)
+if [ -n "$SANDBOX" ] && [ "$MODE" != gh-token ]; then   # test hook: the sudoers step only (+ entrypoints with --install-sudo-ops); gh-token falls through to its own block below, stubbed
     [ "$MODE" = sudo-ops ] && install_ops_entrypoints
     install_sudoers; finish
 fi
@@ -356,7 +356,7 @@ fi
 
 # ================================================================ tokens ====
 if [ "$MODE" = gh-token ]; then
-    user_exists || { echo "user $ARCHON_USER missing — run: sudo $0" >&2; exit 1; }
+    [ -n "$SANDBOX" ] || user_exists || { echo "user $ARCHON_USER missing — run: sudo $0" >&2; exit 1; }
     say "GitHub PAT for $ARCHON_USER"
     [ -t 0 ] && echo "    Paste the token (github_pat_... or ghp_...), then Enter. It is not echoed." >&2
     tok=$(read_secret "token")
@@ -374,6 +374,10 @@ if [ "$MODE" = gh-token ]; then
     gh_token_lock="${GH_FACTORY_SWITCH_LOCK:-$OWNER_HOME/.archon/state/gh-factory-switch.lock}"
     mkdir -p "$(dirname "$gh_token_lock")"
     exec {gh_token_fd}>"$gh_token_lock"
+    # The owner's own cron scripts (ops/cron/lib/gh-factory.sh's
+    # gh_factory_try_switch) open this same path unprivileged; root creating
+    # it first (this step) must not leave it unwritable to them.
+    [ -n "$SANDBOX" ] || chown "$OWNER:$OWNER" "$gh_token_lock"
     if ! flock -w 60 "$gh_token_fd"; then
         echo "    another gh-factory account switch holds $gh_token_lock — try again shortly" >&2
         exit 1
@@ -393,6 +397,8 @@ if [ "$MODE" = gh-token ]; then
             done_ "restored the active account to $prev_login (gh auth login had switched it to ${new_login:-?})"
         else
             echo "    could not restore the active account to $prev_login after gh auth login switched it to ${new_login:-?} — run: runuser -u $ARCHON_USER -- env HOME=$AH PATH=$AH/.local/bin:/usr/bin:/bin $ghbin auth switch -u $prev_login" >&2
+            exec {gh_token_fd}>&-
+            exit 1
         fi
     fi
     exec {gh_token_fd}>&-

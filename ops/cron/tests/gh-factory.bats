@@ -244,6 +244,23 @@ owner_rate_limit() { rate_limit "$@" owner_rate_limit.json; }  # the owner accou
     [ ! -e "$T/ntfy-curl" ]
 }
 
+@test "an unopenable switch lock is held and logged, not a fatal unbound-variable crash (R1)" {
+    export ARCHON_RUN_AS=archon
+    rate_limit 0 0 60
+    mkdir -p "$(dirname "$GH_FACTORY_SWITCH_LOCK")"
+    : > "$GH_FACTORY_SWITCH_LOCK"
+    chmod 000 "$GH_FACTORY_SWITCH_LOCK"
+    # the real callers (issue-pickup-cron.sh, pipeline-health-cron.sh) run
+    # with set -uo pipefail; reproduce that here, in a fresh shell, since
+    # setup()'s own sourcing does not set -u.
+    run bash -c "set -uo pipefail; source '$CRON_DIR/lib/gh-factory.sh'; gh_factory_try_switch issue-pickup"
+    chmod 600 "$GH_FACTORY_SWITCH_LOCK"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"cannot open $GH_FACTORY_SWITCH_LOCK — not switching"* ]]
+    [[ "$output" != *"unbound variable"* ]]
+    ! grep -q '^gh auth switch' "$ARGV"
+}
+
 @test "a refused gh auth switch holds and says why" {
     export ARCHON_RUN_AS=archon STUB_SWITCH_RC=1
     rate_limit 0 0 60

@@ -234,3 +234,73 @@ make_live() {
     [[ "$output" == *"DRY-RUN"*"/usr/local/sbin/archon-user-install"* ]]
     [[ "$output" == *"/etc/sudoers.d/archon-user"* ]]
 }
+
+# ── --set-gh-token (sandboxed): the gh-factory-switch.lock restore step ─────
+#
+# `gh auth login` makes the new PAT's account active; the restore step must
+# put the prior active account back and, since R2, fail the whole command
+# when it can't. Stubbed gh/runuser/archon-as-archon, like gh-factory.bats's
+# sudo stub: `env -i` (install.sh's own as_archon_gh) wipes everything but
+# HOME/PATH, so the gh stub tracks state under $HOME, not $ARGV/$T directly.
+
+gh_token_stubs() {  # gh_token_stubs — writes the three stubs under $T
+    mkdir -p "$T/archon-home/.local/bin"
+    cat > "$T/archon-home/.local/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+args="$*"
+printf 'gh %s\n' "$args" >> "$HOME/.gh-argv"
+case "$args" in
+  "api user --jq .login")
+    cat "$HOME/.gh-login" 2>/dev/null || true ;;
+  "auth login --hostname github.com --git-protocol https --with-token")
+    cat >/dev/null
+    echo alexsiri7-factory > "$HOME/.gh-login" ;;
+  "auth switch -u "*)
+    [ -e "$HOME/.gh-fail-switch" ] && { echo "switch failed" >&2; exit 1; }
+    printf '%s' "${args#auth switch -u }" > "$HOME/.gh-login" ;;
+esac
+STUB
+    cat > "$T/bin/runuser" <<'STUB'
+#!/usr/bin/env bash
+[ "$1" = -u ] || exit 1
+shift 2
+[ "$1" = -- ] && shift
+exec "$@"
+STUB
+    cat > "$T/bin/archon-as-archon" <<'STUB'
+#!/usr/bin/env bash
+exit "${STUB_PROBE_RC:-0}"
+STUB
+    chmod +x "$T/archon-home/.local/bin/gh" "$T/bin/runuser" "$T/bin/archon-as-archon"
+    printf 'ghp_%s\n' "$(printf 'x%.0s' $(seq 1 24))" > "$T/tok"
+    export GH_FACTORY_SWITCH_LOCK="$T/state/gh-factory-switch.lock"
+}
+
+@test "--set-gh-token (sandboxed): gh auth login's active-account flip is restored; exit is the probe's" {
+    gh_token_stubs
+    printf alexsiri7 > "$T/archon-home/.gh-login"
+    PATH="$T/bin:$PATH" ARCHON_USER_INSTALL_SANDBOX="$T" STUB_PROBE_RC=0 run "$D/install.sh" --set-gh-token < "$T/tok"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"restored the active account to alexsiri7 (gh auth login had switched it to alexsiri7-factory)"* ]]
+    grep -qx 'gh auth switch -u alexsiri7' "$T/archon-home/.gh-argv"
+    [ "$(cat "$T/archon-home/.gh-login")" = alexsiri7 ]
+}
+
+@test "--set-gh-token (sandboxed): a failed restore fails the command, even when the probe of the new account passes" {
+    gh_token_stubs
+    printf alexsiri7 > "$T/archon-home/.gh-login"
+    touch "$T/archon-home/.gh-fail-switch"
+    PATH="$T/bin:$PATH" ARCHON_USER_INSTALL_SANDBOX="$T" STUB_PROBE_RC=0 run "$D/install.sh" --set-gh-token < "$T/tok"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"could not restore the active account to alexsiri7 after gh auth login switched it to alexsiri7-factory"* ]]
+    [ "$(cat "$T/archon-home/.gh-login")" = alexsiri7-factory ]
+}
+
+@test "--set-gh-token (sandboxed): no restore needed when the active account did not change" {
+    gh_token_stubs
+    printf alexsiri7-factory > "$T/archon-home/.gh-login"
+    PATH="$T/bin:$PATH" ARCHON_USER_INSTALL_SANDBOX="$T" STUB_PROBE_RC=0 run "$D/install.sh" --set-gh-token < "$T/tok"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"restore"* ]]
+    ! grep -q 'auth switch' "$T/archon-home/.gh-argv"
+}

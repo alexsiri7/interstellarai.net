@@ -156,7 +156,10 @@ gh_factory_try_switch() {
   local fd rc
   gh_factory_as_archon || return 1
   mkdir -p "$(dirname "$GH_FACTORY_SWITCH_LOCK")"
-  exec {fd}>"$GH_FACTORY_SWITCH_LOCK"
+  if ! exec {fd}>"$GH_FACTORY_SWITCH_LOCK" 2>/dev/null; then
+    echo "$(date -Is) [gh-factory] $1: cannot open $GH_FACTORY_SWITCH_LOCK — not switching"
+    return 1
+  fi
   if flock -w "$((GH_FACTORY_TIMEOUT * 6))" "$fd"; then
     _gh_factory_switch_locked "$1"; rc=$?
   else

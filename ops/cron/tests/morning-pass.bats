@@ -144,6 +144,18 @@ teardown() {
     [ ! -d "$MORNING_PASS_STATE/runs" ]
 }
 
+@test "fix 1's manual switch names the live GH_FACTORY_SWITCH_LOCK, not a hardcoded literal (R4)" {
+    run "$SCRIPT" --dry-run
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"flock -w 120 $HOME/.archon/state/gh-factory-switch.lock sudo"* ]]
+    [[ "$output" != *'~/.archon/state/gh-factory-switch.lock'* ]]
+
+    export GH_FACTORY_SWITCH_LOCK="$T/elsewhere/switch.lock"
+    run "$SCRIPT" --dry-run
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"flock -w 120 $T/elsewhere/switch.lock sudo"* ]]
+}
+
 @test "a job the live crontab has commented out or rescheduled is a variant, never missing" {
     printf '*/15 * * * * /x/pr-maintenance-cron.sh >> /l/pr-maintenance.log 2>&1\n*/30 * * * * /x/pipeline-health-cron.sh >> /l/ph.log 2>&1\n0 5 * * 0 /x/pipeline-health-cron.sh --trim >> /l/ph.log 2>&1\n' >> "$T/live/ops/cron/crontab"
     printf '#*/15 * * * * /x/pr-maintenance-cron.sh >> /l/pr-maintenance.log 2>&1\n*/20 * * * * /x/pipeline-health-cron.sh >> /l/ph.log 2>&1\n' >> "$T/live-crontab"
