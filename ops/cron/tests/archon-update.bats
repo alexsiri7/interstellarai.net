@@ -348,7 +348,7 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
     [ ! -f "$T/state/archon-update-issue-v0.13.2" ]
     grep -q '^issue close https://github.com/alexsiri7/Archon/issues/250 ' "$GH_ARGV"
     [ "$(cat "$T/state/archon-update-issue-v0.12.9")" = "https://github.com/alexsiri7/Archon/issues/250" ]
-    [[ "$output" == *"could not close https://github.com/alexsiri7/Archon/issues/250 (v0.12.9) as superseded — retrying next run: stub: close failed"* ]]
+    [[ "$output" == *"could not close https://github.com/alexsiri7/Archon/issues/250 (v0.12.9) as superseded — marker kept for a retry: stub: close failed"* ]]
     [ "$(grep -c '^issue close' "$GH_ARGV")" -eq 2 ]
 
     # next run, same tag, close works now: no new issue, the kept marker is retried

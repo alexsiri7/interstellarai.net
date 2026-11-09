@@ -214,8 +214,9 @@ close_superseded_by_issue() {
 
 # close_superseded_issues <tag> <comment>: close every issue filed for a tag
 # older than <tag> with <comment>. The marker goes only once the close
-# succeeds; every run sweeps the tags older than the live one, so a failed
-# close is retried on the next run.
+# succeeds, so a failed close is retried by the next call: every run sweeps
+# the tags older than the live one, but one at or above it waits for the
+# newer tag's next escalation (file_issue) or its landing.
 close_superseded_issues() {
     local newer="$1" comment="$2" marker old_tag old_url out
     for marker in "$STATE_DIR"/archon-update-issue-v*; do
@@ -228,7 +229,7 @@ close_superseded_issues() {
             rm -f "$marker"
             log "closed $old_url ($old_tag) as superseded by $newer"
         else
-            log "WARNING: could not close $old_url ($old_tag) as superseded — retrying next run: $out"
+            log "WARNING: could not close $old_url ($old_tag) as superseded — marker kept for a retry: $out"
         fi
     done
 }
