@@ -428,11 +428,66 @@ upgrade_pg() {
 # ---------------------------------------------------------------------------
 
 # apply_updates — upgrade, in this order, every tool the check found behind.
+# ---------------------------------------------------------------------------
+# Blender — one shared tree under TU_BLENDER_ROOT (default /mnt/ext-fast/tools):
+# blender-<ver>-linux-x64/ plus a `blender` symlink to it, which asiri's and
+# archon's ~/.local/bin/blender both point through. The new tree must pass a
+# headless smoke test (build a mesh, export a glb) before the symlink flips; the
+# previous tree is removed only after the flipped `blender --version` checks.
+# ---------------------------------------------------------------------------
+
+TU_BLENDER_ROOT="${TOOL_UPDATE_BLENDER_ROOT:-/mnt/ext-fast/tools}"
+TU_BLENDER_RELEASES="${TOOL_UPDATE_BLENDER_RELEASES:-https://download.blender.org/release}"
+
+upgrade_blender() {
+  local from="${INSTALLED[blender]}" to="${LATEST[blender]}" dir_name="${LATEST_TAG[blender]}"
+  [ "$TU_ARCH" = x86_64 ] || { record_apply blender skipped "no linux-x64 build for $TU_ARCH"; return; }
+  local asset="blender-$to-linux-x64.tar.xz" base="$TU_BLENDER_RELEASES/$dir_name" dir
+  local tree="$TU_BLENDER_ROOT/blender-$to-linux-x64" link="$TU_BLENDER_ROOT/blender"
+  if ! dir=$(tu_scratch_dir blender); then record_apply blender failed "could not create a scratch dir under $TU_SCRATCH_ROOT"; return; fi
+  log "blender: upgrading $from → $to"
+  fetch "$base/$asset" "$dir/$asset" || { record_apply blender failed "download failed: $base/$asset"; return; }
+  fetch "$base/blender-$to.sha256" "$dir/sums" || { record_apply blender failed "download failed: $base/blender-$to.sha256"; return; }
+  local hex; hex=$(awk -v f="$asset" '$2 == f { print $1; exit }' "$dir/sums")
+  if ! verify_sha256 "$dir" "$asset" "$hex"; then
+    record_apply blender failed "sha256 mismatch for $asset against blender-$to.sha256 — not installed"
+    return
+  fi
+  log "blender: sha256 OK"
+  if ! { mkdir -p "$TU_BLENDER_ROOT" && rm -rf "$tree.partial" && mkdir -p "$tree.partial" \
+      && tar xJf "$dir/$asset" -C "$tree.partial" --strip-components=1 2>/dev/null; }; then
+    rm -rf "$tree.partial"
+    record_apply blender failed "could not unpack $asset into $TU_BLENDER_ROOT"
+    return
+  fi
+  local glb="$dir/smoke.glb"
+  "$tree.partial/blender" -b --factory-startup --python-expr \
+    "import bpy; bpy.ops.mesh.primitive_cube_add(); bpy.ops.export_scene.gltf(filepath='$glb')" >/dev/null 2>&1
+  if [ ! -s "$glb" ]; then
+    rm -rf "$tree.partial"
+    record_apply blender failed "the new build failed its headless glb-export smoke test — not installed"
+    return
+  fi
+  rm -rf "$tree" && mv "$tree.partial" "$tree" && chmod -R a+rX "$tree"
+  local prev; prev=$(readlink "$link" 2>/dev/null || true)
+  ln -sfn "$tree" "$link"
+  local v; v=$("$link/blender" --version 2>/dev/null | awk 'NR==1 { print $2 }')
+  if [ "$v" != "$to" ]; then
+    [ -n "$prev" ] && ln -sfn "$prev" "$link"
+    record_apply blender failed "blender --version says '${v:-?}', expected $to (previous tree restored)"
+    return
+  fi
+  case "$prev" in
+    "$TU_BLENDER_ROOT"/blender-*-linux-x64) [ "$prev" != "$tree" ] && rm -rf "$prev" ;;
+  esac
+  record_apply blender upgraded "$from → $to"
+}
+
 apply_updates() {
   pg_prune_prev
   local tool scratch_ok=1
   tu_scratch_init || scratch_ok=0
-  for tool in bun gh shellcheck pg_dump; do
+  for tool in bun gh shellcheck pg_dump blender; do
     [ "${STATE[$tool]:-}" = behind ] || continue
     if [ "$scratch_ok" = 0 ]; then
       record_apply "$tool" failed "could not create a scratch directory under $TU_SCRATCH_ROOT"
@@ -443,6 +498,7 @@ apply_updates() {
       gh)         upgrade_gh ;;
       shellcheck) upgrade_shellcheck ;;
       pg_dump)    upgrade_pg ;;
+      blender)    upgrade_blender ;;
     esac
   done
 }

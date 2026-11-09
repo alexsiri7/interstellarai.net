@@ -15,6 +15,10 @@
 #                                          end-of-life date in nodejs/Release schedule.json
 #   archon     `git describe` of the checkout at $ARCHON_DIR vs the upstream project's
 #                                          latest release (see check_archon for the branch gap)
+#   blender    `blender --version`         vs the newest blender-X.Y.Z-linux-x64 tarball on
+#                                          download.blender.org/release (the shared install in
+#                                          /mnt/ext-fast/tools that asiri's and archon's
+#                                          ~/.local/bin/blender both point at)
 #   pg_dump    `~/.local/bin/pg_dump --version` vs the newest release on the same major line
 #                                          of theseus-rs/postgresql-binaries (the portable
 #                                          build ops/cron/README.md installs from)
@@ -27,7 +31,7 @@
 #
 # Without --apply nothing is upgraded: one ntfy, only when something is behind.
 # With --apply the tools that are behind AND user-level — bun, gh, shellcheck,
-# pg_dump (the postgresql-17 tree), in that order — are upgraded by
+# pg_dump (the postgresql-17 tree), blender (the shared tree), in that order — are upgraded by
 # lib/tool-update.sh (checksums verified, each install checked, the previous
 # binary/tree restored when a check fails; bun is skipped while an archon run
 # is live because archon-serve must be restarted afterwards). uv (snap), node
@@ -44,7 +48,8 @@
 # TOOL_FRESHNESS_ARCHON_DIR, TOOL_FRESHNESS_ARCHON_REMOTE,
 # TOOL_FRESHNESS_ARCHON_TRACK (release|branch), TOOL_FRESHNESS_PG_DUMP, TOOL_FRESHNESS_UV_SNAP,
 # TOOL_FRESHNESS_NODE_INDEX_URL, TOOL_FRESHNESS_NODE_SCHEDULE_URL,
-# TOOL_FRESHNESS_TODAY (YYYY-MM-DD); the TOOL_UPDATE_* ones in lib/tool-update.sh.
+# TOOL_FRESHNESS_TODAY (YYYY-MM-DD), TOOL_FRESHNESS_BLENDER_INDEX; the TOOL_UPDATE_* ones in
+# lib/tool-update.sh.
 
 set -uo pipefail
 
@@ -74,6 +79,7 @@ STATE_DIR="${TOOL_FRESHNESS_STATE_DIR:-$HOME/.archon/pipeline-health-state}"
 STATUS_FILE="$STATE_DIR/tool-freshness"
 LOCK_FILE="${TOOL_FRESHNESS_LOCK:-$STATE_DIR/tool-freshness.lock}"
 ARCHON_DIR="${TOOL_FRESHNESS_ARCHON_DIR:-/mnt/ext-fast/archon}"
+BLENDER_INDEX="${TOOL_FRESHNESS_BLENDER_INDEX:-https://download.blender.org/release/}"
 # Which remote is "the project": that checkout is a fork (origin = the
 # operator's own GitHub fork, upstream = coleam00/archon), so by default the
 # upstream remote is used when there is one.
@@ -296,6 +302,23 @@ check_archon() {
   esac
 }
 
+# blender: the newest Blender<major.minor>/ directory on the release index, then
+# the newest linux-x64 tarball in it. LATEST_TAG holds the directory name for
+# the download URL.
+check_blender() {
+  local installed; installed=$(blender --version 2>/dev/null | awk 'NR==1 && $1 == "Blender" { print $2 }')
+  local dir="" latest=""
+  dir=$(curl -fsSL --max-time 60 "$BLENDER_INDEX" 2>/dev/null \
+    | grep -oE 'Blender[0-9]+\.[0-9]+/' | sort -uV | tail -n1) || dir=""
+  if [ -n "$dir" ]; then
+    latest=$(curl -fsSL --max-time 60 "$BLENDER_INDEX$dir" 2>/dev/null \
+      | grep -oE 'blender-[0-9]+\.[0-9]+\.[0-9]+-linux-x64\.tar\.xz' | sed -E 's/^blender-//; s/-linux-x64\.tar\.xz$//' \
+      | sort -uV | tail -n1) || latest=""
+  fi
+  LATEST_TAG[blender]="${dir%/}"
+  compare blender "$installed" "$latest" "${latest:+download.blender.org}"
+}
+
 run_checks() {
   reset_results
   check_bun
@@ -305,6 +328,7 @@ run_checks() {
   check_node
   check_archon
   check_pg_dump
+  check_blender
 }
 
 # join <sep> <items...>

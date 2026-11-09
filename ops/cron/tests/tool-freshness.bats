@@ -20,7 +20,7 @@ teardown() {
     run "$SCRIPT"
     [ "$status" -eq 0 ]
     [ ! -e "$NTFY_OUT" ]
-    [[ "$output" == *"everything current (7 checked, 0 unknown) — no ntfy"* ]]
+    [[ "$output" == *"everything current (8 checked, 0 unknown) — no ntfy"* ]]
     grep -qx 'status=current' "$SANDBOX/state/tool-freshness"
     grep -qx 'behind_count=0' "$SANDBOX/state/tool-freshness"
     grep -q '^current: bun 1.4.2$' "$SANDBOX/state/tool-freshness"
@@ -28,6 +28,7 @@ teardown() {
     grep -q '^current: uv 0.12.17 (snap astral-uv latest/stable)$' "$SANDBOX/state/tool-freshness"
     grep -q '^current: node v24.21.0 (LTS Krypton)$' "$SANDBOX/state/tool-freshness"
     grep -q '^current: pg_dump 17.11 (theseus-rs/postgresql-binaries 17.x)$' "$SANDBOX/state/tool-freshness"
+    grep -q "^current: blender 5.2.3 (download.blender.org)$" "$SANDBOX/state/tool-freshness"
     grep -q '^current: archon v0.10.1-14-gac9c9f21 (v0.10.1; upstream/dev is 37 commit(s) ahead of HEAD)$' "$SANDBOX/state/tool-freshness"
 }
 
@@ -109,7 +110,7 @@ JSON
     [ ! -e "$NTFY_OUT" ]
     grep -qx 'unknown_count=1' "$SANDBOX/state/tool-freshness"
     grep -q '^unknown: uv: could not look up' "$SANDBOX/state/tool-freshness"
-    [[ "$output" == *"everything current (6 checked, 1 unknown)"* ]]
+    [[ "$output" == *"everything current (7 checked, 1 unknown)"* ]]
 }
 
 @test "unknowns ride along in the ntfy when something else is behind" {
@@ -143,4 +144,17 @@ JSON
     [ "$("$HOME/.local/bin/gh" --version)" = "gh version 2.100.0 (2026-01-01)" ]
     ! grep -q '^apply' "$SANDBOX/state/tool-freshness"
     grep -qx 'Title: Tools behind: bun, gh, shellcheck' "$NTFY_OUT"
+}
+
+@test "blender behind the newest tarball in the newest Blender<X.Y>/ directory" {
+    export LATEST_BLENDER=5.3.1
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    grep -q '^behind: blender 5.2.3 → 5.3.1 (download.blender.org)$' "$SANDBOX/state/tool-freshness"
+}
+
+@test "blender's release index unreadable: unknown, not behind" {
+    export LATEST_BLENDER=""
+    run "$SCRIPT"
+    grep -q '^unknown: blender: could not look up the latest release (installed 5.2.3)$' "$SANDBOX/state/tool-freshness"
 }
