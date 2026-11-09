@@ -52,12 +52,14 @@ shift 3
 exec "$@"
 STUB
     # curl -s -o /dev/null --max-time 15 -w %{http_code} <url> → $STUB_PROFILE_CODE;
-    # an ntfy.sh post (its -d body) goes to $T/ntfy-curl.
+    # an ntfy.sh post (its -d body) goes to $T/ntfy-curl, and fails (--fail,
+    # exit 22) when STUB_NTFY_FAIL is set, to simulate an undelivered ntfy.
     cat > "$T/bin/curl" <<'STUB'
 #!/usr/bin/env bash
 printf 'curl %s\n' "$*" >> "$ARGV"
 if [[ "$*" == *ntfy.sh/* ]]; then
   while [ $# -gt 0 ]; do [ "$1" = -d ] && printf '%s\n' "$2" >> "$T/ntfy-curl"; shift; done
+  [ -n "${STUB_NTFY_FAIL:-}" ] && exit 22
   exit 0
 fi
 printf '%s' "${STUB_PROFILE_CODE:-200}"
@@ -230,6 +232,34 @@ owner_rate_limit() { rate_limit "$@" owner_rate_limit.json; }  # the owner accou
     [ "$(wc -l < "$T/ntfy-curl")" -eq 1 ]
 }
 
+@test "a successful switch does not swallow the caller's later stderr (R2)" {
+    export ARCHON_RUN_AS=archon
+    rate_limit 0 0 60
+    run bash -c "source '$CRON_DIR/lib/gh-factory.sh'; gh_factory_try_switch issue-pickup >/dev/null; echo caller-stderr-after-switch >&2"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"caller-stderr-after-switch"* ]]
+}
+
+@test "a switch whose ntfy fails to deliver is retried on the next gate check, not lost (R3)" {
+    export ARCHON_RUN_AS=archon STUB_NTFY_FAIL=1
+    rate_limit 0 0 60
+    run gh_factory_may_launch issue-pickup
+    [ "$status" -eq 0 ]
+    [ "$(cat "$T/active")" = alexsiri7 ]
+    [[ "$output" == *"ntfy not delivered"* ]]
+    [[ "$output" == *"will retry the switch ntfy next gate check"* ]]
+    [ -f "$T/state/gh-factory-switch-announce" ]
+
+    unset STUB_NTFY_FAIL
+    : > "$ARGV"; : > "$T/ntfy-curl"
+    run gh_factory_may_launch issue-pickup   # already the owner: no new switch, but the pending ntfy still goes out
+    [ "$status" -eq 0 ]
+    ! grep -q '^gh auth' "$ARGV"
+    [ "$(wc -l < "$T/ntfy-curl")" -eq 1 ]
+    grep -q 'Switched the factory GitHub account from alexsiri7-factory' "$T/ntfy-curl"
+    [ ! -f "$T/state/gh-factory-switch-announce" ]
+}
+
 @test "a switch waits for another writer's lock and does not switch or announce again" {
     export ARCHON_RUN_AS=archon
     rate_limit 0 0 60
@@ -295,6 +325,16 @@ load_check() {
     notify_checked() { echo "$1 | $2 | $3" >> "$NTFY_SENT"; return "${STUB_NTFY_RC:-0}"; }
     # shellcheck disable=SC1090
     source <(awk '/^check_gh_factory\(\)/{p=1} p{print} p && /^}$/{p=0}' "$CRON_DIR/pipeline-health-cron.sh")
+}
+
+@test "check_gh_factory logs the active account and hosts.yml mtime every tick, healthy or not (R1)" {
+    load_check
+    run check_gh_factory
+    [[ "$output" == *"[gh-factory] pipeline-health: active account alexsiri7-factory, as asiri, ok; hosts.yml modified 2026-11-07T"* ]]
+
+    rate_limit 0 0 60
+    run check_gh_factory
+    [[ "$output" == *"[gh-factory] pipeline-health: active account alexsiri7-factory, as asiri, blocked; hosts.yml modified 2026-11-07T"* ]]
 }
 
 @test "check_gh_factory: blocked alerts after 2 consecutive ticks, recovery clears it" {

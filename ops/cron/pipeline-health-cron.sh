@@ -3183,11 +3183,15 @@ check_cron_heartbeats() {
 #   probe that fails (sudo, network) is logged, not alerted: it proves nothing.
 #   The alert is marked sent only once ntfy took it. A blocked account that a
 #   switch to the owner account fixes (gh_factory_try_switch, #272) is not an
-#   episode: that switch sends its own ntfy.
+#   episode: that switch sends its own ntfy, retried here (gh_factory_log_check)
+#   until delivery is confirmed. gh_factory_log_check also logs the active
+#   account and hosts.yml mtime every tick: this is the one caller that probes
+#   on a fixed schedule independent of launch demand.
 # ----------------------------------------------------------------------------
 check_gh_factory() {
   local marker="$STATE_DIR/gh-factory-alerted" held="$STATE_DIR/gh-factory-held" rc
   gh_factory_probe; rc=$?
+  gh_factory_log_check "pipeline-health"
   if [ "$rc" -eq 1 ]; then
     gh_factory_try_switch "pipeline-health"; rc=$?
   fi

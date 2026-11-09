@@ -304,3 +304,19 @@ STUB
     [[ "$output" != *"restore"* ]]
     ! grep -q 'auth switch' "$T/archon-home/.gh-argv"
 }
+
+@test "GH_FACTORY_SWITCH_LOCK's hand-duplicated default agrees between gh-factory.sh and install.sh (R4)" {
+    owner_home=$(getent passwd asiri | cut -d: -f6)
+    [ -n "$owner_home" ] || skip "asiri user not present in this environment"
+    # install.sh's gh_token_lock default is $OWNER_HOME/.archon/state/gh-factory-switch.lock
+    # (install.sh:374); gh-factory.sh's GH_FACTORY_SWITCH_LOCK default is
+    # $HOME/.archon/state/gh-factory-switch.lock (gh-factory.sh:54). The owner's
+    # own cron scripts run with HOME=$OWNER_HOME, so the two must agree there.
+    gh_factory_default=$(env -i HOME="$owner_home" PATH="$PATH" bash -c '
+        unset GH_FACTORY_SWITCH_LOCK
+        source "$1/../../cron/lib/gh-factory.sh"
+        echo "$GH_FACTORY_SWITCH_LOCK"
+    ' _ "$D")
+    install_default="$owner_home/.archon/state/gh-factory-switch.lock"
+    [ "$gh_factory_default" = "$install_default" ]
+}

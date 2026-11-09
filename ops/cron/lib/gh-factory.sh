@@ -33,9 +33,11 @@
 # tokens for both. On 2026-11-07 something ran `gh auth switch` back to the
 # flagged account and pickup held for 25h. So a blocked active account that is
 # not the owner's is switched to the owner's when its stored token works, with
-# one ntfy, under a lock the morning pass's own switch shares; every launch
-# gate logs the active account and the hosts.yml mtime, so the next flip can be
-# dated.
+# one ntfy — retried on every later gate check until it is confirmed
+# delivered, since the switch itself does not run again once the account is
+# fixed — under a lock the morning pass's own switch shares; every gate check
+# (gh_factory_may_launch and pipeline-health's check_gh_factory) logs the
+# active account and the hosts.yml mtime, so the next flip can be dated.
 
 [ -n "${_GH_FACTORY_SH:-}" ] && return 0
 _GH_FACTORY_SH=1
@@ -50,6 +52,7 @@ GH_FACTORY_TIMEOUT="${GH_FACTORY_TIMEOUT:-20}"
 GH_FACTORY_PROFILE_BASE="${GH_FACTORY_PROFILE_BASE:-https://github.com}"
 GH_FACTORY_OWNER_LOGIN="${GH_FACTORY_OWNER_LOGIN:-alexsiri7}"
 GH_FACTORY_SWITCH_LOCK="${GH_FACTORY_SWITCH_LOCK:-$HOME/.archon/state/gh-factory-switch.lock}"
+GH_FACTORY_SWITCH_ANNOUNCE="${GH_FACTORY_SWITCH_ANNOUNCE:-$(dirname "$GH_FACTORY_SWITCH_LOCK")/gh-factory-switch-announce}"
 
 # gh_factory_as_archon — true when the factory's gh is the archon user's.
 gh_factory_as_archon() {
@@ -132,15 +135,46 @@ gh_factory_hosts_mtime() {
     || echo "?"
 }
 
-# _gh_factory_notify <title> <message> — one ntfy, logged when it cannot go out.
+# _gh_factory_notify <title> <message> — one ntfy; returns 0 only once
+# delivery is confirmed, 1 otherwise (logged either way), so a caller can
+# retry rather than treat the attempt itself as the record.
 _gh_factory_notify() {
   [ -n "${NTFY_TOPIC:-}" ] || NTFY_TOPIC=$(secret_get NTFY_TOPIC)
   if [ -z "${NTFY_TOPIC:-}" ]; then
     echo "$(date -Is) [gh-factory] NTFY_TOPIC not set — logged only"
-  elif ! curl -s --fail -o /dev/null -H "Title: $1" -H "Priority: high" -H "Tags: arrows_counterclockwise" \
-      -d "$2" "ntfy.sh/$NTFY_TOPIC" 2>/dev/null; then
-    echo "$(date -Is) [gh-factory] ntfy not delivered"
+    return 1
   fi
+  if curl -s --fail -o /dev/null -H "Title: $1" -H "Priority: high" -H "Tags: arrows_counterclockwise" \
+      -d "$2" "ntfy.sh/$NTFY_TOPIC" 2>/dev/null; then
+    return 0
+  fi
+  echo "$(date -Is) [gh-factory] ntfy not delivered"
+  return 1
+}
+
+# gh_factory_retry_pending_notify <script> — resend an owner-switch ntfy an
+# earlier tick's _gh_factory_notify could not deliver (R3): the switch itself
+# never re-runs once the account is fixed, so without this a lost
+# notification is the only record of the flip, lost for good. Called on every
+# gate check via gh_factory_log_check.
+gh_factory_retry_pending_notify() {
+  [ -f "$GH_FACTORY_SWITCH_ANNOUNCE" ] || return 0
+  local title msg
+  title=$(head -n 1 "$GH_FACTORY_SWITCH_ANNOUNCE")
+  msg=$(tail -n +2 "$GH_FACTORY_SWITCH_ANNOUNCE")
+  if _gh_factory_notify "$title" "$msg"; then
+    rm -f "$GH_FACTORY_SWITCH_ANNOUNCE"
+  else
+    echo "$(date -Is) [gh-factory] $1: switch ntfy still not delivered — retrying next gate check"
+  fi
+}
+
+# gh_factory_log_check <script> — on every gate check (acceptance item 3 of
+# #272): log the active account and hosts.yml mtime, and retry a pending
+# owner-switch ntfy an earlier tick could not deliver.
+gh_factory_log_check() {
+  echo "$(date -Is) [gh-factory] $1: active account $(gh_factory_who), $GH_FACTORY_STATE; hosts.yml modified $(gh_factory_hosts_mtime)"
+  gh_factory_retry_pending_notify "$1"
 }
 
 # gh_factory_try_switch <script> — after gh_factory_probe found the active
@@ -156,7 +190,7 @@ gh_factory_try_switch() {
   local fd rc
   gh_factory_as_archon || return 1
   mkdir -p "$(dirname "$GH_FACTORY_SWITCH_LOCK")"
-  if ! exec {fd}>"$GH_FACTORY_SWITCH_LOCK" 2>/dev/null; then
+  if ! { exec {fd}>"$GH_FACTORY_SWITCH_LOCK"; } 2>/dev/null; then
     echo "$(date -Is) [gh-factory] $1: cannot open $GH_FACTORY_SWITCH_LOCK — not switching"
     return 1
   fi
@@ -195,7 +229,10 @@ _gh_factory_switch_locked() {
   gh_factory_probe; rc=$?
   msg="Switched the factory GitHub account from $from ($reason) to $GH_FACTORY_OWNER_LOGIN, now $GH_FACTORY_STATE: $GH_FACTORY_DETAIL. hosts.yml was last changed $changed."
   echo "$(date -Is) [gh-factory] $1: $msg"
-  _gh_factory_notify "Factory GitHub account switched" "$msg"
+  if ! _gh_factory_notify "Factory GitHub account switched" "$msg"; then
+    printf 'Factory GitHub account switched\n%s\n' "$msg" > "$GH_FACTORY_SWITCH_ANNOUNCE"
+    echo "$(date -Is) [gh-factory] $1: will retry the switch ntfy next gate check"
+  fi
   return "$rc"
 }
 
@@ -206,7 +243,7 @@ _gh_factory_switch_locked() {
 gh_factory_may_launch() {
   local rc
   gh_factory_probe; rc=$?
-  echo "$(date -Is) [gh-factory] $1: active account $(gh_factory_who), $GH_FACTORY_STATE; hosts.yml modified $(gh_factory_hosts_mtime)"
+  gh_factory_log_check "$1"
   if [ "$rc" -eq 1 ]; then
     gh_factory_try_switch "$1"; rc=$?
   fi
