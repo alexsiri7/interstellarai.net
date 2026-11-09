@@ -363,15 +363,24 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
     [ -f "$T/state/archon-update-issue-v0.14.0" ]
 }
 
-@test "a superseded close that failed is retried when that newer tag then lands" {
+@test "landing a tag closes the older tags' open issues; a failed close is retried by the next no-op run" {
     publish_release 0.11.0
-    echo "https://github.com/alexsiri7/Archon/issues/101" > "$T/state/archon-update-issue-v0.11.0"
     echo "https://github.com/alexsiri7/Archon/issues/250" > "$T/state/archon-update-issue-v0.10.9"
+    export STUB_GH_CLOSE_FAIL="https://github.com/alexsiri7/Archon/issues/250"
     run "$SCRIPT"
     [ "$status" -eq 0 ]
     [ "$(status_field outcome)" = "updated" ]
     [ "$(grep -c '^issue create' "$GH_ARGV")" -eq 0 ]
-    grep -qxF 'issue close https://github.com/alexsiri7/Archon/issues/250 --repo alexsiri7/Archon --reason not planned --comment superseded by #101: the next sync goes from v0.10.1 straight to v0.11.0' "$GH_ARGV"
+    grep -qxF 'issue close https://github.com/alexsiri7/Archon/issues/250 --repo alexsiri7/Archon --reason not planned --comment superseded: Archon is now on v0.11.0' "$GH_ARGV"
+    [ -f "$T/state/archon-update-issue-v0.10.9" ]
+
+    # next run has nothing to update, the close works now
+    export STUB_GH_CLOSE_FAIL=""
+    rm -f "$GH_ARGV"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ "$(status_field outcome)" = "noop" ]
+    grep -qxF 'issue close https://github.com/alexsiri7/Archon/issues/250 --repo alexsiri7/Archon --reason not planned --comment superseded: Archon is already on v0.11.0' "$GH_ARGV"
     [ "$(grep -c '^issue close' "$GH_ARGV")" -eq 1 ]
     [ ! -f "$T/state/archon-update-issue-v0.10.9" ]
 }

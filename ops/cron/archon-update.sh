@@ -15,7 +15,9 @@
 #      base release; `git ls-remote --tags upstream` (semver-sorted, final
 #      releases only, no pre-releases) is the newest one. No fetch, nothing
 #      written anywhere, so a no-op week touches the live repo not at all.
-#      Nothing newer → log "current vX", status ok/noop, exit 0.
+#      Every run first closes the issues of tags older than the live one
+#      (step 3) that are still open. Nothing newer → log "current vX", status
+#      ok/noop, exit 0.
 #   2. guard: exit 0 (status deferred, last_ok left alone so a permanent
 #      deferral goes stale in check_archon_update) while any archon run is
 #      `running` (lib/archon-active-runs.sh, plus a pgrep for the CLI) or the
@@ -75,9 +77,8 @@
 #      checkout the recorded branch, `bun install --frozen-lockfile`, restart,
 #      re-check; ntfy "rolled back", status failed. The pushed branch is left
 #      on the fork for a human, and the next run refuses to re-push over it.
-#      Success → ntfy "Archon updated vX → vY", status ok/updated, and any
-#      older tag's issue a failed run on this tag could not close as
-#      superseded is closed now.
+#      Success → ntfy "Archon updated vX → vY", status ok/updated, and every
+#      older tag's open issue is closed as superseded.
 #      Naming: the fork's sync branches are upstream-sync-<version without v>
 #      (upstream-sync-0.10 was hand-made; this script makes upstream-sync-0.11.0
 #      etc.). Live is never fast-forwarded in place: the old branch stays as
@@ -189,7 +190,7 @@ file_issue() {
     if [ -f "$marker" ]; then
         url=$(cat "$marker")
         log "issue for $TAG already filed: $url"
-        close_superseded_issues "$url"
+        close_superseded_by_issue "$url"
         return 0
     fi
     local -a label=()
@@ -201,28 +202,31 @@ file_issue() {
     if url=$(gh issue create --repo "$ISSUE_REPO" --title "$title" --body "$body" "${label[@]}" 2>&1); then
         printf '%s\n' "$url" > "$marker"
         log "filed $url"
-        close_superseded_issues "$url"
+        close_superseded_by_issue "$url"
     else
         log "WARNING: gh issue create failed: $url"
     fi
 }
 
-# close_superseded_issues <new issue url>: close every issue filed for a tag
-# older than $TAG, pointing at the new one. The marker goes only once the
-# close succeeds, so a failed close is retried on the next run that files or
-# finds $TAG's issue, or that lands $TAG.
+close_superseded_by_issue() {
+    close_superseded_issues "$TAG" "superseded by #${1##*/}: the next sync goes from $CURRENT straight to $TAG"
+}
+
+# close_superseded_issues <tag> <comment>: close every issue filed for a tag
+# older than <tag> with <comment>. The marker goes only once the close
+# succeeds; every run sweeps the tags older than the live one, so a failed
+# close is retried on the next run.
 close_superseded_issues() {
-    local new_url="$1" marker old_tag old_url out
+    local newer="$1" comment="$2" marker old_tag old_url out
     for marker in "$STATE_DIR"/archon-update-issue-v*; do
         [ -f "$marker" ] || continue
         old_tag="${marker##*/archon-update-issue-}"
-        [ "$old_tag" != "$TAG" ] || continue
-        [ "$(printf '%s\n%s\n' "$old_tag" "$TAG" | sort -V | tail -n 1)" = "$TAG" ] || continue
+        [ "$old_tag" != "$newer" ] || continue
+        [ "$(printf '%s\n%s\n' "$old_tag" "$newer" | sort -V | tail -n 1)" = "$newer" ] || continue
         old_url=$(cat "$marker")
-        if out=$(gh issue close "$old_url" --repo "$ISSUE_REPO" --reason "not planned" \
-            --comment "superseded by #${new_url##*/}: the next sync goes from $CURRENT straight to $TAG" 2>&1); then
+        if out=$(gh issue close "$old_url" --repo "$ISSUE_REPO" --reason "not planned" --comment "$comment" 2>&1); then
             rm -f "$marker"
-            log "closed $old_url ($old_tag) as superseded by $new_url"
+            log "closed $old_url ($old_tag) as superseded by $newer"
         else
             log "WARNING: could not close $old_url ($old_tag) as superseded — retrying next run: $out"
         fi
@@ -376,6 +380,7 @@ if [ -z "$LATEST" ]; then
     exit 1
 fi
 log "live: $LIVE_DIR at $LIVE_SHA (${LIVE_BRANCH:-detached}), base release $CURRENT; upstream newest release $LATEST"
+close_superseded_issues "$CURRENT" "superseded: Archon is already on $CURRENT"
 if [ "$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | sort -V | tail -n 1)" = "$CURRENT" ]; then
     log "current $CURRENT — nothing to do"
     write_status ok noop
@@ -562,9 +567,7 @@ printf 'previous_sha=%s\nprevious_branch=%s\nnew_branch=%s\nrecorded=%s\n' \
 log "swapping $LIVE_DIR: $LIVE_BRANCH ($LIVE_SHA) → $BRANCH (rollback record: $PREVIOUS_FILE)"
 if swap_live "$BRANCH" "$TAG"; then
     write_status ok updated
-    if [ -f "$STATE_DIR/archon-update-issue-$TAG" ]; then
-        close_superseded_issues "$(cat "$STATE_DIR/archon-update-issue-$TAG")"
-    fi
+    close_superseded_issues "$TAG" "superseded: Archon is now on $TAG"
     notify "Archon updated $CURRENT → $TAG" \
         "$LIVE_DIR is on $BRANCH ($(git -C "$LIVE_DIR" rev-parse --short HEAD)), $SERVICE healthy. Previous: $LIVE_BRANCH @ ${LIVE_SHA:0:12} ($PREVIOUS_FILE)." \
         default rocket
