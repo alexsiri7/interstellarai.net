@@ -25,7 +25,7 @@ setup() {
     # `issue create` prints issue GH_CREATE_NUM's URL (default 99), or fails
     # with GH_CREATE_RC; GH_DEP_RC fails the native blocked_by POST, and its GET
     # reads blocked-by-<N> (default: none). `issue list` prints the issue-list
-    # fixture (default: none).
+    # fixture (default: none), or fails with GH_ISSUE_LIST_RC.
     cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_ARGV"
@@ -63,7 +63,8 @@ case "$*" in
     n=$(sed -E 's#.*/issues/([0-9]+)/.*#\1#' <<<"$*")
     jq -r "$4" "$GH_FIXTURES/blocked-by-$n" 2>/dev/null || echo '[]' | jq -r "$4" ;;
   "api "*/issues/*)   [ "$3" = --jq ] && jq -r "$4" "$GH_FIXTURES/ref-${2##*/}" 2>/dev/null ;;
-  *"issue list"*)     cat "$GH_FIXTURES/issue-list" 2>/dev/null || echo '[]' ;;
+  *"issue list"*)     cat "$GH_FIXTURES/issue-list" 2>/dev/null || echo '[]'
+                       exit "${GH_ISSUE_LIST_RC:-0}" ;;
   *"issue create"*)
     [ -n "${GH_CREATE_RC:-}" ] && exit "$GH_CREATE_RC"
     echo "https://github.com/alexsiri7/testproj/issues/${GH_CREATE_NUM:-99}" ;;
@@ -1852,6 +1853,49 @@ assert_split() {
     done
 }
 
+# SPLIT_RE hand-copies this grammar from triage.md; nothing else ties them
+# together, so a meaning-preserving reword of the policy could silently stop
+# matching (R1, review of #281). This reads the live template out of the
+# policy file and checks SPLIT_RE (via the whole script) still recognizes it.
+@test "SPLIT_RE still matches the exact split grammar triage.md specifies" {
+    local triage_md
+    triage_md="$(cd "$(dirname "$SCRIPT")/../../.." && pwd)/.archon/sdlc/policy/triage.md"
+    local template
+    template=$(grep -oE '`a split: this issue keeps.*#<N>`' "$triage_md" | sed -E 's/^`//; s/`$//')
+    [ -n "$template" ]
+    local filled=$template
+    filled=${filled//<part delivered now>/Escalate a stuck PR once per PR}
+    filled=${filled//<part that waits>/Route gate-blocked PRs to the ops reviewer}
+    filled=${filled//<N>/246}
+
+    printf 'Not done: blocked on %s. Part 2 needs the reviewer #246 adds.\nReport: /x/triage.md\n' "$filled" > "$RUN_LOG"
+    ref 246 open-issue
+
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    assert_split
+}
+
+@test "split whose comments read, blocker lookup, dedup list or create call fails logs which GitHub call failed, not silently (R4, review of #281)" {
+    for case in comments blocker dedup create; do
+        : > "$GH_ARGV"; rm -f "$T/fixtures/"*
+        unset GH_COMMENTS_RC GH_ISSUE_LIST_RC GH_CREATE_RC
+        split_verdict
+        case "$case" in
+            comments) export GH_COMMENTS_RC=1 ;;
+            blocker)  : ;; # no ref 246 fixture: the blocker lookup itself fails
+            dedup)    ref 246 open-issue; export GH_ISSUE_LIST_RC=1 ;;
+            create)   ref 246 open-issue; export GH_CREATE_RC=1 ;;
+        esac
+
+        run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+        [ "$status" -eq 0 ] || { echo "case $case: status $status"; return 1; }
+        [[ "$output" == *"#9 — could not"*"not split"* ]] || { echo "case $case: $output"; return 1; }
+        [ "$(gh_calls 'archon-settle-split')" -eq 0 ] || { echo "case $case split"; return 1; }
+    done
+}
+
 @test "--recheck never splits" {
     split_verdict
     ref 246 open-issue
@@ -1906,14 +1950,15 @@ assert_landed_here() {
     grep -q -- "Re-queued as archon:queued" "$GH_ARGV"
 }
 
-@test "land-here not taken: decided before, a cross-repo blocker, tier 3, or a decided No delivery needed takes today's path" {
+@test "land-here not taken: decided before, a cross-repo blocker, tier 3, a health issue, or a decided No delivery needed takes today's path" {
     lachesis_on
-    for case in marker cross-repo tier3 no-delivery-needed; do
+    for case in marker cross-repo tier3 health no-delivery-needed; do
         : > "$GH_ARGV"; : > "$LACHESIS_ARGV"; rm -f "$T/fixtures/"*
         land_here_verdict
         case "$case" in
             marker) fixture comments-259 '<!-- archon-settle-land-here -->' ;;
             tier3) sed -i 's/closure logic/billing logic/' "$RUN_LOG" ;;
+            health) fixture body-259 'Auto-filed by `pipeline-health-cron.sh`' ;;
             cross-repo) sed -i 's/precedent issue #212/alexsiri7\/lachesis#301/' "$RUN_LOG" ;;
             no-delivery-needed) sed -i '1s/^Not done: blocked on /No delivery needed: /' "$RUN_LOG" ;;
         esac
@@ -1989,15 +2034,18 @@ assert_landed_here() {
     grep -q -- "Re-queued as archon:queued" "$GH_ARGV"
 }
 
-@test "plan-level split stop not taken: already answered, no open-issue ref, or no split language" {
+@test "plan-level split stop not taken: already answered, no open-issue ref, no split language, tier 3, or a health issue" {
     lachesis_on
-    for case in marker no-ref no-split-language; do
+    for case in marker no-ref no-split-language tier3 health; do
         : > "$GH_ARGV"; : > "$LACHESIS_ARGV"; rm -f "$T/fixtures/"*
         printf '%s\n' '{"delivered":false,"reason":"blocked","pr_url":"","summary":"Not done: planning stopped on calls only a person can make. Part 2 waits on open issue #246 and should be split off.\nReport: /x/plan.md"}' > "$RUN_LOG"
+        ref 246 open-issue
         case "$case" in
-            marker) ref 246 open-issue; fixture comments-9 '<!-- archon-settle-plan-split -->' ;;
+            marker) fixture comments-9 '<!-- archon-settle-plan-split -->' ;;
             no-ref) ref 246 closed-issue ;;
-            no-split-language) ref 246 open-issue; sed -i 's/ and should be split off//' "$RUN_LOG" ;;
+            no-split-language) sed -i 's/ and should be split off//' "$RUN_LOG" ;;
+            tier3) sed -i 's/Part 2 waits/Part 2 touches billing and waits/' "$RUN_LOG" ;;
+            health) fixture body-9 'Auto-filed by `pipeline-health-cron.sh`' ;;
         esac
 
         run "$SCRIPT" testproj 9 "$RUN_LOG"

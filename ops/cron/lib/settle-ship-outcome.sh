@@ -518,9 +518,12 @@ source "$(dirname "${BASH_SOURCE[0]}")/lachesis.sh"
 settle_split() {
   [[ "$verdict" =~ $SPLIT_RE ]] || return 0
   local keeps="${BASH_REMATCH[1]}" waits="${BASH_REMATCH[2]}" blocker="${BASH_REMATCH[3]}"
-  local bodies state id new_title url new dep_note="" today
+  local bodies state id state_id new_title url new dep_note="" today
   [ "$blocker" != "$issue" ] || return 0
-  bodies=$(gh api --paginate "repos/$repo/issues/$issue/comments" --jq '.[].body | @json' 2>/dev/null) || return 0
+  if ! bodies=$(gh api --paginate "repos/$repo/issues/$issue/comments" --jq '.[].body | @json' 2>/dev/null); then
+    echo "$(date -Is) [issue-pickup] $project: #$issue — could not read its comments to check for a split already taken; not split"
+    return 0
+  fi
   if grep -qF '<!-- archon-settle-split: ' <<<"$bodies"; then
     this_runs_comments "$bodies" | grep -qF '<!-- archon-settle-split: ' || return 0
     if ! release_for_rerun; then
@@ -530,24 +533,34 @@ settle_split() {
     echo "$(date -Is) [issue-pickup] $project: #$issue — split already taken by this run; released to run again"
     exit 0
   fi
-  read -r state id < <(gh api "repos/$repo/issues/$blocker" \
-    --jq 'if .pull_request then "pr" else "\(.state) \(.id)" end' 2>/dev/null)
+  if ! state_id=$(gh api "repos/$repo/issues/$blocker" \
+      --jq 'if .pull_request then "pr" else "\(.state) \(.id)" end' 2>/dev/null); then
+    echo "$(date -Is) [issue-pickup] $project: #$issue — could not look up blocker #$blocker; not split"
+    return 0
+  fi
+  read -r state id <<<"$state_id"
   [ "${state:-}" = open ] || return 0
 
-  new=$(gh issue list --repo "$repo" --state all --limit 100 --json number,body 2>/dev/null \
-    | jq -r --arg m "<!-- archon-split-from: $issue -->" \
-        '[.[] | select(.body | contains($m)) | .number] | first // empty') || return 0
+  if ! new=$(gh issue list --repo "$repo" --state all --limit 100 --json number,body 2>/dev/null \
+      | jq -r --arg m "<!-- archon-split-from: $issue -->" \
+          '[.[] | select(.body | contains($m)) | .number] | first // empty'); then
+    echo "$(date -Is) [issue-pickup] $project: #$issue — could not list issues to check for one already split from #$issue; not split"
+    return 0
+  fi
   if [ -z "$new" ]; then
     new_title=$waits
     [ "${#new_title}" -gt 100 ] && new_title="${new_title:0:99}…"
-    url=$(gh issue create --repo "$repo" --title "$new_title" --body "Split from #$issue by the factory (#270): ${waits}
+    if ! url=$(gh issue create --repo "$repo" --title "$new_title" --body "Split from #$issue by the factory (#270): ${waits}
 
 **Blocked on:** #$blocker. It runs once #$blocker closes.
 
 #$issue keeps the rest of its outcome: ${keeps}. Its body holds the why, invariants and acceptance this part shares.
 
 <!-- archon-split-from: $issue -->
-<!-- lachesis:automated -->" 2>/dev/null) || return 0
+<!-- lachesis:automated -->" 2>/dev/null); then
+      echo "$(date -Is) [issue-pickup] $project: #$issue — could not create the split-off issue for \"${waits}\"; not split"
+      return 0
+    fi
     new=${url##*/}
     [[ "$new" =~ ^[0-9]+$ ]] || return 0
   fi
