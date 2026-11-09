@@ -18,6 +18,7 @@ setup() {
     TEST_TMP="$(mktemp -d)"
     export HOME="$TEST_TMP/home"
     export ARCHON_CRON_FORCE_TICK=1
+    export SWEEP_MAX_AUDITS=1
     export ARCHON_CRON_SECRETS="$TEST_TMP/secrets.env"
     echo 'NTFY_TOPIC=test-topic' > "$ARCHON_CRON_SECRETS"
     unset CLAUDE_ACCOUNTS CLAUDE_AUTH_STATE_DIR CLAUDE_CONFIG_DIR
@@ -94,15 +95,15 @@ report() {
 }
 
 # The fallback's history: reli's due tests audit was run more recently than
-# filmduel's due security audit, busy has an open audit issue, and clean-code
-# and north-star have no workflow.
+# filmduel's due security audit, busy has an open audit issue, and north-star
+# has no workflow.
 history_fixture() {
     cat > "$TEST_TMP/history.json" <<'EOF'
 {"model":"claude","unreadable":[],"due":[],
  "repos":[
   {"repo":"alexsiri7/busy","open_audit":12,"audits":[{"kind":"architecture","due":true,"capability":null,"last_run":null}]},
   {"repo":"alexsiri7/reli","open_audit":null,"audits":[
-     {"kind":"clean-code","due":true,"capability":null,"last_run":null},
+     {"kind":"north-star","due":true,"capability":null,"last_run":null},
      {"kind":"tests","due":true,"capability":"auth","last_run":{"finished_at":"2026-10-20T02:00:00+00:00"}},
      {"kind":"architecture","due":false,"capability":null,"last_run":{"finished_at":"2026-01-01T00:00:00+00:00"}}]},
   {"repo":"alexsiri7/filmduel","open_audit":null,"audits":[
@@ -218,7 +219,7 @@ EOF
 }
 
 @test "an offered kind no workflow runs falls back to the oldest due one that has one" {
-    offer '{"repo":"alexsiri7/reli","kind":"clean-code","capability":null,"model":"claude"}'
+    offer '{"repo":"alexsiri7/reli","kind":"north-star","capability":null,"model":"claude"}'
     history_fixture
     run "$SCRIPT"
     [ "$status" -eq 0 ]
@@ -249,7 +250,7 @@ EOF
 }
 
 @test "the fallback runs a never-run due audit before one run long ago" {
-    offer '{"repo":"alexsiri7/reli","kind":"clean-code","capability":null,"model":"claude"}'
+    offer '{"repo":"alexsiri7/reli","kind":"north-star","capability":null,"model":"claude"}'
     echo '{"model":"claude","repos":[
       {"repo":"alexsiri7/filmduel","open_audit":null,"audits":[
         {"kind":"security","due":true,"capability":null,"last_run":{"finished_at":"2020-01-01T00:00:00+00:00"}}]},
@@ -262,9 +263,9 @@ EOF
 }
 
 @test "fallback with no due workflow-backed audit runs nothing" {
-    offer '{"repo":"alexsiri7/reli","kind":"clean-code","capability":null,"model":"claude"}'
+    offer '{"repo":"alexsiri7/reli","kind":"north-star","capability":null,"model":"claude"}'
     echo '{"model":"claude","repos":[{"repo":"alexsiri7/reli","open_audit":null,"audits":[
-      {"kind":"clean-code","due":true,"capability":null,"last_run":null},
+      {"kind":"north-star","due":true,"capability":null,"last_run":null},
       {"kind":"security","due":false,"capability":null,"last_run":null}]}]}' > "$TEST_TMP/history.json"
     run "$SCRIPT"
     [ "$status" -eq 0 ]
@@ -287,7 +288,7 @@ EOF
     for next in 'not json' '{"audit":"security"}' 'unreadable-history'; do
         rm -f "$HOME/lachesis-calls" "$HOME/.archon/sweep-state/last-sweep"
         if [ "$next" = unreadable-history ]; then
-            offer '{"repo":"alexsiri7/reli","kind":"clean-code","capability":null,"model":"claude"}'
+            offer '{"repo":"alexsiri7/reli","kind":"north-star","capability":null,"model":"claude"}'
             echo '{"model":"claude"}' > "$TEST_TMP/history.json"
         else
             echo "$next" > "$TEST_TMP/next.json"
@@ -373,4 +374,28 @@ pulls_fixture() {
     [ "$status" -eq 0 ]
     [ "$(summary outcome)" = ok ]
     grep -q '^Sweep not reported' "$HOME/ntfy"
+}
+
+@test "a clean-code offer runs the clean-code audit and counts its clean-code issues" {
+    offer '{"repo":"alexsiri7/reli","kind":"clean-code","capability":null,"model":"claude"}'
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    grep -q ' workflow run archon-clean-code-audit Audit the codebase against Robert C. Martin' "$HOME/archon-calls"
+    grep -q 'labels=clean-code' "$GH_CALLS"
+}
+
+@test "up to SWEEP_MAX_AUDITS audits run in one night" {
+    export SWEEP_MAX_AUDITS=3
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ "$(grep -c ' workflow run ' "$HOME/archon-calls")" -eq 3 ]
+    grep -q 'sweep finished: 3 audit(s) run' <<<"$output"
+}
+
+@test "a failed audit ends the night instead of being retried" {
+    export SWEEP_MAX_AUDITS=3
+    printf '#!/usr/bin/env bash\necho "$CLAUDE_CONFIG_DIR $*" >> "$HOME/archon-calls"\nexit 1\n' > "$HOME/.local/bin/archon"
+    chmod +x "$HOME/.local/bin/archon"
+    run "$SCRIPT"
+    [ "$(grep -c ' workflow run ' "$HOME/archon-calls")" -eq 1 ]
 }

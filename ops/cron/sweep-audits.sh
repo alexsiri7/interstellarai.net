@@ -8,7 +8,11 @@
 # a PR, failed), the issues it filed and its tokens. A failed run is reported
 # too, so Lachesis keeps it due. Nothing offered: nothing runs.
 #
-# Only four kinds have a workflow (audit_spec). When the offer is
+# Up to SWEEP_MAX_AUDITS (default 3) audits run per night, one after another,
+# while the quota gate allows and within SWEEP_DEADLINE_HOURS (default 5); the
+# loop stops at the first failure, since a failed audit stays due.
+#
+# Five kinds have a workflow (audit_spec). When the offer is
 # another kind, the sweep runs the oldest due workflow-backed audit from
 # read_audit_history instead, in a repo with no open audit issue, so an
 # unrunnable kind never stalls it. An audit Lachesis names a non-Claude model
@@ -97,6 +101,9 @@ audit_spec() {
     tests)
       workflow=archon-test-audit issue_label=""
       prompt="Audit test coverage and stability — fix flaky tests, add tests for critical uncovered code paths, improve test quality" ;;
+    clean-code)
+      workflow=archon-clean-code-audit issue_label=clean-code
+      prompt="Audit the codebase against Robert C. Martin's Clean Code standards — above all, keep business rules apart from I/O, frameworks and delivery — and file one issue per coherent refactor" ;;
     requirements)
       workflow=archon-requirements-audit issue_label=$REQUIREMENTS_GAP_LABEL
       prompt="Audit requirements-to-code traceability — verify each requirement in requirements/requirements.yaml is implemented and tested, regenerate requirements/coverage.yaml, and file requirements-gap issues for uncovered or stale requirements and orphaned behavior" ;;
@@ -153,161 +160,192 @@ choose_audit() {
   return 3
 }
 
-rc=0; audit=$(choose_audit) || rc=$?
-case "$rc" in
-  0) ;;
-  3) exit 0 ;;
-  *)
-    sweep_name=- repo_name=-
-    notify "Sweep failed" "Lachesis could not be read — no audit run tonight" high x
-    record_sweep failed lachesis ""
-    exit 1 ;;
-esac
-repo=$(jq -r .repo <<<"$audit")
-kind=$(jq -r .kind <<<"$audit")
-capability=$(jq -r '.capability // ""' <<<"$audit")
-model=$(jq -r '.model // ""' <<<"$audit")
-repo_name=$(basename "$repo")
-audit_spec "$kind"
-sweep_name="${workflow#archon-}"
-[ -n "$capability" ] && prompt+=" Focus this audit on the $capability capability (specs/$capability/)."
+# sweep_once — choose one audit, run it and report it. Returns 0 when an audit ran
+# and was reported clean or findings, 3 when there is nothing (more) to run, 4
+# when the audit ran but was reported failed (it stays due, so the night ends
+# rather than retrying it), and 1 when the sweep itself failed (exit 1).
+sweep_once() {
+  rc=0; audit=$(choose_audit) || rc=$?
+  case "$rc" in
+    0) ;;
+    3) return 3 ;;
+    *)
+      sweep_name=- repo_name=-
+      notify "Sweep failed" "Lachesis could not be read — no audit run tonight" high x
+      record_sweep failed lachesis ""
+      return 1 ;;
+  esac
+  repo=$(jq -r .repo <<<"$audit")
+  kind=$(jq -r .kind <<<"$audit")
+  capability=$(jq -r '.capability // ""' <<<"$audit")
+  model=$(jq -r '.model // ""' <<<"$audit")
+  repo_name=$(basename "$repo")
+  audit_spec "$kind"
+  sweep_name="${workflow#archon-}"
+  [ -n "$capability" ] && prompt+=" Focus this audit on the $capability capability (specs/$capability/)."
 
-log "=== nightly sweep: $sweep_name on $repo_name (Lachesis: $kind${capability:+/$capability}, model $model, $(jq -r .source <<<"$audit")) ==="
+  log "=== nightly sweep: $sweep_name on $repo_name (Lachesis: $kind${capability:+/$capability}, model $model, $(jq -r .source <<<"$audit")) ==="
 
-if [[ "${model,,}" != *claude* ]]; then
-  log "Lachesis names ${model:-no model} for audits; no workflow here runs it — not run"
-  exit 0
-fi
+  if [[ "${model,,}" != *claude* ]]; then
+    log "Lachesis names ${model:-no model} for audits; no workflow here runs it — not run"
+    return 3
+  fi
 
-# read_findings <since-iso> — sets issues (a JSON array of numbers) and prs
-# (a count) to what the run launched at since_epoch filed. Its PR is the one
-# on its own branch, archon/task-<workflow>-<launch ms>; its issues are the
-# ones the factory login opened since then under its workflow's issue_label.
-# Fails when GitHub could not be read.
-read_findings() {
-  local since_iso="$1" pulls login listing
-  pulls=$(gh_factory_gh api "repos/$repo/pulls?state=all&sort=created&direction=desc&per_page=100") || return 1
-  prs=$(jq --arg p "archon/task-$workflow-" --argjson ms "$(( since_epoch * 1000 ))" \
-    '[.[].head.ref | select(startswith($p)) | ltrimstr($p) | select((tonumber? // 0) >= $ms)] | length' \
-    <<<"$pulls") || return 1
-  [ -n "$issue_label" ] || return 0
-  login=$(gh_factory_gh api user --jq .login) && [ -n "$login" ] || return 1
-  listing=$(gh_factory_gh api "repos/$repo/issues?creator=$login&labels=$issue_label&state=all&since=$since_iso&per_page=100") || return 1
-  issues=$(jq -c --arg s "$since_iso" \
-    '[.[] | select((has("pull_request") | not) and .created_at >= $s) | .number]' <<<"$listing") || return 1
-}
+  # read_findings <since-iso> — sets issues (a JSON array of numbers) and prs
+  # (a count) to what the run launched at since_epoch filed. Its PR is the one
+  # on its own branch, archon/task-<workflow>-<launch ms>; its issues are the
+  # ones the factory login opened since then under its workflow's issue_label.
+  # Fails when GitHub could not be read.
+  read_findings() {
+    local since_iso="$1" pulls login listing
+    pulls=$(gh_factory_gh api "repos/$repo/pulls?state=all&sort=created&direction=desc&per_page=100") || return 1
+    prs=$(jq --arg p "archon/task-$workflow-" --argjson ms "$(( since_epoch * 1000 ))" \
+      '[.[].head.ref | select(startswith($p)) | ltrimstr($p) | select((tonumber? // 0) >= $ms)] | length' \
+      <<<"$pulls") || return 1
+    [ -n "$issue_label" ] || return 0
+    login=$(gh_factory_gh api user --jq .login) && [ -n "$login" ] || return 1
+    listing=$(gh_factory_gh api "repos/$repo/issues?creator=$login&labels=$issue_label&state=all&since=$since_iso&per_page=100") || return 1
+    issues=$(jq -c --arg s "$since_iso" \
+      '[.[] | select((has("pull_request") | not) and .created_at >= $s) | .number]' <<<"$listing") || return 1
+  }
 
-# report_audit ok|failed — report the run that just finished with
-# report_audit_run. Sets outcome and issue_list ("#12 #13") for the ntfy. A
-# run whose findings GitHub would not show is reported failed, so Lachesis
-# keeps it due instead of recording it clean.
-report_audit() {
-  local issues="[]" prs=0 tokens args
-  outcome=failed issue_list=""
-  if [ "$1" = ok ]; then
-    if read_findings "$(date -u -d "@$since_epoch" +%FT%TZ)"; then
-      outcome=clean
-      [ "$issues" != "[]" ] || [ "$prs" -gt 0 ] && outcome=findings
-      issue_list=$(jq -r 'map("#\(.)") | join(" ")' <<<"$issues")
+  # report_audit ok|failed — report the run that just finished with
+  # report_audit_run. Sets outcome and issue_list ("#12 #13") for the ntfy. A
+  # run whose findings GitHub would not show is reported failed, so Lachesis
+  # keeps it due instead of recording it clean.
+  report_audit() {
+    local issues="[]" prs=0 tokens args
+    outcome=failed issue_list=""
+    if [ "$1" = ok ]; then
+      if read_findings "$(date -u -d "@$since_epoch" +%FT%TZ)"; then
+        outcome=clean
+        [ "$issues" != "[]" ] || [ "$prs" -gt 0 ] && outcome=findings
+        issue_list=$(jq -r 'map("#\(.)") | join(" ")' <<<"$issues")
+      else
+        issues="[]"
+        log "could not read the issues and PRs $sweep_name filed in $repo — reporting it failed"
+        notify "Sweep unread: $repo_name" "$sweep_name ran, but GitHub would not show what it filed; reported failed so Lachesis keeps it due" default warning
+      fi
+    fi
+    tokens=$(python3 -B "$SCRIPT_DIR/lib/archon_run_tokens.py" "$workflow" "$repo" \
+      "$(date -u -d "@$since_epoch" '+%F %T')") || log "the run's tokens could not be read — reporting 0"
+    jq -e 'has("tokens_in")' <<<"$tokens" >/dev/null 2>&1 || tokens='{"tokens_in":0,"tokens_out":0}'
+    args=$(jq -nc --arg repo "$repo" --arg kind "$kind" --arg outcome "$outcome" \
+      --arg at "$(date -u -Iseconds)" --arg model "$model" --arg cap "$capability" \
+      --argjson issues "$issues" --argjson t "$tokens" \
+      '{repo: $repo, kind: $kind, outcome: $outcome, finished_at: $at, model: $model,
+        issues: $issues, tokens_in: $t.tokens_in, tokens_out: $t.tokens_out}
+       + (if $cap == "" then {} else {capability: $cap} end)')
+    if lachesis_call report_audit_run "$args" >/dev/null; then
+      log "reported: outcome=$outcome issues=${issue_list:-none} tokens=$(jq -r '"\(.tokens_in) in / \(.tokens_out) out"' <<<"$tokens")"
     else
-      issues="[]"
-      log "could not read the issues and PRs $sweep_name filed in $repo — reporting it failed"
-      notify "Sweep unread: $repo_name" "$sweep_name ran, but GitHub would not show what it filed; reported failed so Lachesis keeps it due" default warning
+      log "report_audit_run failed for $sweep_name on $repo_name"
+      notify "Sweep not reported: $repo_name" "$sweep_name ($outcome) could not be reported to Lachesis; Lachesis keeps it due and will offer it again" default warning
+    fi
+  }
+
+  # Skip if a sweep is already running for this repo (lock TTL: 2h)
+  lock_file="$STATE_DIR/${repo_name}.lock"
+  if [ -f "$lock_file" ]; then
+    lock_age=$(( $(date +%s) - $(stat -c %Y "$lock_file") ))
+    if [ "$lock_age" -lt 7200 ]; then
+      log "$repo_name: sweep still running (${lock_age}s), skipping"
+      return 3
+    else
+      log "$repo_name: stale lock (${lock_age}s), removing"
+      rm -f "$lock_file"
     fi
   fi
-  tokens=$(python3 -B "$SCRIPT_DIR/lib/archon_run_tokens.py" "$workflow" "$repo" \
-    "$(date -u -d "@$since_epoch" '+%F %T')") || log "the run's tokens could not be read — reporting 0"
-  jq -e 'has("tokens_in")' <<<"$tokens" >/dev/null 2>&1 || tokens='{"tokens_in":0,"tokens_out":0}'
-  args=$(jq -nc --arg repo "$repo" --arg kind "$kind" --arg outcome "$outcome" \
-    --arg at "$(date -u -Iseconds)" --arg model "$model" --arg cap "$capability" \
-    --argjson issues "$issues" --argjson t "$tokens" \
-    '{repo: $repo, kind: $kind, outcome: $outcome, finished_at: $at, model: $model,
-      issues: $issues, tokens_in: $t.tokens_in, tokens_out: $t.tokens_out}
-     + (if $cap == "" then {} else {capability: $cap} end)')
-  if lachesis_call report_audit_run "$args" >/dev/null; then
-    log "reported: outcome=$outcome issues=${issue_list:-none} tokens=$(jq -r '"\(.tokens_in) in / \(.tokens_out) out"' <<<"$tokens")"
-  else
-    log "report_audit_run failed for $sweep_name on $repo_name"
-    notify "Sweep not reported: $repo_name" "$sweep_name ($outcome) could not be reported to Lachesis; Lachesis keeps it due and will offer it again" default warning
+
+  # Find local clone
+  local_path=""
+  for candidate in \
+    "$HOME/.archon/workspaces/${repo}/source" \
+    "$BASE_DIR/$repo_name" \
+    "$HOME/$repo_name"; do
+    if [ -d "$candidate/.git" ]; then
+      local_path="$candidate"
+      break
+    fi
+  done
+
+  if [ -z "$local_path" ]; then
+    log "ERROR: no local clone found for $repo"
+    notify "Sweep: $repo_name" "No local clone found" high warning
+    record_sweep failed no-clone ""
+    return 1
   fi
+
+  # Alternate Claude accounts by day, falling back through the rest in order.
+  IFS=':' read -ra accounts <<< "$(runas_claude_accounts)"
+  account_dir=""
+  start=$(( 10#$(date +%j) % ${#accounts[@]} ))
+  for (( i = 0; i < ${#accounts[@]}; i++ )); do
+    candidate="${accounts[$(( (start + i) % ${#accounts[@]} ))]}"
+    if claude_auth_check "$candidate"; then
+      account_dir="$candidate"
+      break
+    fi
+  done
+  if [ -z "$account_dir" ]; then
+    log "$repo_name: $sweep_name sweep not run — no Claude account in CLAUDE_ACCOUNTS passes the probe"
+    notify "Sweep failed: $repo_name" "$sweep_name not run — every Claude account failed auth" high x
+    record_sweep failed auth ""
+    return 1
+  fi
+  export CLAUDE_CONFIG_DIR="$account_dir"
+
+  log "repo: $local_path"
+  log "workflow: $workflow"
+  log "account: $(basename "$account_dir")"
+  if ! cd "$local_path"; then
+    log "ERROR: the clone $local_path is gone"
+    notify "Sweep: $repo_name" "The clone went away before the audit ran" high warning
+    record_sweep failed no-clone "$account_dir"
+    return 1
+  fi
+  touch "$lock_file"
+
+  logfile="$LOG_DIR/${repo_name}-${sweep_name}-$(date +%Y%m%d).log"
+
+  since_epoch=$(date +%s)
+  if CLAUDECODE=0 archon workflow run "$workflow" "$prompt" > "$logfile" 2>&1; then
+    report_audit ok
+    log "$repo_name: $sweep_name sweep complete"
+    notify "Sweep done: $repo_name" "$sweep_name complete — $outcome${issue_list:+, issues $issue_list}" default mag
+    record_sweep ok "" "$account_dir"
+  else
+    report_audit failed
+    log "$repo_name: $sweep_name sweep failed (see $logfile)"
+    notify "Sweep failed: $repo_name" "$sweep_name failed — check $logfile" high x
+    record_sweep failed workflow "$account_dir"
+  fi
+
+  rm -f "$lock_file"
+  log "=== nightly sweep complete ==="
+  # A failed run stays due: stop for the night rather than retry it now.
+  [ "${outcome:-failed}" != failed ] || return 4
+  return 0
 }
 
-# Skip if a sweep is already running for this repo (lock TTL: 2h)
-lock_file="$STATE_DIR/${repo_name}.lock"
-if [ -f "$lock_file" ]; then
-  lock_age=$(( $(date +%s) - $(stat -c %Y "$lock_file") ))
-  if [ "$lock_age" -lt 7200 ]; then
-    log "$repo_name: sweep still running (${lock_age}s), skipping"
-    exit 0
-  else
-    log "$repo_name: stale lock (${lock_age}s), removing"
-    rm -f "$lock_file"
+# Up to SWEEP_MAX_AUDITS audits per night (default 3), one after another, while the
+# quota gate allows and before SWEEP_DEADLINE_HOURS (default 5) have passed since the
+# sweep began. Lachesis still decides what is due and whether it fits the budget.
+max_audits=${SWEEP_MAX_AUDITS:-3}
+deadline=$(( $(date +%s) + ${SWEEP_DEADLINE_HOURS:-5} * 3600 ))
+ran=0
+while [ "$ran" -lt "$max_audits" ]; do
+  if [ "$ran" -gt 0 ]; then
+    [ "$(date +%s)" -lt "$deadline" ] || { log "deadline reached after $ran audit(s)"; break; }
+    quota_may_launch "sweep-audits" || break
+    cd "$SCRIPT_DIR" || break
   fi
-fi
-
-# Find local clone
-local_path=""
-for candidate in \
-  "$HOME/.archon/workspaces/${repo}/source" \
-  "$BASE_DIR/$repo_name" \
-  "$HOME/$repo_name"; do
-  if [ -d "$candidate/.git" ]; then
-    local_path="$candidate"
-    break
-  fi
+  outcome="" rc=0
+  sweep_once || rc=$?
+  case "$rc" in
+    0) ran=$((ran + 1)) ;;
+    3|4) break ;;
+    *) exit 1 ;;
+  esac
 done
-
-if [ -z "$local_path" ]; then
-  log "ERROR: no local clone found for $repo"
-  notify "Sweep: $repo_name" "No local clone found" high warning
-  record_sweep failed no-clone ""
-  exit 1
-fi
-
-# Alternate Claude accounts by day, falling back through the rest in order.
-IFS=':' read -ra accounts <<< "$(runas_claude_accounts)"
-account_dir=""
-start=$(( 10#$(date +%j) % ${#accounts[@]} ))
-for (( i = 0; i < ${#accounts[@]}; i++ )); do
-  candidate="${accounts[$(( (start + i) % ${#accounts[@]} ))]}"
-  if claude_auth_check "$candidate"; then
-    account_dir="$candidate"
-    break
-  fi
-done
-if [ -z "$account_dir" ]; then
-  log "$repo_name: $sweep_name sweep not run — no Claude account in CLAUDE_ACCOUNTS passes the probe"
-  notify "Sweep failed: $repo_name" "$sweep_name not run — every Claude account failed auth" high x
-  record_sweep failed auth ""
-  exit 1
-fi
-export CLAUDE_CONFIG_DIR="$account_dir"
-
-log "repo: $local_path"
-log "workflow: $workflow"
-log "account: $(basename "$account_dir")"
-if ! cd "$local_path"; then
-  log "ERROR: the clone $local_path is gone"
-  notify "Sweep: $repo_name" "The clone went away before the audit ran" high warning
-  record_sweep failed no-clone "$account_dir"
-  exit 1
-fi
-touch "$lock_file"
-
-logfile="$LOG_DIR/${repo_name}-${sweep_name}-$(date +%Y%m%d).log"
-
-since_epoch=$(date +%s)
-if CLAUDECODE=0 archon workflow run "$workflow" "$prompt" > "$logfile" 2>&1; then
-  report_audit ok
-  log "$repo_name: $sweep_name sweep complete"
-  notify "Sweep done: $repo_name" "$sweep_name complete — $outcome${issue_list:+, issues $issue_list}" default mag
-  record_sweep ok "" "$account_dir"
-else
-  report_audit failed
-  log "$repo_name: $sweep_name sweep failed (see $logfile)"
-  notify "Sweep failed: $repo_name" "$sweep_name failed — check $logfile" high x
-  record_sweep failed workflow "$account_dir"
-fi
-
-rm -f "$lock_file"
-log "=== nightly sweep complete ==="
+log "sweep finished: $ran audit(s) run"
