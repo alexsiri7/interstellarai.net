@@ -348,7 +348,7 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
     [ ! -f "$T/state/archon-update-issue-v0.13.2" ]
     grep -q '^issue close https://github.com/alexsiri7/Archon/issues/250 ' "$GH_ARGV"
     [ "$(cat "$T/state/archon-update-issue-v0.12.9")" = "https://github.com/alexsiri7/Archon/issues/250" ]
-    [[ "$output" == *"could not close https://github.com/alexsiri7/Archon/issues/250 (v0.12.9) as superseded"* ]]
+    [[ "$output" == *"could not close https://github.com/alexsiri7/Archon/issues/250 (v0.12.9) as superseded — retrying next run: stub: close failed"* ]]
     [ "$(grep -c '^issue close' "$GH_ARGV")" -eq 2 ]
 
     # next run, same tag, close works now: no new issue, the kept marker is retried
@@ -361,6 +361,19 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
     [ "$(grep -c '^issue close' "$GH_ARGV")" -eq 1 ]
     [ ! -f "$T/state/archon-update-issue-v0.12.9" ]
     [ -f "$T/state/archon-update-issue-v0.14.0" ]
+}
+
+@test "a superseded close that failed is retried when that newer tag then lands" {
+    publish_release 0.11.0
+    echo "https://github.com/alexsiri7/Archon/issues/101" > "$T/state/archon-update-issue-v0.11.0"
+    echo "https://github.com/alexsiri7/Archon/issues/250" > "$T/state/archon-update-issue-v0.10.9"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ "$(status_field outcome)" = "updated" ]
+    [ "$(grep -c '^issue create' "$GH_ARGV")" -eq 0 ]
+    grep -qxF 'issue close https://github.com/alexsiri7/Archon/issues/250 --repo alexsiri7/Archon --reason not planned --comment superseded by #101: the next sync goes from v0.10.1 straight to v0.11.0' "$GH_ARGV"
+    [ "$(grep -c '^issue close' "$GH_ARGV")" -eq 1 ]
+    [ ! -f "$T/state/archon-update-issue-v0.10.9" ]
 }
 
 @test "type-check fails: no push, no swap, worktree kept, ntfy names it, issue filed once" {
