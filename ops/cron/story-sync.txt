@@ -1,0 +1,3 @@
+# story-sync.sh: Annie project id -> game repo whose story/ it feeds.
+# One per line: <annie-project-id> <owner/repo>
+cmvm5pb99000101qux1zltyfa alexsiri7/punland
