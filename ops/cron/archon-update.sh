@@ -119,6 +119,7 @@ LOG_DIR="${ARCHON_CRON_LOG_DIR:-$HOME/.local/state/archon-cron/logs}"
 STATUS_FILE="$STATE_DIR/archon-update-status"
 PREVIOUS_FILE="$STATE_DIR/archon-update-previous"
 LOCK_FILE="$STATE_DIR/archon-update.lock"
+ISSUE_MARKER_PREFIX="$STATE_DIR/archon-update-issue-"
 
 LIVE_DIR="${ARCHON_LIVE_DIR:-/mnt/ext-fast/archon}"
 WORKTREE_BASE="${ARCHON_WORKTREE_BASE:-/mnt/ext-fast/archon-playground}"
@@ -186,7 +187,7 @@ write_status() {
 # file_issue <title> <body>: one issue per tag; the marker holds its URL.
 # With $TAG's issue open, the older tags' issues are moot: closed as superseded.
 file_issue() {
-    local title="$1" body="$2" marker="$STATE_DIR/archon-update-issue-$TAG" url
+    local title="$1" body="$2" marker="$ISSUE_MARKER_PREFIX$TAG" url
     if [ -f "$marker" ]; then
         url=$(cat "$marker")
         log "issue for $TAG already filed: $url"
@@ -219,9 +220,9 @@ close_superseded_by_issue() {
 # newer tag's next escalation (file_issue) or its landing.
 close_superseded_issues() {
     local newer="$1" comment="$2" marker old_tag old_url out
-    for marker in "$STATE_DIR"/archon-update-issue-v*; do
+    for marker in "$ISSUE_MARKER_PREFIX"v*; do
         [ -f "$marker" ] || continue
-        old_tag="${marker##*/archon-update-issue-}"
+        old_tag="${marker#"$ISSUE_MARKER_PREFIX"}"
         [ "$old_tag" != "$newer" ] || continue
         [ "$(printf '%s\n%s\n' "$old_tag" "$newer" | sort -V | tail -n 1)" = "$newer" ] || continue
         old_url=$(cat "$marker")
