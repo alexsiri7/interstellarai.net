@@ -53,13 +53,15 @@
 # 3. Each action is taken or offered once per issue (a comment marker). With
 # pickup off nothing here changes.
 #
-# Before release_if_stale and the tiers, two scope and ownership calls are the
-# factory's own (#270), pickup on or off: a triage split verdict (the grammar
-# in this project's triage policy) files the part that waits as a new issue
-# blocked on its open blocker and runs the issue again for the part it keeps;
-# a stop on where to land the change is answered "land it here" and run again.
-# Each is commented on the issue, asks nothing, is taken once per issue, and
-# never on tier 3 or a pipeline-health issue.
+# Before release_if_stale and the tiers, three scope and ownership calls are
+# the factory's own (#270), pickup on or off: a triage split verdict (the
+# grammar in this project's triage policy) files the part that waits as a new
+# issue blocked on its open blocker and runs the issue again for the part it
+# keeps; a stop on where to land the change is answered "land it here" and
+# run again; a plan-level stop naming a part that waits on another open issue
+# is released to run again so its triage splits it off in turn. Each is
+# commented on the issue, asks nothing, is taken once per issue, and never on
+# tier 3 or a pipeline-health issue.
 #
 # Exit 0 when a verdict was found and recorded, 1 when the log carries none
 # (crash, rate limit, delivered PR) so the caller keeps its existing handling.
@@ -333,6 +335,10 @@ SPLIT_RE='^Not done: blocked on a split: this issue keeps "([^"]+)"; "([^"]+)" w
 LAND_HERE_RE='(whether|where) to land|land(ing)? it (there|here|locally|upstream)'
 # A ref to another repository's issue: a real dependency on its work.
 CROSS_REPO_REF_RE='[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+'
+# A plan-level stop naming a part that waits on another issue and should be
+# split off — the same scope call triage's own SPLIT_RE grammar answers, said
+# in plan's free prose instead of triage's fixed text.
+PLAN_SPLIT_RE='split off|should be split'
 
 # land_here_stop — true when the verdict stops on where to land the change.
 land_here_stop() {
@@ -341,6 +347,25 @@ land_here_stop() {
     *) return 1 ;;
   esac
   grep -qiE "$LAND_HERE_RE" <<<"$verdict_block" && ! grep -qE "$CROSS_REPO_REF_RE" <<<"$verdict_block"
+}
+
+# plan_split_stop — true when a plan-level stop (outcome.ts's catch-all, not
+# triage's own SPLIT_RE grammar) names a part waiting on an open issue in this
+# repo and says to split it off. refs is already same-repo-only (cross-repo
+# "owner/repo#N" mentions are excluded when it is built), so this never fires
+# on a real dependency in another repository.
+plan_split_stop() {
+  case "$verdict" in
+    "Not done: planning stopped on calls only a person can make"*) ;;
+    *) return 1 ;;
+  esac
+  grep -qiE "$PLAN_SPLIT_RE" <<<"$verdict_block" || return 1
+  lookup_ref_kinds
+  local ref
+  for ref in "${refs[@]}"; do
+    [ "${kind[$ref]:-}" = "open-issue" ] && return 0
+  done
+  return 1
 }
 
 if [ "$health_filed" = 0 ] && [[ "$verdict" == "No delivery needed: "* ]]; then
@@ -585,9 +610,39 @@ Released to run again with this as direction. ${requeue_note} Run log: \`${run_l
   exit 0
 }
 
+# settle_plan_split — answers a plan-level stop on a part blocked on another
+# open issue by releasing the issue to run again, so its triage reconsiders
+# and splits the part off with its own SPLIT_RE grammar (settle_split then
+# finishes the split on that later run). Returns when the verdict is not such
+# a stop or it was answered before. This node does not file the new issue
+# itself: plan's free prose does not carry the "keeps"/"waits" text split off
+# into a new issue needs reliably, unlike triage's own fixed grammar.
+settle_plan_split() {
+  plan_split_stop || return 0
+  comments_carry '<!-- archon-settle-plan-split -->' && return 0
+  if ! release_for_rerun; then
+    echo "$(date -Is) [issue-pickup] $project: #$issue — could not release to run again"
+    exit 1
+  fi
+  gh issue comment "$issue" --repo "$repo" --body "archon-ship finished without a PR: ${verdict}
+
+**Decision (factory, $(date +%F)):** a part of this issue waits on another open issue; it is split off, not a person's call (#270). Released to run again; its triage splits off the blocked part.
+${requeue_note} Run log: \`${run_log}\`
+
+<!-- archon-settle-plan-split -->
+<!-- lachesis:automated -->" >/dev/null 2>&1 \
+    || echo "$(date -Is) [issue-pickup] $project: #$issue — released, but could not comment the plan-split decision"
+  lachesis_pickup_enabled && ! lachesis_note "$project" "$issue" \
+      "A part of #$issue waits on another open issue; released to run again so its triage splits it off. Taken without asking (#270). The run's verdict: ${verdict:0:300}" \
+    && echo "$(date -Is) [issue-pickup] $project: #$issue — could not record the note in Lachesis"
+  echo "$(date -Is) [issue-pickup] $project: #$issue — a part waits on another issue; released to run again for triage to split it"
+  exit 0
+}
+
 if [ "$health_filed" = 0 ] && [ "$tier" != 3 ]; then
   settle_split
   settle_land_here
+  settle_plan_split
 fi
 
 stale_note=""

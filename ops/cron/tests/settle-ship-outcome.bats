@@ -1813,6 +1813,19 @@ assert_split() {
     assert_released 9 "--add-label archon:queued"
 }
 
+@test "split whose release fails after a successful comment exits 1, having commented and created once" {
+    split_verdict
+    ref 246 open-issue
+
+    GH_EDIT_RC=1 run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    [ "$status" -eq 1 ]
+    [ "$(gh_calls 'issue create')" -eq 1 ]
+    [ "$(gh_calls 'issue comment')" -eq 1 ]
+    grep -qx -- "<!-- archon-settle-split: 99 -->" "$GH_ARGV"
+    [[ "$output" == *"#9 — split off #99, but could not release to run again"* ]]
+}
+
 @test "split not taken: an unconfirmed blocker, tier 3, a health issue, an earlier split or a failed create takes today's path" {
     lachesis_on
     for case in pr closed-issue self tier3 health marker create-fails; do
@@ -1923,6 +1936,18 @@ assert_landed_here() {
     [ "$(gh_calls 'issue comment')" -eq 0 ]
 }
 
+@test "land-here whose comment fails after a successful release exits 0, having released" {
+    lachesis_on
+    land_here_verdict
+    ref 212 closed-issue
+
+    GH_COMMENT_RC=1 run "$SCRIPT" testproj 259 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_released 259
+    [[ "$output" == *"#259 — released, but could not comment the land-here decision"* ]]
+}
+
 @test "local-landing choice from plan: a planning stop on where to land is answered land it here" {
     lachesis_on
     printf '%s\n' '{"delivered":false,"reason":"blocked","pr_url":"","summary":"Not done: planning stopped on calls only a person can make. The triage policy lives in the shared SDLC pack.\n- Land it here as a project-local override, or upstream in alexsiri7/Archon?\nReport: /x/plan.md"}' > "$RUN_LOG"
@@ -1932,6 +1957,55 @@ assert_landed_here() {
     assert_landed_here
     assert_released 259
     [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 0 ]
+}
+
+# The shape the real #270 settle run is meant to answer (R1, review of #281):
+# plan itself — not triage — names a part waiting on another open issue.
+@test "plan-level split stop: a part waiting on an open issue is released to run again, asking nothing" {
+    lachesis_on
+    printf '%s\n' '{"delivered":false,"reason":"blocked","pr_url":"","summary":"Not done: planning stopped on calls only a person can make. Part 1 can ship now; part 2 waits on open issue #246 and should be split off.\n- Part 2 waits on #246; it is split off, not a person call.\nReport: /x/plan.md"}' > "$RUN_LOG"
+    ref 246 open-issue
+
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    [ "$(gh_calls 'issue create')" -eq 0 ]
+    grep -qx -- "<!-- archon-settle-plan-split -->" "$GH_ARGV"
+    assert_released 9
+    [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 0 ]
+    sed -n 's/^add_note //p' "$LACHESIS_ARGV" | jq -e '.issue == 9 and (.text | contains("waits on another open issue"))'
+    [[ "$output" == *"#9 — a part waits on another issue; released to run again for triage to split it"* ]]
+}
+
+@test "plan-level split stop, pickup off: re-queued with the decision as direction" {
+    export LACHESIS_CALL_CMD="$T/no-such-lachesis"
+    printf '%s\n' '{"delivered":false,"reason":"blocked","pr_url":"","summary":"Not done: planning stopped on calls only a person can make. Part 2 waits on open issue #246 and should be split off.\nReport: /x/plan.md"}' > "$RUN_LOG"
+    ref 246 open-issue
+
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_released 9 "--add-label archon:queued"
+    grep -q -- "Re-queued as archon:queued" "$GH_ARGV"
+}
+
+@test "plan-level split stop not taken: already answered, no open-issue ref, or no split language" {
+    lachesis_on
+    for case in marker no-ref no-split-language; do
+        : > "$GH_ARGV"; : > "$LACHESIS_ARGV"; rm -f "$T/fixtures/"*
+        printf '%s\n' '{"delivered":false,"reason":"blocked","pr_url":"","summary":"Not done: planning stopped on calls only a person can make. Part 2 waits on open issue #246 and should be split off.\nReport: /x/plan.md"}' > "$RUN_LOG"
+        case "$case" in
+            marker) ref 246 open-issue; fixture comments-9 '<!-- archon-settle-plan-split -->' ;;
+            no-ref) ref 246 closed-issue ;;
+            no-split-language) ref 246 open-issue; sed -i 's/ and should be split off//' "$RUN_LOG" ;;
+        esac
+
+        run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+        [ "$status" -eq 0 ] || { echo "case $case: status $status"; return 1; }
+        [ "$(gh_calls 'archon-settle-plan-split')" -eq 0 ] || { echo "case $case took"; return 1; }
+        assert_parked 9
+    done
 }
 
 # A same-repo block that only mentions a shared pack is no stop on where to land.
