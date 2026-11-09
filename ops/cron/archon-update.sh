@@ -702,7 +702,6 @@ printf 'previous_sha=%s\nprevious_branch=%s\nnew_branch=%s\nrecorded=%s\n' \
 log "swapping $LIVE_DIR: $LIVE_BRANCH ($LIVE_SHA) → $BRANCH (rollback record: $PREVIOUS_FILE)"
 if swap_live "$BRANCH" "$TAG"; then
     write_status ok updated
-    close_superseded_issues "$TAG" "superseded: Archon is now on $TAG"
     close_resolved_escalations
     notify "Archon updated $CURRENT → $TAG" \
         "$LIVE_DIR is on $BRANCH ($(git -C "$LIVE_DIR" rev-parse --short HEAD)), $SERVICE healthy. Previous: $LIVE_BRANCH @ ${LIVE_SHA:0:12} ($PREVIOUS_FILE)." \

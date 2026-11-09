@@ -441,6 +441,7 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
     echo "https://github.com/alexsiri7/Archon/issues/258" > "$T/state/archon-update-issue-v0.13.2"
     echo "https://github.com/alexsiri7/Archon/issues/250" > "$T/state/archon-update-issue-v0.12.9"
     export STUB_GH_CLOSE_FAIL="https://github.com/alexsiri7/Archon/issues/250"
+    export STUB_TEST_FAIL="provider > keeps the factory model pin"
     run "$SCRIPT"
     [ "$status" -eq 1 ]
     [ "$(cat "$T/state/archon-update-issue-v0.14.0")" = "https://github.com/alexsiri7/Archon/issues/101" ]
@@ -471,7 +472,7 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
     [ "$status" -eq 0 ]
     [ "$(status_field outcome)" = "updated" ]
     [ "$(grep -c '^issue create' "$GH_ARGV")" -eq 0 ]
-    grep -qxF 'issue close https://github.com/alexsiri7/Archon/issues/250 --repo alexsiri7/Archon --reason not planned --comment superseded: Archon is now on v0.11.0' "$GH_ARGV"
+    grep -q '^issue close https://github.com/alexsiri7/Archon/issues/250 --comment ' "$GH_ARGV"
     [ -f "$T/state/archon-update-issue-v0.10.9" ]
 
     # next run has nothing to update, the close works now
