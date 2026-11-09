@@ -24,7 +24,7 @@ status_file() { cat "$SANDBOX/state/tool-freshness"; }
     [ "$status" -eq 0 ]
     [ ! -e "$NTFY_OUT" ]
     [ ! -e "$CALLS" ]
-    [[ "$output" == *"everything current (7 checked, 0 unknown), nothing to apply — no ntfy"* ]]
+    [[ "$output" == *"everything current (8 checked, 0 unknown), nothing to apply — no ntfy"* ]]
     grep -qx 'status=current' "$SANDBOX/state/tool-freshness"
     grep -qx 'apply_status=ok' "$SANDBOX/state/tool-freshness"
     grep -qx 'apply_count=0' "$SANDBOX/state/tool-freshness"
@@ -337,4 +337,35 @@ status_file() { cat "$SANDBOX/state/tool-freshness"; }
     grep -qx 'sudo -n /usr/bin/systemctl restart archon-serve.service' "$CALLS"
     ! grep -q 'systemctl --user' "$CALLS"
     grep -q 'apply: bun upgraded 1.4.1 → 1.4.2' "$SANDBOX/state/tool-freshness"
+}
+
+@test "blender behind: sha256 verified, smoke-tested, shared symlink flipped, old tree removed" {
+    export LATEST_BLENDER=5.3.1
+    make_blender_release 5.3.1
+    run "$SCRIPT" --apply
+    [ "$status" -eq 0 ]
+    grep -q 'curl https://releases.test/blender/Blender5.3/blender-5.3.1-linux-x64.tar.xz' "$CALLS"
+    [ "$(readlink "$SANDBOX/tools/blender")" = "$SANDBOX/tools/blender-5.3.1-linux-x64" ]
+    [ ! -e "$SANDBOX/tools/blender-5.2.3-linux-x64" ]
+    [ "$("$HOME/.local/bin/blender" --version | head -n1)" = "Blender 5.3.1 LTS" ]
+    grep -q '^apply: blender upgraded 5.2.3 → 5.3.1$' "$SANDBOX/state/tool-freshness"
+}
+
+@test "blender smoke test fails: not installed, the shared install untouched" {
+    export LATEST_BLENDER=5.3.1
+    make_blender_release 5.3.1 broken
+    run "$SCRIPT" --apply
+    [ "$(readlink "$SANDBOX/tools/blender")" = "$SANDBOX/tools/blender-5.2.3-linux-x64" ]
+    [ ! -e "$SANDBOX/tools/blender-5.3.1-linux-x64" ]
+    [ ! -e "$SANDBOX/tools/blender-5.3.1-linux-x64.partial" ]
+    grep -q '^apply: blender failed the new build failed its headless glb-export smoke test' "$SANDBOX/state/tool-freshness"
+}
+
+@test "blender checksum mismatch: nothing unpacked" {
+    export LATEST_BLENDER=5.3.1
+    make_blender_release 5.3.1 ok 0000000000000000000000000000000000000000000000000000000000000000
+    run "$SCRIPT" --apply
+    [ ! -e "$SANDBOX/tools/blender-5.3.1-linux-x64.partial" ]
+    [ "$(readlink "$SANDBOX/tools/blender")" = "$SANDBOX/tools/blender-5.2.3-linux-x64" ]
+    grep -q '^apply: blender failed sha256 mismatch' "$SANDBOX/state/tool-freshness"
 }

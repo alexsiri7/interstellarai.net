@@ -22,6 +22,9 @@ tool_freshness_sandbox() {
     export TOOL_FRESHNESS_NODE_INDEX_URL="file://node-index"
     export TOOL_FRESHNESS_NODE_SCHEDULE_URL="file://node-schedule"
     export TOOL_FRESHNESS_TODAY="2026-09-21"
+    export TOOL_FRESHNESS_BLENDER_INDEX="file://blender-index/"
+    export TOOL_UPDATE_BLENDER_ROOT="$SANDBOX/tools"
+    export TOOL_UPDATE_BLENDER_RELEASES="https://releases.test/blender"
     export TOOL_UPDATE_SCRATCH_ROOT="$SANDBOX/scratch"
     export TOOL_UPDATE_RELEASES="https://releases.test"
     export TOOL_UPDATE_PGVECTOR_REPO="https://releases.test/pgvector.git"
@@ -33,12 +36,13 @@ tool_freshness_sandbox() {
     export FIXTURES="$SANDBOX/fixtures"
 
     # Installed versions.
-    export STUB_BUN=1.4.2 STUB_GH=2.101.0 STUB_SHELLCHECK=0.11.0 STUB_UV=0.12.17 STUB_NODE=v24.21.0 STUB_PG=17.11
+    export STUB_BUN=1.4.2 STUB_GH=2.101.0 STUB_SHELLCHECK=0.11.0 STUB_UV=0.12.17 STUB_NODE=v24.21.0 STUB_PG=17.11 STUB_BLENDER=5.2.3
     export STUB_ARCHON_DESCRIBE=v0.10.1-14-gac9c9f21
     export STUB_ARCHON_TAG_IN_HEAD=1         # merge-base --is-ancestor result
     export STUB_ARCHON_BEHIND=37
     # Latest versions.
     export LATEST_BUN=bun-v1.4.2 LATEST_GH=v2.101.0 LATEST_SHELLCHECK=v0.11.0 LATEST_UV=0.12.17 LATEST_ARCHON=v0.10.1
+    export LATEST_BLENDER=5.2.3            # newest tarball in the newest Blender<X.Y>/ dir
     export LATEST_PG_TAGS=$'18.1.0\n17.11.0\n17.10.0\n16.9.0'
     # Apply-side knobs.
     export STUB_HEALTH=200                   # what the archon-serve health URL answers
@@ -78,6 +82,12 @@ tool_freshness_sandbox() {
                 -o)                   want_dest=1 ;;
                 file://node-index)    cat "$FIXTURES/index.json"; return 0 ;;
                 file://node-schedule) cat "$FIXTURES/schedule.json"; return 0 ;;
+                file://blender-index/)
+                    [ -n "$LATEST_BLENDER" ] || return 22
+                    printf '<a href="Blender5.0/">Blender5.0/</a>\n<a href="Blender%s/">x</a>\n' "${LATEST_BLENDER%.*}"; return 0 ;;
+                file://blender-index/Blender*)
+                    printf '<a href="blender-%s.0-linux-x64.tar.xz">a</a>\n<a href="blender-%s-linux-x64.tar.xz">b</a>\n<a href="blender-%s-windows-x64.zip">c</a>\n' \
+                        "${LATEST_BLENDER%.*}" "$LATEST_BLENDER" "$LATEST_BLENDER"; return 0 ;;
                 ntfy.sh/*)            printf '%s\n' "$@" >> "$NTFY_OUT"; return 0 ;;
                 http://health.test/*) printf '%s' "$STUB_HEALTH"; return 0 ;;
                 https://releases.test/*) url="$a" ;;
@@ -242,6 +252,37 @@ STUB
     printf "default_version = '0.8.1'\n" > "$HOME/.local/opt/postgresql-17/share/extension/vector.control"
     ln -sfn ../opt/postgresql-17/bin/pg_dump    "$HOME/.local/bin/pg_dump"
     ln -sfn ../opt/postgresql-17/bin/pg_restore "$HOME/.local/bin/pg_restore"
+    rm -rf "$SANDBOX/tools"; mkdir -p "$SANDBOX/tools"
+    make_blender_tree "$SANDBOX/tools/blender-$STUB_BLENDER-linux-x64" "$STUB_BLENDER"
+    ln -sfn "$SANDBOX/tools/blender-$STUB_BLENDER-linux-x64" "$SANDBOX/tools/blender"
+    ln -sfn "$SANDBOX/tools/blender/blender" "$HOME/.local/bin/blender"
+}
+
+# make_blender_tree <dir> <version> [ok|broken] — a fake Blender: --version, and
+# `-b ... --python-expr` writes the filepath='...' it is given (the glb smoke
+# test). `broken`: the smoke test writes nothing.
+make_blender_tree() {
+    mkdir -p "$1"
+    cat > "$1/blender" <<STUB
+#!/usr/bin/env bash
+[ "\$1" = --version ] && { echo "Blender $2 LTS"; echo "build date: 2026-01-01"; exit 0; }
+echo "blender \$*" >> "\$CALLS"
+[ "${3:-ok}" = broken ] && exit 1
+f=\$(printf '%s' "\${*: -1}" | sed -nE "s/.*filepath='([^']+)'.*/\\1/p")
+[ -n "\$f" ] && printf 'glTF' > "\$f"
+exit 0
+STUB
+    chmod +x "$1/blender"
+}
+
+# make_blender_release <version> [ok|broken] [sha-override]: the tarball (one
+# top-level dir, like the real one) + blender-<v>.sha256 in the Blender<X.Y>/ dir.
+make_blender_release() {
+    local v="$1" d="$FIXTURES/build/blender-$1-linux-x64" asset="blender-$1-linux-x64.tar.xz" hex
+    rm -rf "$d"; make_blender_tree "$d" "$v" "${2:-ok}"
+    tar cJf "$FIXTURES/dl/$asset" -C "$FIXTURES/build" "blender-$v-linux-x64"
+    hex="${3:-$(sha256sum "$FIXTURES/dl/$asset" | cut -d' ' -f1)}"
+    printf '%s  %s\n%s  blender-%s-windows-x64.zip\n' "$hex" "$asset" "0000" "$v" > "$FIXTURES/dl/blender-$v.sha256"
 }
 
 # ---------------------------------------------------------------------------
