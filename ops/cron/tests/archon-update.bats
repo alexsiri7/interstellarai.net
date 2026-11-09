@@ -45,6 +45,7 @@ setup() {
     export STUB_ARCHON_RUNNING=""        # workflow_name of a running run in the listing
     export STUB_ARCHON_RUNS_FAIL=0       # 1: the run listing is unreadable
     export STUB_PGREP_HIT=0
+    export STUB_GH_CLOSE_FAIL=""         # issue URL whose `gh issue close` fails
 
     write_stubs
     build_repos
@@ -142,6 +143,7 @@ STUB
     cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_ARGV"
+[ "$1 $2" = "issue close" ] && [ "$3" = "$STUB_GH_CLOSE_FAIL" ] && { echo "stub: close failed" >&2; exit 1; }
 n=$(grep -c '^issue create' "$GH_ARGV")
 echo "https://github.com/alexsiri7/Archon/issues/$((100 + n))"
 STUB
@@ -332,6 +334,55 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
     [[ "$output" == *"issue for v0.11.0 already filed: https://github.com/alexsiri7/Archon/issues/101"* ]]
     [ "$(issues_filed)" -eq 1 ]
     grep -q '^Archon update FAILED: merge' "$NTFY_LOG"
+}
+
+@test "a newer tag's escalation closes the older tags' open ones as superseded; a failed close keeps its marker" {
+    publish_release 0.14.0 conflict
+    echo "https://github.com/alexsiri7/Archon/issues/258" > "$T/state/archon-update-issue-v0.13.2"
+    echo "https://github.com/alexsiri7/Archon/issues/250" > "$T/state/archon-update-issue-v0.12.9"
+    export STUB_GH_CLOSE_FAIL="https://github.com/alexsiri7/Archon/issues/250"
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(cat "$T/state/archon-update-issue-v0.14.0")" = "https://github.com/alexsiri7/Archon/issues/101" ]
+    grep -qxF 'issue close https://github.com/alexsiri7/Archon/issues/258 --repo alexsiri7/Archon --reason not planned --comment superseded by #101: the next sync goes from v0.10.1 straight to v0.14.0' "$GH_ARGV"
+    [ ! -f "$T/state/archon-update-issue-v0.13.2" ]
+    grep -q '^issue close https://github.com/alexsiri7/Archon/issues/250 ' "$GH_ARGV"
+    [ "$(cat "$T/state/archon-update-issue-v0.12.9")" = "https://github.com/alexsiri7/Archon/issues/250" ]
+    [[ "$output" == *"could not close https://github.com/alexsiri7/Archon/issues/250 (v0.12.9) as superseded — marker kept for a retry: stub: close failed"* ]]
+    [ "$(grep -c '^issue close' "$GH_ARGV")" -eq 2 ]
+
+    # next run, same tag, close works now: no new issue, the kept marker is retried
+    export STUB_GH_CLOSE_FAIL=""
+    rm -f "$GH_ARGV"
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    ! grep -q '^issue create' "$GH_ARGV"
+    grep -qxF 'issue close https://github.com/alexsiri7/Archon/issues/250 --repo alexsiri7/Archon --reason not planned --comment superseded by #101: the next sync goes from v0.10.1 straight to v0.14.0' "$GH_ARGV"
+    [ "$(grep -c '^issue close' "$GH_ARGV")" -eq 1 ]
+    [ ! -f "$T/state/archon-update-issue-v0.12.9" ]
+    [ -f "$T/state/archon-update-issue-v0.14.0" ]
+}
+
+@test "landing a tag closes the older tags' open issues; a failed close is retried by the next no-op run" {
+    publish_release 0.11.0
+    echo "https://github.com/alexsiri7/Archon/issues/250" > "$T/state/archon-update-issue-v0.10.9"
+    export STUB_GH_CLOSE_FAIL="https://github.com/alexsiri7/Archon/issues/250"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ "$(status_field outcome)" = "updated" ]
+    [ "$(grep -c '^issue create' "$GH_ARGV")" -eq 0 ]
+    grep -qxF 'issue close https://github.com/alexsiri7/Archon/issues/250 --repo alexsiri7/Archon --reason not planned --comment superseded: Archon is now on v0.11.0' "$GH_ARGV"
+    [ -f "$T/state/archon-update-issue-v0.10.9" ]
+
+    # next run has nothing to update, the close works now
+    export STUB_GH_CLOSE_FAIL=""
+    rm -f "$GH_ARGV"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ "$(status_field outcome)" = "noop" ]
+    grep -qxF 'issue close https://github.com/alexsiri7/Archon/issues/250 --repo alexsiri7/Archon --reason not planned --comment superseded: Archon is already on v0.11.0' "$GH_ARGV"
+    [ "$(grep -c '^issue close' "$GH_ARGV")" -eq 1 ]
+    [ ! -f "$T/state/archon-update-issue-v0.10.9" ]
 }
 
 @test "type-check fails: no push, no swap, worktree kept, ntfy names it, issue filed once" {
