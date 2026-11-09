@@ -53,7 +53,29 @@ STATUS_FILE="$DB_BACKUP_STATE_DIR/db-backup-status"
 # lib/pg-backup.sh, shared with restore-test.sh.
 PROJECTS=("${PG_BACKUP_PROJECTS[@]}")
 
+# Egress budget. Supabase's free plan allows 5.5 GB of egress a month and every
+# dump counts against it. Musenmingle's schema (thumbnails and embeddings,
+# ~70 MB a dump) taken every 3h was ~0.5 GB a day and blew the quota in
+# November 2026. Projects listed here back up once a day; the rest every run.
+# Format: "name=hours name=hours".
+PG_BACKUP_EVERY_HOURS="${PG_BACKUP_EVERY_HOURS-musenmingle=24}"
+
 log() { echo "$LOG_TAG $(date '+%Y-%m-%d %H:%M:%S') $*"; }
+
+# backup_due <name>: 0 when the project's newest archive is older than its
+# PG_BACKUP_EVERY_HOURS interval (less a 30-minute slack for cron jitter), or
+# when it has no interval or no archive yet.
+backup_due() {
+    local name="$1" pair every="" newest age_min
+    for pair in $PG_BACKUP_EVERY_HOURS; do
+        [ "${pair%%=*}" = "$name" ] && every="${pair#*=}"
+    done
+    [ -n "$every" ] || return 0
+    newest=$(find "$BACKUP_ROOT/$name" -maxdepth 1 -name '*.sql.gz' -printf '%T@\n' 2>/dev/null | sort -rn | head -1)
+    [ -n "$newest" ] || return 0
+    age_min=$(( ( $(date +%s) - ${newest%.*} ) / 60 ))
+    [ "$age_min" -ge $(( every * 60 - 30 )) ]
+}
 
 notify() {
     local title="$1" msg="$2" priority="${3:-default}" tags="${4:-robot}"
@@ -157,6 +179,10 @@ backup_project() {
 
 for entry in "${PROJECTS[@]}"; do
     IFS='|' read -r name url_var schema table <<< "$entry"
+    if ! backup_due "$name"; then
+        log "SKIP: $name not due (backs up every ${PG_BACKUP_EVERY_HOURS}; saves Supabase egress)"
+        SKIPPED+=("$name"); continue
+    fi
     rc=0
     backup_project "$name" "$url_var" "$schema" "$table" || rc=$?
     case "$rc" in

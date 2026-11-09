@@ -259,3 +259,33 @@ archives() { find "$T/backups/reli" -name '*.sql.gz' 2>/dev/null; }
     grep -q '^table=events.sources$' "$T"/backups/musenmingle/*.meta
     ! grep -q 'kindred:k\|musenmingle:t\|postgresql://' "$STUB_ARGV"
 }
+
+@test "a project with an interval is skipped while its newest archive is younger than it" {
+    export PG_BACKUP_EVERY_HOURS="reli=24"
+    mkdir -p "$T/backups/reli"
+    echo x | gzip > "$T/backups/reli/reli-recent.sql.gz"
+    touch -d '-2 hours' "$T/backups/reli/reli-recent.sql.gz"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SKIP: reli not due"* ]]
+    [ ! -s "$STUB_ARGV" ]
+}
+
+@test "a project with an interval backs up once its newest archive is older than it" {
+    export PG_BACKUP_EVERY_HOURS="reli=24"
+    mkdir -p "$T/backups/reli"
+    echo x | gzip > "$T/backups/reli/reli-old.sql.gz"
+    touch -d '-24 hours' "$T/backups/reli/reli-old.sql.gz"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK: reli backed up"* ]]
+}
+
+@test "musenmingle backs up daily by default; other projects every run" {
+    unset PG_BACKUP_EVERY_HOURS
+    grep -q 'PG_BACKUP_EVERY_HOURS="${PG_BACKUP_EVERY_HOURS-musenmingle=24}"' "$SCRIPT"
+    mkdir -p "$T/backups/reli"
+    echo x | gzip > "$T/backups/reli/reli-recent.sql.gz"
+    run "$SCRIPT"
+    [[ "$output" == *"OK: reli backed up"* ]]
+}
