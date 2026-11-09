@@ -29,7 +29,8 @@
 #      branch removed, ntfy with the file list, one GitHub issue per tag on
 #      $ARCHON_UPDATE_ISSUE_REPO (alexsiri7/interstellarai.net, labelled
 #      manual-review so the factory leaves it alone; marker
-#      archon-update-issue-<tag>), status failed.
+#      archon-update-issue-<tag>; filing it closes the older tags' issues as
+#      superseded), status failed.
 #      Adopting a hand-resolved merge: when $ARCHON_UPDATE_ORIGIN_REMOTE already
 #      has upstream-sync-<version> and that branch contains both the tag and the
 #      live HEAD, the worktree is made from it and the merge is skipped (log
@@ -180,10 +181,13 @@ write_status() {
 }
 
 # file_issue <title> <body>: one issue per tag; the marker holds its URL.
+# With $TAG's issue open, the older tags' issues are moot: closed as superseded.
 file_issue() {
     local title="$1" body="$2" marker="$STATE_DIR/archon-update-issue-$TAG" url
     if [ -f "$marker" ]; then
-        log "issue for $TAG already filed: $(cat "$marker")"
+        url=$(cat "$marker")
+        log "issue for $TAG already filed: $url"
+        close_superseded_issues "$url"
         return 0
     fi
     local -a label=()
@@ -195,9 +199,31 @@ file_issue() {
     if url=$(gh issue create --repo "$ISSUE_REPO" --title "$title" --body "$body" "${label[@]}" 2>&1); then
         printf '%s\n' "$url" > "$marker"
         log "filed $url"
+        close_superseded_issues "$url"
     else
         log "WARNING: gh issue create failed: $url"
     fi
+}
+
+# close_superseded_issues <new issue url>: close every issue filed for a tag
+# older than $TAG, pointing at the new one. The marker goes only once the
+# close succeeds, so a failed close is retried on the next run.
+close_superseded_issues() {
+    local new_url="$1" marker old_tag old_url
+    for marker in "$STATE_DIR"/archon-update-issue-v*; do
+        [ -f "$marker" ] || continue
+        old_tag="${marker##*/archon-update-issue-}"
+        [ "$old_tag" != "$TAG" ] || continue
+        [ "$(printf '%s\n%s\n' "$old_tag" "$TAG" | sort -V | tail -n 1)" = "$TAG" ] || continue
+        old_url=$(cat "$marker")
+        if gh issue close "$old_url" --repo "$ISSUE_REPO" --reason "not planned" \
+            --comment "superseded by #${new_url##*/}: the next sync goes from $CURRENT straight to $TAG" >/dev/null 2>&1; then
+            rm -f "$marker"
+            log "closed $old_url ($old_tag) as superseded by $new_url"
+        else
+            log "WARNING: could not close $old_url ($old_tag) as superseded — retrying next run"
+        fi
+    done
 }
 
 # fail_run <step> <summary> <detail>: log, status, ntfy, issue, exit 1.
