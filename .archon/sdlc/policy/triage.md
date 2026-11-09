@@ -32,7 +32,8 @@ The factory's triage policy for this project. It replaces the SDLC pack's defaul
     alexsiri7/Archon, another project), route it as work for this repository and say
     so in the assessment. Never `BLOCKED` on where to land. `BLOCKED` on another
     repository only when nothing here can deliver the outcome, naming its issue as
-    `owner/repo#N`. (Owner decision on #259, 2026-11-07.)
+    `owner/repo#N`. (Owner's comment on #259, 2026-11-07 — the same decision the
+    opening paragraph cites by #259's 2026-11-08 close date.)
   - *Split off a blocked part.* When an item bundles an outcome deliverable now with
     one that waits on an open issue in this repository, declare `BLOCKED` with
     `blocked_reason` exactly
