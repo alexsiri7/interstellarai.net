@@ -366,15 +366,37 @@ if [ "$MODE" = gh-token ]; then
     [[ "$tok" =~ ^(github_pat_|ghp_)[A-Za-z0-9_]{20,}$ ]] || { echo "    not a GitHub PAT (want github_pat_... or ghp_...); refusing — see README step (a)" >&2; exit 1; }
     ghbin="$AH/.local/bin/gh"
     [ -x "$ghbin" ] || { echo "    $ghbin missing — run: sudo $0" >&2; exit 1; }
-    if printf '%s\n' "$tok" | runuser -u "$ARCHON_USER" -- env -i HOME="$AH" PATH="$AH/.local/bin:/usr/bin:/bin" \
-            "$ghbin" auth login --hostname github.com --git-protocol https --with-token; then
+    as_archon_gh() { runuser -u "$ARCHON_USER" -- env -i HOME="$AH" PATH="$AH/.local/bin:/usr/bin:/bin" "$ghbin" "$@"; }
+    # gh auth login also makes the new account active, which would otherwise
+    # silently undo whatever account the automated owner-account switch
+    # (#272, ops/cron/lib/gh-factory.sh) last put in place. Take the same
+    # lock that switch uses, restore the prior active account afterward.
+    gh_token_lock="${GH_FACTORY_SWITCH_LOCK:-$OWNER_HOME/.archon/state/gh-factory-switch.lock}"
+    mkdir -p "$(dirname "$gh_token_lock")"
+    exec {gh_token_fd}>"$gh_token_lock"
+    if ! flock -w 60 "$gh_token_fd"; then
+        echo "    another gh-factory account switch holds $gh_token_lock — try again shortly" >&2
+        exit 1
+    fi
+    prev_login=$(as_archon_gh api user --jq .login 2>/dev/null) || prev_login=""
+    [[ "$prev_login" =~ ^[A-Za-z0-9-]+$ ]] || prev_login=""
+    if printf '%s\n' "$tok" | as_archon_gh auth login --hostname github.com --git-protocol https --with-token; then
         done_ "gh auth login done for $ARCHON_USER"
     else
         echo "    gh auth login failed" >&2; exit 1
     fi
     unset tok
-    runuser -u "$ARCHON_USER" -- "$WRAPPER_DST" gh-probe
-    exit $?
+    runuser -u "$ARCHON_USER" -- "$WRAPPER_DST" gh-probe; probe_rc=$?
+    new_login=$(as_archon_gh api user --jq .login 2>/dev/null) || new_login=""
+    if [ -n "$prev_login" ] && [ "$prev_login" != "$new_login" ]; then
+        if as_archon_gh auth switch -u "$prev_login" >/dev/null 2>&1; then
+            done_ "restored the active account to $prev_login (gh auth login had switched it to ${new_login:-?})"
+        else
+            echo "    could not restore the active account to $prev_login after gh auth login switched it to ${new_login:-?} — run: runuser -u $ARCHON_USER -- env HOME=$AH PATH=$AH/.local/bin:/usr/bin:/bin $ghbin auth switch -u $prev_login" >&2
+        fi
+    fi
+    exec {gh_token_fd}>&-
+    exit "$probe_rc"
 fi
 
 if [ "$MODE" = claude-token ]; then

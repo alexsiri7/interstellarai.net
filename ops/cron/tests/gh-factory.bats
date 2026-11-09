@@ -280,14 +280,21 @@ load_check() {
     source <(awk '/^check_gh_factory\(\)/{p=1} p{print} p && /^}$/{p=0}' "$CRON_DIR/pipeline-health-cron.sh")
 }
 
-@test "check_gh_factory: blocked alerts once per episode, recovery clears it" {
+@test "check_gh_factory: blocked alerts after 2 consecutive ticks, recovery clears it" {
     load_check
     rate_limit 0 0 60
     run check_gh_factory
-    [ "$(wc -l < "$NTFY_SENT")" -eq 1 ]
-    grep -q 'Factory GitHub identity blocked | alexsiri7-factory, as asiri: GraphQL limit 0' "$NTFY_SENT"
+    [ ! -e "$NTFY_SENT" ]                     # first held tick: no alert yet
+    [[ "$output" == *"gh-factory: held"* ]]
+    [ -f "$T/state/gh-factory-held" ]
+    [ ! -f "$T/state/gh-factory-alerted" ]
+
+    run check_gh_factory
+    [ "$(wc -l < "$NTFY_SENT")" -eq 1 ]        # second consecutive tick: alerts
+    grep -q 'factory launches held: GitHub identity blocked | alexsiri7-factory, as asiri: GraphQL limit 0' "$NTFY_SENT"
     grep -q '| urgent$' "$NTFY_SENT"
     [ -f "$T/state/gh-factory-alerted" ]
+
     run check_gh_factory
     [[ "$output" == *"gh-factory: BLOCKED"* ]]
     [ "$(wc -l < "$NTFY_SENT")" -eq 1 ]       # the marker holds the repeat
@@ -296,17 +303,22 @@ load_check() {
     run check_gh_factory
     [[ "$output" == *"gh-factory: recovered"* ]]
     [ ! -f "$T/state/gh-factory-alerted" ]
+    [ ! -f "$T/state/gh-factory-held" ]
 
     rate_limit 0 0 60
     run check_gh_factory
-    [ "$(wc -l < "$NTFY_SENT")" -eq 2 ]       # a new episode alerts again
+    [ "$(wc -l < "$NTFY_SENT")" -eq 1 ]       # a new episode's first tick holds, not alerts
+    run check_gh_factory
+    [ "$(wc -l < "$NTFY_SENT")" -eq 2 ]       # its second tick alerts again
 }
 
 @test "check_gh_factory: an undelivered ntfy is retried next tick" {
     load_check
     rate_limit 0 0 60
     export STUB_NTFY_RC=1
-    run check_gh_factory
+    run check_gh_factory                      # first held tick: no ntfy attempt yet
+    [ ! -e "$NTFY_SENT" ]
+    run check_gh_factory                      # second tick: attempts, fails
     [ ! -f "$T/state/gh-factory-alerted" ]
     [[ "$output" == *"ntfy not delivered"* ]]
 }
@@ -347,14 +359,15 @@ load_check() {
     [ "$(wc -l < "$T/ntfy-curl")" -eq 1 ]      # the switch's own ntfy
 }
 
-@test "check_gh_factory: blocked with no owner token to switch to alerts once per episode" {
+@test "check_gh_factory: blocked with no owner token to switch to alerts after 2 consecutive ticks" {
     load_check
     export ARCHON_RUN_AS=archon STUB_OWNER_TOKEN=""
     rate_limit 0 0 60
     run check_gh_factory
+    [ ! -e "$NTFY_SENT" ]                     # first held tick: no alert yet
     run check_gh_factory
-    [ "$(wc -l < "$NTFY_SENT")" -eq 1 ]
-    grep -q 'Factory GitHub identity blocked | alexsiri7-factory, as archon: GraphQL limit 0' "$NTFY_SENT"
+    [ "$(wc -l < "$NTFY_SENT")" -eq 1 ]        # second consecutive tick: alerts
+    grep -q 'factory launches held: GitHub identity blocked | alexsiri7-factory, as archon: GraphQL limit 0' "$NTFY_SENT"
     ! grep -q '^gh auth switch' "$ARGV"
 }
 
