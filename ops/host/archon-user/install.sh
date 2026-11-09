@@ -371,7 +371,16 @@ if [ "$MODE" = gh-token ]; then
     # silently undo whatever account the automated owner-account switch
     # (#272, ops/cron/lib/gh-factory.sh) last put in place. Take the same
     # lock that switch uses, restore the prior active account afterward.
-    gh_token_lock="${GH_FACTORY_SWITCH_LOCK:-$OWNER_HOME/.archon/state/gh-factory-switch.lock}"
+    # The path itself is gh-factory.sh's own default, not a second hand-typed
+    # copy of it (R1 of the #281 review): sourcing it has no side effect
+    # beyond variable assignments and function definitions under its
+    # _GH_FACTORY_SH guard, so this can only ever agree with the switch lock
+    # gh_factory_try_switch actually opens.
+    gh_token_lock=$(HOME="$OWNER_HOME" bash -c '
+        source "$1/ops/cron/lib/gh-factory.sh"
+        printf "%s\n" "$GH_FACTORY_SWITCH_LOCK"
+    ' _ "$REPO_DIR") || { echo "    could not resolve the gh-factory switch lock path from $REPO_DIR/ops/cron/lib/gh-factory.sh" >&2; exit 1; }
+    [ -n "$gh_token_lock" ] || { echo "    gh-factory.sh resolved an empty switch lock path" >&2; exit 1; }
     mkdir -p "$(dirname "$gh_token_lock")"
     exec {gh_token_fd}>"$gh_token_lock"
     # The owner's own cron scripts (ops/cron/lib/gh-factory.sh's

@@ -305,18 +305,41 @@ STUB
     ! grep -q 'auth switch' "$T/archon-home/.gh-argv"
 }
 
-@test "GH_FACTORY_SWITCH_LOCK's hand-duplicated default agrees between gh-factory.sh and install.sh (R4)" {
-    owner_home=$(getent passwd asiri | cut -d: -f6)
-    [ -n "$owner_home" ] || skip "asiri user not present in this environment"
-    # install.sh's gh_token_lock default is $OWNER_HOME/.archon/state/gh-factory-switch.lock
-    # (install.sh:374); gh-factory.sh's GH_FACTORY_SWITCH_LOCK default is
-    # $HOME/.archon/state/gh-factory-switch.lock (gh-factory.sh:54). The owner's
-    # own cron scripts run with HOME=$OWNER_HOME, so the two must agree there.
-    gh_factory_default=$(env -i HOME="$owner_home" PATH="$PATH" bash -c '
-        unset GH_FACTORY_SWITCH_LOCK
+@test "--set-gh-token (sandboxed): exit is the probe's failure, not swallowed by a successful (no-op) restore (R2)" {
+    gh_token_stubs
+    printf alexsiri7-factory > "$T/archon-home/.gh-login"
+    PATH="$T/bin:$PATH" ARCHON_USER_INSTALL_SANDBOX="$T" STUB_PROBE_RC=1 run "$D/install.sh" --set-gh-token < "$T/tok"
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"restore"* ]]
+    ! grep -q 'auth switch' "$T/archon-home/.gh-argv"
+}
+
+@test "--set-gh-token (sandboxed), GH_FACTORY_SWITCH_LOCK unset: the lock install.sh actually takes is gh-factory.sh's own live default, not a copy of it (R1, R4)" {
+    gh_token_stubs
+    unset GH_FACTORY_SWITCH_LOCK
+    printf alexsiri7-factory > "$T/archon-home/.gh-login"
+    # install.sh resolves its lock path with HOME=$OWNER_HOME, where OWNER_HOME
+    # comes from `getent passwd asiri` (install.sh:106); stub getent so that
+    # lookup lands inside $T instead of the real asiri account, everything
+    # else passed through to the real getent.
+    mkdir -p "$T/owner-home"
+    cat > "$T/bin/getent" <<STUB
+#!/usr/bin/env bash
+if [ "\$1" = passwd ] && [ "\$2" = asiri ]; then
+    echo "asiri:x:1000:1000::$T/owner-home:/bin/bash"
+    exit 0
+fi
+exec /usr/bin/getent "\$@"
+STUB
+    chmod +x "$T/bin/getent"
+    PATH="$T/bin:$PATH" ARCHON_USER_INSTALL_SANDBOX="$T" STUB_PROBE_RC=0 run "$D/install.sh" --set-gh-token < "$T/tok"
+    [ "$status" -eq 0 ]
+    # gh-factory.sh's own default, sourced directly (not install.sh's code),
+    # for the same HOME install.sh just used — a live resolution to diff
+    # install.sh's actual behavior against, not a hand-typed literal.
+    gh_factory_default=$(HOME="$T/owner-home" bash -c '
         source "$1/../../cron/lib/gh-factory.sh"
         echo "$GH_FACTORY_SWITCH_LOCK"
     ' _ "$D")
-    install_default="$owner_home/.archon/state/gh-factory-switch.lock"
-    [ "$gh_factory_default" = "$install_default" ]
+    [ -e "$gh_factory_default" ]
 }
