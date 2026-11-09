@@ -17,7 +17,8 @@
 #      it is green again. Release/deploy/side-effect workflows are never touched
 #   2. Prod deploy failed or lagging main HEAD → file issue + fire archon (dedup by SHA);
 #      lagging = undeployed past the repo's p95 Production-run latency + 5 min
-#      (floor 15 min, cap 1h)
+#      (floor 15 min, cap 1h). A successful deploy closes the open ones,
+#      labelled factory-closed
 #   3. Zombie archon DB runs (status=running, age >4h) → abandon
 #   4. Disk >85% on / or /mnt/ext-fast → autoclean, then ntfy only if still
 #      >=85%. For `/` that is the conservative full set (go/bun/npm/uv/pip
@@ -46,7 +47,8 @@
 #  6b. Staging deploy HTTP health → ntfy operator if staging URL returns non-2xx/3xx
 #      (informational only, no issue filed; dedup per-project in staging-health/ subdir)
 #   7. Prod deploy HTTP health → file bug issue if deploy URL returns non-2xx/3xx
-#      (dedup per-project, cleared on recovery)
+#      (dedup per-project; on recovery the issue is closed, labelled
+#      factory-closed, and only then the marker cleared)
 #   8. Shipped-PR ntfy → emit "Shipped: repo #issue" for PRs that closed issues
 #      in the last 24h, when the deploy URL is currently healthy
 #      (dedup per-PR)
@@ -164,6 +166,8 @@ source "$SCRIPT_DIR/lib/quota-pause.sh"
 source "$SCRIPT_DIR/lib/deadlines.sh"
 # shellcheck source=lib/releases.sh
 source "$SCRIPT_DIR/lib/releases.sh"
+# shellcheck source=lib/factory-close.sh
+source "$SCRIPT_DIR/lib/factory-close.sh"
 BASE_DIR="${BASE_DIR:-/mnt/ext-fast}"
 STATE_DIR="$HOME/.archon/pipeline-health-state"
 # Where the crontab sends every script's stdout/stderr (see ops/cron/crontab).
@@ -557,11 +561,12 @@ find_tracked_issue() {
 
 # ----------------------------------------------------------------------------
 # open_escalations <repo>: echo "<number>\t<kind>\t<pr>" for each open issue
-# this script filed as an escalation — a "Main CI red" issue (kind main-ci) or a
-# file_stuck_issue one (kind from its **Kind** line, PR number from its
-# **Evidence** link; empty for main-ci). Lists open issues rather than
-# searching, so a just-filed issue the search index has not caught up with is
-# still seen.
+# this script filed as an escalation — a "Main CI red" issue (kind main-ci), a
+# "Prod deploy …" one (kind prod-deploy), a "Deploy down: …" one (kind
+# deploy-down) or a file_stuck_issue one (kind from its **Kind** line, PR
+# number from its **Evidence** link; empty for the others). Lists open issues
+# rather than searching, so a just-filed issue the search index has not caught
+# up with is still seen. Fails when the listing does.
 # ----------------------------------------------------------------------------
 open_escalations() {
   local repo="$1" issues
@@ -569,10 +574,17 @@ open_escalations() {
   if ! issues=$(gh issue list --repo "$repo" --state open --limit 200 \
       --json number,title,body,labels 2>/dev/null); then
     log "$repo: gh issue list failed — escalation close check skipped, retrying next tick" >&2
-    return
+    return 1
   fi
-  echo "$issues" | jq -r '.[] | select((.body // "") | contains("Auto-filed by `pipeline-health-cron.sh`"))
-        | if (.title | startswith("Main CI red")) then [(.number|tostring), "main-ci", ""]
+  # A "Deploy down" body carries no "Auto-filed by" line, so
+  # lib/settle-ship-outcome.sh settles it as an ordinary issue; it is known by
+  # its own heading instead.
+  echo "$issues" | jq -r '.[] | (.body // "") as $b
+        | if ($b | contains("Auto-filed by `pipeline-health-cron.sh`") | not) then
+            (if (.title | startswith("Deploy down: ")) and ($b | startswith("## Deploy health check failure"))
+             then [(.number|tostring), "deploy-down", ""] else empty end)
+          elif (.title | startswith("Main CI red")) then [(.number|tostring), "main-ci", ""]
+          elif (.title | startswith("Prod deploy")) then [(.number|tostring), "prod-deploy", ""]
           elif ([.labels[].name] | index("manual-review")) then
             [(.number|tostring),
              ((.body | capture("\\*\\*Kind\\*\\*: (?<k>[a-z-]+)") | .k) // ""),
@@ -593,6 +605,17 @@ close_escalation() {
     log "$repo: could not close escalation #$issue_num — retrying next tick"
     return 1
   fi
+}
+
+# factory_close_escalation <repo> <issue> <reason>: close_escalation, then add
+# FACTORY_CLOSED_LABEL (lib/factory-close.sh) in an edit of its own, so a
+# missing label never keeps a recovered alert open.
+factory_close_escalation() {
+  local repo="$1" issue_num="$2"
+  fc_ensure_label "$repo"
+  close_escalation "$@" || return 1
+  gh issue edit "$issue_num" --repo "$repo" --add-label "$FACTORY_CLOSED_LABEL" >/dev/null 2>&1 \
+    || log "$repo: closed escalation #$issue_num, but could not add $FACTORY_CLOSED_LABEL"
 }
 
 # ----------------------------------------------------------------------------
@@ -1432,6 +1455,12 @@ EOF
 
   # Deploy up to date — clear stale markers
   find "$STATE_DIR" -maxdepth 1 \( -name "prod-deploy-failed-$project-*" -o -name "prod-deploy-stale-$project-*" \) -delete 2>/dev/null || true
+  local issue_num kind
+  while IFS=$'\t' read -r issue_num kind _; do
+    [ "$kind" = prod-deploy ] || continue
+    factory_close_escalation "alexsiri7/$project" "$issue_num" \
+      "prod deployed \`$deploy_sha\` successfully at $deploy_ts ($deploy_url)."
+  done < <(open_escalations "alexsiri7/$project")
 }
 
 # ----------------------------------------------------------------------------
@@ -2527,7 +2556,8 @@ check_stuck_prs() {
 #   Ported from archon/scripts/poll-health.sh (check 3). For each project with
 #   a DEPLOY_URLS entry, GET the URL (body discarded); if HTTP status is <200
 #   or >=400, file a `bug` issue (queued for the normal pickup cron). Dedup per
-#   project; marker is cleared once the deploy recovers.
+#   project; once the deploy recovers the issue is closed, then the marker
+#   cleared.
 # ----------------------------------------------------------------------------
 check_deploy_http() {
   local project="$1"
@@ -2589,9 +2619,19 @@ EOF
     return
   fi
 
-  # Healthy — clear markers
-  rm -f "$marker" "$suspect"
+  rm -f "$suspect"
   log "$project: deploy OK (HTTP $http_code at $deploy_url)"
+  # The marker stops a refile while the alert is open, so it outlives any
+  # close that fails (or a listing that does): the next healthy tick retries.
+  local escalations issue_num kind closed_all=1
+  escalations=$(open_escalations "alexsiri7/$project") || return 0
+  while IFS=$'\t' read -r issue_num kind _; do
+    [ "$kind" = deploy-down ] || continue
+    factory_close_escalation "alexsiri7/$project" "$issue_num" \
+      "$deploy_url answers HTTP $http_code again ($(date -u '+%Y-%m-%d %H:%M:%S UTC'))." \
+      || closed_all=0
+  done <<<"$escalations"
+  if [ "$closed_all" = 1 ]; then rm -f "$marker"; fi
 }
 
 # ----------------------------------------------------------------------------

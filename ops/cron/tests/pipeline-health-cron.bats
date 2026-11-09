@@ -36,6 +36,15 @@ load_check_deploy_http() {
     source <(
         awk '/^check_deploy_http\(\)/{p=1} p{print} p && /^}$/{p=0}' "$SCRIPT_FILE"
     )
+    load_escalation_closes
+}
+
+# The healthy and deployed paths close their alerts through these.
+load_escalation_closes() {
+    source "${SCRIPT_FILE%/*}/lib/factory-close.sh"
+    load_fn open_escalations
+    load_fn close_escalation
+    load_fn factory_close_escalation
 }
 
 # Same extraction for any named function. Only the body is sourced, so each
@@ -263,6 +272,109 @@ setup_main_ci_env() {
 
     # Marker must be removed on recovery.
     [ ! -f "$STATE_DIR/deploy-down-test-project" ]
+}
+
+# ── check_deploy_http: close the Deploy down alert on recovery (#276) ───────
+
+DEPLOY_DOWN_FIXTURE='[
+  {"number":40,"title":"Deploy down: https://test.example.com/healthz returning HTTP 502","body":"## Deploy health check failure\n\n**URL**: https://test.example.com/healthz","labels":[{"name":"bug"}]},
+  {"number":41,"title":"Deploy down: the site looks odd","body":"Filed by hand.","labels":[{"name":"bug"}]},
+  {"number":42,"title":"Prod deploy lagging main","body":"## Prod deploy lagging main\n\nAuto-filed by `pipeline-health-cron.sh`.","labels":[{"name":"bug"}]}
+]'
+
+# Records closes ("<issue> <comment>") and edits; CLOSE_FAILS=1 plays a failed
+# close, ISSUE_LIST_FAILS=1 a failed listing.
+stub_gh_for_alert_closes() {
+    gh() {
+        printf '%s\n' "$*" >> "$STATE_DIR/gh-argv"
+        case "$1 $2" in
+            "issue list") [ "${ISSUE_LIST_FAILS:-0}" = 1 ] && return 1
+                          case "$*" in *--jq*) echo "" ;; *) echo "${ISSUE_LIST_FIXTURE:-[]}" ;; esac ;;
+            "issue close") [ "${CLOSE_FAILS:-0}" = 1 ] && return 1
+                           printf '%s %s\n' "$3" "$7" >> "$STATE_DIR/closed" ;;
+            "issue edit") printf '%s\n' "$*" >> "$STATE_DIR/edited" ;;
+            "issue create") echo "$*" > "$ISSUE_SENTINEL"; record_issue_body "$@"; echo "https://github.com/alexsiri7/test-project/issues/42" ;;
+            *) "${GH_FALLBACK:-true}" "$@" ;;
+        esac
+    }
+}
+
+@test "check_deploy_http closes the open Deploy down alert, labelled factory-closed, then clears the marker" {
+    curl() { printf "200"; return 0; }
+    load_check_deploy_http
+    ISSUE_LIST_FIXTURE="$DEPLOY_DOWN_FIXTURE"
+    stub_gh_for_alert_closes
+    touch "$STATE_DIR/deploy-down-test-project"
+
+    check_deploy_http "test-project"
+
+    [ "$(cut -d' ' -f1 "$STATE_DIR/closed" | grep -E '^[0-9]+$' | tr '\n' ' ')" = "40 " ]
+    grep -q "^40 Resolved: https://test.example.com/healthz answers HTTP 200 again" "$STATE_DIR/closed"
+    grep -qx "issue edit 40 --repo alexsiri7/test-project --add-label factory-closed" "$STATE_DIR/edited"
+    grep -q "^label create factory-closed --repo alexsiri7/test-project" "$STATE_DIR/gh-argv"
+    [ ! -f "$STATE_DIR/deploy-down-test-project" ]
+}
+
+@test "check_deploy_http keeps the marker when the close fails, and the next healthy tick retries" {
+    curl() { printf "200"; return 0; }
+    load_check_deploy_http
+    ISSUE_LIST_FIXTURE="$DEPLOY_DOWN_FIXTURE"
+    stub_gh_for_alert_closes
+    touch "$STATE_DIR/deploy-down-test-project"
+
+    CLOSE_FAILS=1 check_deploy_http "test-project"
+
+    [ ! -f "$STATE_DIR/closed" ]
+    [ ! -f "$STATE_DIR/edited" ]
+    [ -f "$STATE_DIR/deploy-down-test-project" ]
+
+    check_deploy_http "test-project"
+
+    grep -q "^40 Resolved:" "$STATE_DIR/closed"
+    [ ! -f "$STATE_DIR/deploy-down-test-project" ]
+}
+
+@test "check_deploy_http keeps the marker when the open issues cannot be listed" {
+    curl() { printf "200"; return 0; }
+    load_check_deploy_http
+    stub_gh_for_alert_closes
+    touch "$STATE_DIR/deploy-down-test-project"
+
+    ISSUE_LIST_FAILS=1 check_deploy_http "test-project" 2>/dev/null
+
+    [ -f "$STATE_DIR/deploy-down-test-project" ]
+    [ ! -f "$STATE_DIR/closed" ]
+}
+
+@test "check_deploy_http closes nothing while the deploy is still down" {
+    curl() { printf "502"; return 0; }
+    load_check_deploy_http
+    ISSUE_LIST_FIXTURE="$DEPLOY_DOWN_FIXTURE"
+    stub_gh_for_alert_closes
+    touch "$STATE_DIR/deploy-down-test-project"
+
+    check_deploy_http "test-project"
+
+    [ ! -f "$STATE_DIR/closed" ]
+    [ -f "$STATE_DIR/deploy-down-test-project" ]
+}
+
+# The close loop reads the body check_deploy_http really files.
+@test "open_escalations reads the Deploy down issue check_deploy_http files" {
+    curl() { printf "000"; return 6; }
+    load_check_deploy_http
+    ISSUE_SENTINEL="$STATE_DIR/issue-created"
+    stub_gh_for_alert_closes
+    touch "$STATE_DIR/deploy-suspect-test-project"
+    run check_deploy_http "test-project"
+    title=$(sed -nE 's/.*--title (Deploy down: .* returning HTTP [0-9]+) --label.*/\1/p' "$ISSUE_SENTINEL")
+    [ -n "$title" ]
+    ISSUE_LIST_FIXTURE=$(jq -n --arg t "$title" --rawfile b "$STATE_DIR/issue-body" \
+        '[{number: 43, title: $t, body: $b, labels: [{name: "bug"}]}]')
+
+    run open_escalations "alexsiri7/test-project"
+
+    [ "$output" = "$(printf '43\tdeploy-down\t')" ]
 }
 
 @test "check_deploy_http returns early for unconfigured project" {
@@ -557,6 +669,16 @@ ESCALATIONS_FIXTURE='[
     [ "$output" = "$(printf '20\tmain-ci\t\n21\tmain-ci\t\n22\tpr-ci\t7\n23\tstuck-pr\t8\n24\tpr-ci\t9')" ]
 }
 
+@test "open_escalations reads kinds prod-deploy and deploy-down, and not a hand-filed Deploy down" {
+    load_fn open_escalations
+    ISSUE_LIST_FIXTURE="$DEPLOY_DOWN_FIXTURE"
+    stub_gh_issues
+
+    run open_escalations "alexsiri7/test-project"
+
+    [ "$output" = "$(printf '40\tdeploy-down\t\n42\tprod-deploy\t')" ]
+}
+
 @test "open_escalations reads kind system-maintenance, which no PR or main-CI close loop acts on" {
     load_fn open_escalations
     ISSUE_LIST_FIXTURE='[{"number":30,"title":"host maintenance failing on box","body":"**Kind**: system-maintenance\n**Problem**: apt failed\n\nAuto-filed by `pipeline-health-cron.sh` (`check_system_maintenance`).","labels":[{"name":"manual-review"}]}]'
@@ -608,12 +730,12 @@ ESCALATIONS_FIXTURE='[
     grep -q "gh pr view #7 failed — escalation #22 left open" "$STATE_DIR/log"
 }
 
-@test "open_escalations logs a failed issue listing to stderr and lists nothing" {
+@test "open_escalations logs a failed issue listing to stderr, lists nothing and fails" {
     load_fn open_escalations
     gh() { return 1; }
     log() { echo "LOG: $*"; }
 
-    open_escalations "alexsiri7/test-project" > "$STATE_DIR/out" 2> "$STATE_DIR/err"
+    ! open_escalations "alexsiri7/test-project" > "$STATE_DIR/out" 2> "$STATE_DIR/err"
 
     [ ! -s "$STATE_DIR/out" ]
     grep -q "alexsiri7/test-project: gh issue list failed" "$STATE_DIR/err"
@@ -992,8 +1114,10 @@ stub_gh_for_prod_deploy() {
             "api repos/alexsiri7/test-project/deployments?per_page=10") echo "$DEPLOYMENTS_FIXTURE" ;;
             "api repos/alexsiri7/test-project/deployments/"*) echo "$DEPLOY_STATUS_FIXTURE" ;;
             "api repos/alexsiri7/test-project/actions/workflows/123/runs?"*) echo "${WORKFLOW_RUNS_FIXTURE:-}" ;;
-            "issue list") echo "" ;;
+            "issue list") case "$*" in *--jq*) echo "" ;; *) echo "${ISSUE_LIST_FIXTURE:-[]}" ;; esac ;;
             "issue create") echo "$*" > "$ISSUE_SENTINEL"; record_issue_body "$@"; echo "https://github.com/alexsiri7/test-project/issues/42" ;;
+            "issue close") printf '%s %s\n' "$3" "$7" >> "$STATE_DIR/closed" ;;
+            "issue edit") printf '%s\n' "$*" >> "$STATE_DIR/edited" ;;
             *) echo "" ;;
         esac
     }
@@ -1022,7 +1146,15 @@ setup_prod_deploy_env() {
     source <(awk '/^DEPLOY_LAG_FLOOR_SECONDS=/{print}' "$SCRIPT_FILE")
     load_fn deploy_lag_threshold
     load_fn check_prod_deploy
+    load_escalation_closes
 }
+
+PROD_DEPLOY_ALERTS_FIXTURE='[
+  {"number":50,"title":"Prod deploy failed on main","body":"## Prod deploy failed\n\nAuto-filed by `pipeline-health-cron.sh`.","labels":[{"name":"bug"},{"name":"archon:skipped"}]},
+  {"number":51,"title":"Prod deploy lagging main","body":"## Prod deploy lagging main\n\nAuto-filed by `pipeline-health-cron.sh`.","labels":[{"name":"bug"},{"name":"archon:queued"}]},
+  {"number":52,"title":"Main CI red: build","body":"## Main CI red\n\nAuto-filed by `pipeline-health-cron.sh`.","labels":[{"name":"bug"}]},
+  {"number":53,"title":"Prod deploy is slow","body":"Filed by hand.","labels":[{"name":"bug"}]}
+]'
 
 # Successful Production runs on <count> distinct SHAs, each created <latency>
 # seconds after its commit: raw API JSON for the workflow runs endpoint.
@@ -1110,6 +1242,40 @@ head_aged() { HEAD_FIXTURE='{"sha":"aaa","ts":"'"$(date -u -d "@$(( $(date +%s) 
 
     [ ! -f "$ISSUE_SENTINEL" ]
     [ -f "$STATE_DIR/prod-deploy-stale-test-project-zzz" ]
+}
+
+# ── check_prod_deploy: close the prod-deploy alerts on a deploy (#276) ──────
+
+@test "check_prod_deploy closes every open prod-deploy alert once HEAD deployed, citing the deploy" {
+    setup_prod_deploy_env
+    HEAD_RUNS_FIXTURE='[{"name":"Staging → Production Pipeline","conclusion":"success","createdAt":"2026-09-16T01:46:08Z","updatedAt":"2026-09-16T01:49:29Z","url":"https://example.com/runs/3"}]'
+    ISSUE_LIST_FIXTURE="$PROD_DEPLOY_ALERTS_FIXTURE"
+    stub_gh_for_prod_deploy
+
+    check_prod_deploy "test-project"
+
+    [ "$(grep -oE '^[0-9]+ Resolved' "$STATE_DIR/closed" | cut -d' ' -f1 | tr '\n' ' ')" = "50 51 " ]
+    grep -qF '50 Resolved: prod deployed `aaa` successfully at 2026-09-16T01:49:29Z (https://example.com/runs/3).' "$STATE_DIR/closed"
+    [ "$(grep -c -- "--add-label factory-closed" "$STATE_DIR/edited")" -eq 2 ]
+    grep -qx "issue edit 51 --repo alexsiri7/test-project --add-label factory-closed" "$STATE_DIR/edited"
+}
+
+@test "check_prod_deploy closes no prod-deploy alert while the deploy is failing, lagging or in flight" {
+    setup_prod_deploy_env
+    ISSUE_LIST_FIXTURE="$PROD_DEPLOY_ALERTS_FIXTURE"
+    stub_gh_for_prod_deploy
+    for conclusion in '"failure"' null NONE; do
+        if [ "$conclusion" = NONE ]; then
+            HEAD_RUNS_FIXTURE='[]'
+        else
+            HEAD_RUNS_FIXTURE='[{"name":"Staging → Production Pipeline","conclusion":'"$conclusion"',"createdAt":"2026-09-16T01:46:08Z","updatedAt":"2026-09-16T01:49:29Z","url":"https://example.com/runs/3"}]'
+        fi
+        check_prod_deploy "test-project"
+    done
+
+    [ -f "$ISSUE_SENTINEL" ]
+    [ ! -f "$STATE_DIR/closed" ]
+    [ ! -f "$STATE_DIR/edited" ]
 }
 
 # #261: word-coach-annie's CI → dispatch → deploy chain runs 13-16 min, so a
