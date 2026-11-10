@@ -34,7 +34,8 @@
 #   4. the NTFS mounts (/mnt/steam-*: DB backups) lose umask=000 in /etc/fstab
 #      (-> umask=077) and are remounted when idle
 #   5. archon's home: ~/.archon (config.yaml, .env, workflows), ~/.gitconfig,
-#      ~/.claude/settings.json, ~/.cargo/config.toml (build-dir), tmp, repos
+#      ~/.claude/settings.json, ~/.cargo/config.toml (build-dir), the
+#      pgrep/pidwait shims in ~/.local/bin (no-self-match), tmp, repos
 #   6. toolchains copied into archon's home (bun, claude, gh, shellcheck, uv,
 #      JDK, Android SDK, Playwright browsers, rustup/cargo, Flutter SDK)
 #   7. /etc/archon-user/projects, /usr/local/lib/archon-user/bin/archon,
@@ -687,6 +688,13 @@ write_ah_file "$AH/.cargo/config.toml" 0640 "# Managed by ops/host/archon-user/i
 [build]
 build-dir = \"$AH/.cache/cargo-build/{workspace-path-hash}\"
 "
+# A `pgrep -f`/`pidwait -f` wait loop in an agent's Bash call matched its own
+# shell and held its run for days (#243, #293). ~/.local/bin comes first on
+# every archon PATH, so these shims add --ignore-ancestors to every such call.
+for n in pgrep pidwait; do
+    write_ah_file "$AH/.local/bin/$n" 0755 "$(cat "$SCRIPT_DIR/no-self-match")
+"
+done
 
 # Global workflow overrides: owned by the owner (who edits them without sudo),
 # readable by archon, not writable by it. (Nominally: archon owns the parent
