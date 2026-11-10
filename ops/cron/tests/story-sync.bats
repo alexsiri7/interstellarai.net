@@ -31,6 +31,7 @@ STUB
 #!/usr/bin/env bash
 echo "$PWD $*" >> "$HOME/archon-calls"
 cat "$4/README.md" > /dev/null || exit 9
+cp -r "$4" "$HOME/last-export"
 echo "STORY_SYNC_PR: https://github.com/alexsiri7/game/pull/1"
 exit "${ARCHON_EXIT:-0}"
 STUB
@@ -82,4 +83,15 @@ teardown() { rm -rf "$TEST_TMP"; }
     run "$SCRIPT"
     [ "$status" -eq 1 ]
     [ ! -f "$HOME/psql-calls" ]
+}
+
+@test "beats in a scene are exported as one line each, even when they contain >" {
+    echo '{"objects":[],"relationships":[],"nodes":[{"id":"n1","parentId":null,"type":"SCENE","title":"The lesson","synopsis":"","status":"DRAFT","orderIndex":0,"content":"<!-- beat: CUTSCENE: The lesson --><!-- beat: > The cat sits. --><!-- beat: CAT: A song! -->"}]}' > "$STORY_JSON"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    f="$HOME/last-export/outline/001-the-lesson.md"
+    grep -qx 'CUTSCENE: The lesson' "$f"
+    grep -qx '> The cat sits.' "$f"
+    grep -qx 'CAT: A song!' "$f"
+    ! grep -q -- '-->' "$f"
 }
