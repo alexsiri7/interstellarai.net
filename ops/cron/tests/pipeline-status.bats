@@ -250,3 +250,11 @@ gh() {
     run ci_status catscape-watchface
     [ "$output" = fail ]
 }
+
+@test "ci_status reads fail when a check's only run is cancelled with no rerun" {
+    CHECK_RUNS_JSON='{"check_runs":[
+        {"id":1,"name":"unsafe-change-recheck","status":"completed","conclusion":"cancelled"},
+        {"id":2,"name":"test","status":"completed","conclusion":"success"}]}'
+    run ci_status catscape-watchface
+    [ "$output" = fail ]
+}
