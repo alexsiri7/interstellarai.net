@@ -194,6 +194,7 @@ old_row() {
 
     grep -q 'workflow abandon 197afe4f-aaaa' "$ARCHON_ARGV"
     grep -q 'Archon run ended' "$NOTIFIED"
+    grep -q 'run 197afe4f-aaaa abandoned; no #N in its message to comment on' "$NOTIFIED"
     [ ! -e "$GH_ARGV" ]
 }
 
