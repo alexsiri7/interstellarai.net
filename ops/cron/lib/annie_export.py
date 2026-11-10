@@ -35,8 +35,15 @@ hedged or tagged `open` goes to `story/PENDING.md` instead.
 
 
 def html_to_text(markup: str) -> str:
-    """Scene text is stored as editor HTML; keep paragraphs, drop the markup."""
-    text = re.sub(r"(?i)<br\s*/?>", "\n", markup)
+    """Scene text is stored as editor HTML; keep paragraphs, drop the markup.
+
+    Annie stores a beat (one structured line of a scene, the unit of the story
+    format spec) as an HTML comment, `<!-- beat: ... -->`. Each beat becomes its
+    own paragraph, before any tag is stripped: a beat may itself contain `>`.
+    """
+    text = re.sub(r"(?s)<!--\s*beat:\s*(.*?)\s*-->", lambda m: "\n\n" + m.group(1) + "\n\n", markup)
+    text = re.sub(r"(?s)<!--.*?-->", "", text)
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
     text = re.sub(r"(?i)</(p|h[1-6]|li|blockquote)>", "\n\n", text)
     text = re.sub(r"<[^>]+>", "", text)
     text = html.unescape(text)
