@@ -62,9 +62,12 @@ ci_status() {
     local result
     # Exclude scheduled monitoring/health workflows (uptime, health, disk, resource, backup checks).
     # Only count push/pull_request-triggered runs as real CI.
+    # A rerun leaves the earlier run of the same check (often cancelled) on
+    # HEAD, so only the newest run of each check name counts (#294).
     result=$(gh api "repos/$OWNER/$repo/commits/HEAD/check-runs" \
         --jq '[.check_runs[] | select(.status=="completed")
               | select(.name | test("health|uptime|monitor|disk|backup|resource"; "i") | not)]
+              | group_by(.name) | map(max_by(.id))
               | if length==0 then "none"
                 elif (map(select(.conclusion!="success" and .conclusion!="skipped" and .conclusion!="neutral")) | length) > 0 then "fail"
                 else "pass" end' 2>/dev/null || echo "err")

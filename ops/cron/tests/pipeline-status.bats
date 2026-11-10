@@ -16,6 +16,8 @@ setup() {
     source <(awk '/^issue_pickup_status\(\)/{p=1} p{print} p && /^}$/{p=0}' "$cron_dir/../bin/pipeline-status")
     # shellcheck disable=SC1090
     source <(awk '/^ops_review_status\(\)/{p=1} p{print} p && /^}$/{p=0}' "$cron_dir/../bin/pipeline-status")
+    # shellcheck disable=SC1090
+    source <(awk '/^ci_status\(\)/{p=1} p{print} p && /^}$/{p=0}' "$cron_dir/../bin/pipeline-status")
     unset _ARCHON_DEADLINES_SH DEADLINE_FRESH_SECONDS
     export DEADLINE_STATE_DIR="$TEST_TMP/deadlines" DEADLINE_NOW=1000000
     # shellcheck source=../lib/deadlines.sh
@@ -33,6 +35,7 @@ setup() {
         SWEEP_STATUS_FILE="$TEST_TMP/last-sweep"
         sweep_name="security"
         repo_name="cosmic-match"
+        OWNER="alexsiri7"
         GREEN="" RED="" DIM="" YELLOW="" RESET=""
     }
     log() { :; }
@@ -217,4 +220,41 @@ EOF
     for f in "$DEADLINE_STATE_DIR"/*; do _deadline_set "$f" last_seen 1000000; done
     run ops_review_status
     [ "$output" = "2 (oldest 30h)" ]
+}
+
+# ci_status reads `gh api .../check-runs --jq <filter>`; this stand-in applies
+# the filter to $CHECK_RUNS_JSON the way gh would.
+gh() {
+    local filter=""
+    while [ $# -gt 0 ]; do
+        [ "$1" = --jq ] && { filter="$2"; break; }
+        shift
+    done
+    jq -r "$filter" <<<"$CHECK_RUNS_JSON"
+}
+
+@test "ci_status ignores a cancelled run superseded by a successful rerun of the same check" {
+    CHECK_RUNS_JSON='{"check_runs":[
+        {"id":1,"name":"unsafe-change-recheck","status":"completed","conclusion":"cancelled"},
+        {"id":2,"name":"unsafe-change-recheck","status":"completed","conclusion":"success"},
+        {"id":3,"name":"test","status":"completed","conclusion":"success"}]}'
+    run ci_status catscape-watchface
+    [ "$output" = pass ]
+}
+
+@test "ci_status reads fail when the newest run of a check failed" {
+    CHECK_RUNS_JSON='{"check_runs":[
+        {"id":1,"name":"test","status":"completed","conclusion":"success"},
+        {"id":2,"name":"test","status":"completed","conclusion":"failure"},
+        {"id":3,"name":"lint","status":"completed","conclusion":"success"}]}'
+    run ci_status catscape-watchface
+    [ "$output" = fail ]
+}
+
+@test "ci_status reads fail when a check's only run is cancelled with no rerun" {
+    CHECK_RUNS_JSON='{"check_runs":[
+        {"id":1,"name":"unsafe-change-recheck","status":"completed","conclusion":"cancelled"},
+        {"id":2,"name":"test","status":"completed","conclusion":"success"}]}'
+    run ci_status catscape-watchface
+    [ "$output" = fail ]
 }
