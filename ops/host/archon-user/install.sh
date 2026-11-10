@@ -693,7 +693,7 @@ build-dir = \"$AH/.cache/cargo-build/{workspace-path-hash}\"
 # every archon PATH, so these shims add --ignore-ancestors to every such call.
 for n in pgrep pidwait; do
     write_ah_file "$AH/.local/bin/$n" 0755 "$(cat "$SCRIPT_DIR/no-self-match")
-"
+" || fail no-self-match "could not write the $n shim in $AH/.local/bin"
 done
 
 # Global workflow overrides: owned by the owner (who edits them without sudo),
