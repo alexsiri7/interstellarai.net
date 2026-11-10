@@ -3395,18 +3395,25 @@ archon workflow abandon $run_id — end it by hand" \
     return 0
   fi
   log "stalled-tool-calls: $wf $run_id — $call: $silence — abandoned"
+  local said="no #N in its message to comment on"
+  if [ -n "$origin" ] && [[ "$msg" =~ \#([0-9]+) ]]; then
+    target="${BASH_REMATCH[1]}"
+    # $call is model-written text: it stays in the ntfy, out of a public comment.
+    if gh api -X POST "repos/alexsiri7/${origin##*/}/issues/$target/comments" \
+        -f body="Ended archon run \`$run_id\` ($wf): its tool call made no progress for ${silence#no progress for }; pipeline-health ends a run after $limit without progress. The usual crons pick this up again.
+
+<!-- lachesis:automated -->" >/dev/null 2>&1; then
+      said="commented on #$target"
+    else
+      log "stalled-tool-calls: $wf $run_id — could not comment on #$target"
+      said="could not comment on #$target — say so there by hand"
+    fi
+  fi
   notify "Archon run ended: ${origin##*/}" \
     "$wf — ${msg:-no user message}
 $call: $silence (limit $limit)
-run $run_id abandoned" \
+run $run_id abandoned; $said" \
     high hourglass
-  [ -n "$origin" ] && [[ "$msg" =~ \#([0-9]+) ]] || return 0
-  target="${BASH_REMATCH[1]}"
-  gh api -X POST "repos/alexsiri7/${origin##*/}/issues/$target/comments" \
-    -f body="Ended archon run \`$run_id\` ($wf): its tool call \`$call\` made no progress for ${silence#no progress for }; pipeline-health ends a run after $limit without progress. The usual crons pick this up again.
-
-<!-- lachesis:automated -->" >/dev/null 2>&1 \
-    || log "stalled-tool-calls: $wf $run_id — could not comment on #$target"
 }
 
 # ----------------------------------------------------------------------------

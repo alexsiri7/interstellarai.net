@@ -25,7 +25,7 @@ setup() {
     # One line per call — the real body is multi-line and the tests count calls.
     notify() { printf '%s\n' "${*//$'\n'/ }" >> "$NOTIFIED"; }
     archon() { printf '%s\n' "$*" >> "$ARCHON_ARGV"; [ "$3" != "${ABANDON_FAILS:-}" ]; }
-    gh() { printf '%s\n' "$*" >> "$GH_ARGV"; }
+    gh() { printf '%s\n' "$*" >> "$GH_ARGV"; [ -z "${GH_FAILS:-}" ]; }
     archon_runs_known() { [ "${RUNS_KNOWN:-1}" = 1 ]; }
     archon_stalled_tool_calls() { cat "$STALLED_ROWS"; }
 
@@ -155,6 +155,30 @@ old_row() {
     grep -q '^api -X POST repos/alexsiri7/interstellarai.net/issues/242/comments -f body=Ended archon run `197afe4f-aaaa`' "$GH_ARGV"
     grep -q 'no progress for 5h0m; pipeline-health ends a run after 4h without progress' "$GH_ARGV"
     grep -q 'lachesis:automated' "$GH_ARGV"
+    ! grep -q 'wait for bats' "$GH_ARGV"
+    grep -q 'run 197afe4f-aaaa abandoned; commented on #242' "$NOTIFIED"
+}
+
+@test "an already-alerted call is still ended once it passes the abandon limit" {
+    stalled_row 197afe4f-aaaa
+    check_stalled_tool_calls
+    [ -e "$MARKER_DIR/alerted-197afe4f-aaaa" ]
+
+    : > "$STALLED_ROWS"
+    old_row 197afe4f-aaaa "fix #242"
+    check_stalled_tool_calls
+
+    [ "$(cat "$ARCHON_ARGV")" = "workflow abandon 197afe4f-aaaa --cwd /x" ]
+    grep -q 'Archon run ended: interstellarai.net' "$NOTIFIED"
+    grep -q 'issues/242/comments' "$GH_ARGV"
+}
+
+@test "a comment that fails is named in the run-ended alert" {
+    old_row 197afe4f-aaaa "fix #242"
+    GH_FAILS=1 check_stalled_tool_calls
+
+    [ "$(wc -l < "$NOTIFIED")" -eq 1 ]
+    grep -q 'run 197afe4f-aaaa abandoned; could not comment on #242 — say so there by hand' "$NOTIFIED"
 }
 
 @test "an assist correction names its PR, and the comment goes to that PR" {
