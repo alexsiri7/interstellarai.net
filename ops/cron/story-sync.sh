@@ -13,10 +13,10 @@
 #      story/PENDING.md), opens a PR, and files one implementation issue for the
 #      factory when the settled story changed what the game must do.
 # The hash is recorded only when the workflow succeeded, so a failed run is
-# retried the next day.
+# retried on the next run.
 #
 # Crontab:
-#   30 6 * * * <repo>/ops/cron/story-sync.sh >> ~/.local/state/archon-cron/logs/story-sync.log 2>&1
+#   40 * * * * <repo>/ops/cron/story-sync.sh >> ~/.local/state/archon-cron/logs/story-sync.log 2>&1
 
 set -uo pipefail
 
