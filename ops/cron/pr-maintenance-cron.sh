@@ -728,10 +728,7 @@ for PROJECT in "${PROJECTS[@]}"; do
     # An issue already filed means holding the PR failed last tick, or this is
     # a reopened PR of a filed version: link and hold it, never file twice.
     ISSUE_URL=$(cat "$FILED" 2>/dev/null || true)
-    if [ "$HOLD" = true ] && [ -n "$ISSUE_URL" ]; then
-      log "$PROJECT: PR #$PR is on hold — skipping (upgrade issue $ISSUE_URL filed)"
-      continue
-    fi
+    [ -n "$ISSUE_URL" ] && pr_on_hold "$PR" "$HOLD" && continue
     if [ -z "$ISSUE_URL" ]; then
       log "$PROJECT: dependabot PR #$PR ($PKG $VERSION) red for $((RED_FOR / 3600))h — filing an upgrade issue"
       ISSUE_URL=$(gh issue create --repo "alexsiri7/$PROJECT" \
