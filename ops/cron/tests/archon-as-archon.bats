@@ -308,6 +308,23 @@ STUB
     [ "$status" -eq 1 ]
 }
 
+@test "selftest's PATH-check line passes when the gh-shim wrapper is first on PATH, fails otherwise" {
+    mkdir -p "$T/ghshim"
+    cat > "$T/ghshim/gh" <<'STUB'
+#!/usr/bin/env bash
+STUB
+    chmod +x "$T/ghshim/gh"
+    export ARCHON_AS_GH_SHIM_DIR="$T/ghshim"
+    run "$W" selftest
+    [[ "$output" == *"PASS gh: the comment-marking wrapper is first on PATH (#298)"* ]]
+
+    rm "$T/ghshim/gh"
+    mkdir -p "$T/home/.local/bin"
+    stub_gh github_pat_abc 404
+    run "$W" selftest
+    [[ "$output" == *"FAIL gh resolves to $T/home/.local/bin/gh, not $T/ghshim/gh — factory comments would lack <!-- lachesis:automated --> (re-run install.sh)"* ]]
+}
+
 @test "selftest sweep skips exactly Debian's dpkg/apt/alternatives backups in /var/backups" {
     eval "$(grep -E '^SYSTEM_BACKUPS_RE=' "$W")"
     for f in dpkg.status.0 dpkg.status.1.gz dpkg.arch.0 dpkg.arch.6.gz dpkg.diversions.0 dpkg.statoverride.3.gz \

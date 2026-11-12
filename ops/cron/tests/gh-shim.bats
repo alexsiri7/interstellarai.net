@@ -219,3 +219,26 @@ stdin_is() { diff <(printf '%s' "$1") "$T/stdin"; }
     run gh issue comment 5 --body-file nofile
     argv_is issue comment 5 --body-file nofile
 }
+
+@test "a body already ending in the marker plus a non-breaking space is not stamped twice, -b and --input alike" {
+    body="done"$'\n\n'"$MARKER"$'\xc2\xa0'
+    run gh issue comment 5 -b "$body"
+    [ "$status" -eq 0 ]
+    [ "$(grep -c 'lachesis:automated' "$T/stdin")" -eq 1 ]
+
+    printf '{"body":"done\\n\\n%s\\u00a0"}' "$MARKER" > nbsp.json
+    run gh api repos/a/b/issues/4/comments --input nbsp.json
+    [ "$status" -eq 0 ]
+    [ "$(jq -r '.body | [scan("lachesis:automated")] | length' "$T/stdin")" -eq 1 ]
+}
+
+@test "issue comment -b together with -F is refused like real gh refuses it locally, not silently resolved" {
+    printf 'from -F\n' > f.md
+    run gh issue comment 5 -b "from -b" -F f.md
+    argv_is issue comment 5 -b "from -b" -F f.md
+    [ ! -e "$T/stdin" ]
+
+    run gh pr comment 5 --body=x --body-file=f.md
+    argv_is pr comment 5 --body=x --body-file=f.md
+    [ ! -e "$T/stdin" ]
+}

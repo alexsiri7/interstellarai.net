@@ -34,12 +34,15 @@ done
 [ -n "$real" ] || { echo "gh (factory wrapper): no gh executable found on PATH" >&2; exit 127; }
 orig=("$@")
 
-# Strip trailing whitespace, append the marker unless it already ends the text.
-# An empty body stays empty so the real gh still refuses it.
+# Strip trailing whitespace, append the marker unless it already ends the
+# text. An empty body stays empty so the real gh still refuses it. Delegates
+# to jq's Unicode-aware \s (bash's [[:space:]] never matches a multi-byte
+# codepoint like a non-breaking space, in any locale) so every caller agrees
+# on what counts as already-stamped.
 stamp() {
     local t="$1"
-    while [[ "$t" == *[[:space:]] ]]; do t="${t%[[:space:]]}"; done
-    if [ -z "$t" ] || [[ "$t" == *"$MARKER" ]]; then printf '%s' "$t"; else printf '%s\n\n%s' "$t" "$MARKER"; fi
+    printf '%s' "$(jq -nr --arg t "$t" --arg m "$MARKER" \
+        '($t | sub("\\s+$"; "")) as $s | if $s == "" or ($s | endswith($m)) then $s else $s + "\n\n" + $m end')"
 }
 read_src() { if [ "$1" = - ]; then cat; else cat -- "$1"; fi; }
 passthrough() { exec "$real" "${orig[@]}"; }
@@ -59,7 +62,23 @@ dispatch_action() {
 }
 
 comment_cmd() {
-    local out=() tail=() body="" found=0 b
+    local out=() tail=() body="" found=0 have_b=0 have_f=0 b
+    local a=("$@") i=0
+    while [ "$i" -lt "${#a[@]}" ]; do
+        case "${a[$i]}" in
+            -b|--body) have_b=1; i=$((i + 2)) ;;
+            --body=*|-b?*) have_b=1; i=$((i + 1)) ;;
+            -F|--body-file) have_f=1; i=$((i + 2)) ;;
+            --body-file=*|-F?*) have_f=1; i=$((i + 1)) ;;
+            --) break ;;
+            *) i=$((i + 1)) ;;
+        esac
+    done
+    # Real gh refuses -b/--body together with -F/--body-file locally (exit 1,
+    # nothing posted); forward the original flags unmodified so it still does,
+    # instead of silently picking whichever this wrapper parsed last.
+    [ "$have_b" = 1 ] && [ "$have_f" = 1 ] && passthrough
+    set -- "${a[@]}"
     while [ $# -gt 0 ]; do
         case "$1" in
             -b|--body) [ $# -ge 2 ] || passthrough; body="$2"; found=1; shift 2 ;;
@@ -189,7 +208,10 @@ api_cmd() {
             args+=(-f "body=$(stamp "$v")")
         elif [ "$OPT" = --input ]; then
             json=$(read_src "$VAL") || passthrough
-            stamped=$(jq -c --arg m "$MARKER" 'if (.body|type)=="string" then .body |= (sub("\\s+$";"") | if . == "" or endswith($m) then . else . + "\n\n" + $m end) else . end' <<<"$json" 2>/dev/null) && json="$stamped"
+            if [ "$(jq -r '.body | type' <<<"$json" 2>/dev/null)" = string ]; then
+                v=$(jq -r '.body' <<<"$json" 2>/dev/null) || v=""
+                stamped=$(jq -c --arg b "$(stamp "$v")" '.body = $b' <<<"$json" 2>/dev/null) && json="$stamped"
+            fi
             args+=(--input -); use_stdin=1
         else
             args+=("${@:1:NUSED}")

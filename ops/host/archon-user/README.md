@@ -217,6 +217,7 @@ tail -f ~/.local/state/archon-cron/logs/issue-pickup.log
   - archon can write its own tree but not the engine or the owner's clones.
   - The environment of every archon process is free of secret-looking variables.
   - All toolchains are present.
+  - `gh` resolves to the comment-marking wrapper first on `PATH` (#298).
   - There are no claude.ai connectors.
 - **Credentials.** A real Claude request as archon. The gh token is a fine-grained PAT (`github_pat_`). A write probe, creating a ref at the all-zero sha, which can never succeed, answers 422 on every factory repo and 403/404 on the Archon fork. That measures the token's grant; `.permissions.push` would only show the owner's role. A 422 on the fork is a FAIL, or a WARN after `install.sh --allow-all-repos-token` (see (a)).
 - **Factory path.** `archon doctor`. The cron's own `archon` (shim → wrapper) lists runs from archon's DB. A `--dry-run` of `archon-assist` through the wrapper works (no provider call). With `--live`, one real run.
