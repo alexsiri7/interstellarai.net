@@ -127,12 +127,12 @@ graphql_cmd() {
 }
 
 # api_path <endpoint>: the path gh api requests, without a scheme://host, a
-# query string, or leading and trailing slashes. gh sends a full URL as is and
-# appends any other path to https://api.github.com/, so /graphql and
-# https://api.github.com/graphql reach the same endpoint as graphql.
+# query string or fragment, or leading and trailing slashes. gh sends a full
+# URL as is and appends any other path to https://api.github.com/, so /graphql
+# and https://api.github.com/graphql reach the same endpoint as graphql.
 api_path() {
     local p="$1"
-    p="${p%%\?*}"
+    p="${p%%[?#]*}"
     [[ "$p" == *://* ]] && { p="${p#*://}"; p="${p#*/}"; }
     while [[ "$p" == /* ]]; do p="${p#/}"; done
     while [[ "$p" == */ ]]; do p="${p%/}"; done
