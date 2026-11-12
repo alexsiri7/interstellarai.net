@@ -81,6 +81,11 @@ FUEL_PROBE=/usr/local/lib/archon-user/fuel_probe.py
 GH_SHIM_DIR=/usr/local/lib/archon-user/gh-shim
 GH_OWNER=alexsiri7
 DRY_EXEC=0
+# The archon_env PATH's fixed tail, after gh-shim and the factory's own
+# toolchains: real system binaries, including a real gh if one is installed.
+# Overridable so selftest's "gh resolves to nothing" branch is reachable in
+# tests without touching /usr/local/bin, /usr/bin or /bin themselves.
+SYSTEM_PATH_TAIL=/usr/local/bin:/usr/bin:/bin
 
 if [ "${ARCHON_AS_TEST:-}" = 1 ] && [ -z "${SUDO_USER:-}" ]; then
     ARCHON_USER="${ARCHON_AS_USER:-$(id -un)}"
@@ -92,6 +97,7 @@ if [ "${ARCHON_AS_TEST:-}" = 1 ] && [ -z "${SUDO_USER:-}" ]; then
     ARCHON_BIN="${ARCHON_AS_ARCHON_BIN:-$ARCHON_BIN}"
     FUEL_PROBE="${ARCHON_AS_FUEL_PROBE:-$FUEL_PROBE}"
     GH_SHIM_DIR="${ARCHON_AS_GH_SHIM_DIR:-$GH_SHIM_DIR}"
+    SYSTEM_PATH_TAIL="${ARCHON_AS_SYSTEM_PATH_TAIL:-$SYSTEM_PATH_TAIL}"
     DRY_EXEC="${ARCHON_AS_DRY_EXEC:-0}"
 fi
 
@@ -167,7 +173,7 @@ archon_env() {
     local path="$GH_SHIM_DIR:$ARCHON_HOME_DIR/.bun/bin:$ARCHON_HOME_DIR/.local/bin:$ARCHON_HOME_DIR/.cargo/bin"
     [ -d "$ARCHON_HOME_DIR/.local/opt/flutter/bin" ] && path="$path:$ARCHON_HOME_DIR/.local/opt/flutter/bin"
     [ -d "$ARCHON_HOME_DIR/.local/opt/jdk/bin" ] && path="$path:$ARCHON_HOME_DIR/.local/opt/jdk/bin"
-    path="$path:/usr/local/bin:/usr/bin:/bin"
+    path="$path:$SYSTEM_PATH_TAIL"
     ENV=(
         "HOME=$ARCHON_HOME_DIR" "USER=$ARCHON_USER" "LOGNAME=$ARCHON_USER" "SHELL=/bin/bash"
         "LANG=C.UTF-8" "PATH=$path" "TMPDIR=$ARCHON_HOME_DIR/tmp"
@@ -678,7 +684,7 @@ verb_selftest() {
                          *) fail "tool missing: $t" ;; esac
         fi
     done
-    out=$(env -i "${ENV[@]}" bash -c 'command -v gh' 2>/dev/null)
+    out=$(env -i "${ENV[@]}" bash -c 'command -v gh' 2>/dev/null) || true
     if [ "$out" = "$GH_SHIM_DIR/gh" ]; then pass "gh: the comment-marking wrapper is first on PATH (#298)"
     else fail "gh resolves to ${out:-nothing}, not $GH_SHIM_DIR/gh — factory comments would lack <!-- lachesis:automated --> (re-run install.sh)"; fi
     # cargo intermediates off / wherever an agent builds, /tmp included (#133)

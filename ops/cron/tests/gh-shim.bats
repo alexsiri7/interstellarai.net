@@ -313,3 +313,67 @@ stdin_is() { diff <(printf '%s' "$1") "$T/stdin"; }
     argv_is api repos/a/b/issues/4/comments --input big.json
     [ ! -e "$T/stdin" ]
 }
+
+@test "a body too large for jq's --arg, read from a pipe, reaches the real gh on its own stdin -- not emptied" {
+    big=$(head -c 152001 /dev/zero | tr '\0' 'x')
+    printf '%s' "$big" | gh issue comment 5 -F -
+    argv_is issue comment 5 -F -
+    stdin_is "$big"
+
+    printf '{"body":"%s"}' "$big" | gh api repos/a/b/issues/4/comments --input -
+    argv_is api repos/a/b/issues/4/comments --input -
+    stdin_is "$(printf '{"body":"%s"}' "$big")"
+}
+
+@test "an --input body that stamps but fails to merge back into its JSON is refused, not posted unstamped" {
+    # Exercises gh:243's merge guard directly (rather than via jq's E2BIG,
+    # whose exact byte threshold is host-dependent): a jq stand-in that fails
+    # only the merge filter, so a real jq handles every other call.
+    realjq=$(command -v jq)
+    mkdir -p fakejq
+    cat > fakejq/jq <<STUB
+#!/usr/bin/env bash
+for a in "\$@"; do [ "\$a" = '.body = \$b' ] && exit 1; done
+exec "$realjq" "\$@"
+STUB
+    chmod +x fakejq/jq
+    export PATH="$PWD/fakejq:$PATH"
+    printf '{"body":"hi","extra":1}' > in.json
+    run gh api repos/a/b/issues/4/comments --input in.json
+    [ "$status" -eq 2 ]
+    [ ! -e "$T/argv" ]
+}
+
+@test "bundled gh api pflag shorthands (-iX, -ifbody=) still stamp the comment body" {
+    run gh api -iX POST repos/a/b/issues/4/comments -f body=hi
+    [ "$status" -eq 0 ]
+    argv_is api -iX POST repos/a/b/issues/4/comments -f "body=hi"$'\n\n'"$MARKER"
+
+    run gh api repos/a/b/issues/4/comments -ifbody=hi
+    [ "$status" -eq 0 ]
+    argv_is api repos/a/b/issues/4/comments -i -f "body=hi"$'\n\n'"$MARKER"
+}
+
+@test "a bundled -dc on pr close still stamps the comment" {
+    run gh pr close 3 -dc "done"
+    [ "$status" -eq 0 ]
+    argv_is pr close 3 -dc "done"$'\n\n'"$MARKER"
+}
+
+@test "a bundled -if on graphql still refuses an addComment mutation" {
+    run gh api graphql -if 'query=mutation { addComment(input: {subjectId: "x", body: "y"}) { clientMutationId } }'
+    [ "$status" -eq 2 ]
+    [ ! -e "$T/argv" ]
+}
+
+@test "gh api's long-form --method/--field aliases stamp a comment body like -X/-F do" {
+    run gh api --method POST --field body=x repos/a/b/issues/4/comments
+    [ "$status" -eq 0 ]
+    argv_is api --method POST -f "body=x"$'\n\n'"$MARKER" repos/a/b/issues/4/comments
+}
+
+@test "gh api's long-form --raw-field alias is refused on a GraphQL comment mutation like -f is" {
+    run gh api graphql --raw-field 'query=mutation { addComment(input: {subjectId: "x", body: "y"}) { clientMutationId } }'
+    [ "$status" -eq 2 ]
+    [ ! -e "$T/argv" ]
+}

@@ -47,6 +47,16 @@ stamp() {
 }
 read_src() { if [ "$1" = - ]; then cat; else cat -- "$1"; fi; }
 passthrough() { exec "$real" "${orig[@]}"; }
+# passthrough, but replay <content> as this process's own stdin when
+# <was_stdin> is 1: once a body has been read from `-` (this process's
+# stdin), that pipe is drained and cannot be replayed by the real gh itself,
+# so a bare passthrough after a later failure (e.g. stamp() hitting jq's
+# E2BIG) would hand it an empty pipe instead of the original body.
+passthrough_after_read() {
+    local was_stdin="$1" content="$2"
+    [ "$was_stdin" = 1 ] && exec "$real" "${orig[@]}" < <(printf '%s' "$content")
+    passthrough
+}
 refuse() { echo "gh (factory wrapper): $1 (interstellarai.net#298)" >&2; exit 2; }
 
 # dispatch_action <args after "issue"/"pr">: the action subcommand word
@@ -63,7 +73,7 @@ dispatch_action() {
 }
 
 comment_cmd() {
-    local out=() tail=() body="" found=0 have_b=0 have_f=0 b v
+    local out=() tail=() body="" found=0 have_b=0 have_f=0 b v body_is_stdin=0
     local a=("$@") i=0
     while [ "$i" -lt "${#a[@]}" ]; do
         case "${a[$i]}" in
@@ -85,9 +95,9 @@ comment_cmd() {
             -b|--body) [ $# -ge 2 ] || passthrough; body="$2"; found=1; shift 2 ;;
             --body=*) body="${1#--body=}"; found=1; shift ;;
             -b?*) v="${1#-b}"; body="${v#=}"; found=1; shift ;;
-            -F|--body-file) [ $# -ge 2 ] || passthrough; b=$(read_src "$2") || passthrough; body="$b"; found=1; shift 2 ;;
-            --body-file=*) b=$(read_src "${1#--body-file=}") || passthrough; body="$b"; found=1; shift ;;
-            -F?*) v="${1#-F}"; v="${v#=}"; b=$(read_src "$v") || passthrough; body="$b"; found=1; shift ;;
+            -F|--body-file) [ $# -ge 2 ] || passthrough; [ "$2" = - ] && body_is_stdin=1; b=$(read_src "$2") || passthrough; body="$b"; found=1; shift 2 ;;
+            --body-file=*) v="${1#--body-file=}"; [ "$v" = - ] && body_is_stdin=1; b=$(read_src "$v") || passthrough; body="$b"; found=1; shift ;;
+            -F?*) v="${1#-F}"; v="${v#=}"; [ "$v" = - ] && body_is_stdin=1; b=$(read_src "$v") || passthrough; body="$b"; found=1; shift ;;
             --attach|--attach=*) refuse "attach files via a second, already-stamped comment -- gh appends unreferenced --attach content after $MARKER" ;;
             -e|--editor) refuse "pass the body with -b/--body or --body-file so it can be stamped with $MARKER, not -e/--editor" ;;
             --) tail=("$@"); break ;;
@@ -95,17 +105,22 @@ comment_cmd() {
         esac
     done
     [ "$found" = 1 ] || passthrough
-    local stamped; stamped=$(stamp "$body") || passthrough
+    local stamped; stamped=$(stamp "$body") || passthrough_after_read "$body_is_stdin" "$body"
     exec "$real" "${out[@]}" --body-file - "${tail[@]}" < <(printf '%s' "$stamped")
 }
 
 close_cmd() {
-    local out=() v s
+    local out=() v s arg bundle
     while [ $# -gt 0 ]; do
-        case "$1" in
+        arg="$1" bundle=""
+        # pr close's only boolean short flag is -d/--delete-branch; it
+        # bundles in front of -c (-dc "msg"), so strip a leading -d before
+        # matching, the same way split_opt strips -i for gh api.
+        if [[ "$arg" == -d[A-Za-z]* ]]; then bundle="d"; arg="-${arg:2}"; fi
+        case "$arg" in
             -c|--comment) [ $# -ge 2 ] || break; s=$(stamp "$2") || passthrough; out+=("$1" "$s"); shift 2 ;;
-            --comment=*) s=$(stamp "${1#--comment=}") || passthrough; out+=("--comment=$s"); shift ;;
-            -c?*) v="${1#-c}"; v="${v#=}"; s=$(stamp "$v") || passthrough; out+=(-c "$s"); shift ;;
+            --comment=*) s=$(stamp "${arg#--comment=}") || passthrough; out+=("--comment=$s"); shift ;;
+            -c?*) v="${arg#-c}"; v="${v#=}"; s=$(stamp "$v") || passthrough; out+=("-${bundle}c" "$s"); shift ;;
             --) break ;;
             *) out+=("$1"); shift ;;
         esac
@@ -117,13 +132,21 @@ close_cmd() {
 # OPT is its canonical name (-X, -f, -F, --input, ...) and VAL its value, and
 # NUSED is how many words it took (1 for --flag=v and -fv, 2 for --flag v).
 split_opt() {
-    OPT="" VAL="" NUSED=1
-    case "$1" in
+    OPT="" VAL="" NUSED=1 HAD_I=0
+    local arg="$1"
+    # gh api's only boolean short flag is -i/--include; it bundles in front of
+    # a value-taking short flag (-iX POST, -ifbody=x), and once a value flag
+    # is hit the rest of the word is its value, so stripping a leading -i
+    # before matching is enough to resolve the bundle. HAD_I records the
+    # strip so a caller that rebuilds this word (rather than forwarding it
+    # unchanged) can keep -i instead of silently dropping it.
+    if [[ "$arg" == -i[A-Za-z]* ]]; then HAD_I=1; arg="-${arg:2}"; fi
+    case "$arg" in
         -X|--method|-f|--raw-field|-F|--field|-H|--header|-q|--jq|-t|--template|--hostname|--cache|-p|--preview|--input)
-            OPT="$1" VAL="${2-}" NUSED=2 ;;
+            OPT="$arg" VAL="${2-}" NUSED=2 ;;
         --method=*|--raw-field=*|--field=*|--header=*|--jq=*|--template=*|--hostname=*|--cache=*|--preview=*|--input=*)
-            OPT="${1%%=*}" VAL="${1#*=}" ;;
-        -[XfFHqtp]?*) OPT="${1:0:2}" VAL="${1:2}" VAL="${VAL#=}" ;;
+            OPT="${arg%%=*}" VAL="${arg#*=}" ;;
+        -[XfFHqtp]?*) OPT="${arg:0:2}" VAL="${arg:2}" VAL="${VAL#=}" ;;
     esac
     case "$OPT" in --method) OPT=-X ;; --raw-field) OPT=-f ;; --field) OPT=-F ;; esac
 }
@@ -177,7 +200,7 @@ api_path() {
 }
 
 api_cmd() {
-    local endpoint="" method="" fields=0 args=() json="" stamped sb use_stdin=0 v
+    local endpoint="" method="" fields=0 args=() json="" stamped sb use_stdin=0 v v_is_stdin=0 json_is_stdin=0
     shift
     # Pass 1: the endpoint and method can come after the fields.
     local a=("$@")
@@ -206,15 +229,22 @@ api_cmd() {
         split_opt "$1" "${2-}"
         if [[ "$OPT" == -f || "$OPT" == -F ]] && [[ "$VAL" == body=* ]]; then
             v="${VAL#body=}"
-            if [ "$OPT" = -F ] && [[ "$v" == @* ]]; then v=$(read_src "${v#@}") || passthrough; fi
-            sb=$(stamp "$v") || passthrough
+            v_is_stdin=0
+            if [ "$OPT" = -F ] && [[ "$v" == @* ]]; then
+                [ "${v#@}" = - ] && v_is_stdin=1
+                v=$(read_src "${v#@}") || passthrough
+            fi
+            sb=$(stamp "$v") || passthrough_after_read "$v_is_stdin" "$v"
+            [ "$HAD_I" = 1 ] && args+=(-i)
             args+=(-f "body=$sb")
         elif [ "$OPT" = --input ]; then
+            json_is_stdin=0; [ "$VAL" = - ] && json_is_stdin=1
             json=$(read_src "$VAL") || passthrough
             if [ "$(jq -r '.body | type' <<<"$json" 2>/dev/null)" = string ]; then
                 v=$(jq -r '.body' <<<"$json" 2>/dev/null) || v=""
-                sb=$(stamp "$v") || passthrough
-                stamped=$(jq -c --arg b "$sb" '.body = $b' <<<"$json" 2>/dev/null) && json="$stamped"
+                sb=$(stamp "$v") || passthrough_after_read "$json_is_stdin" "$json"
+                stamped=$(jq -c --arg b "$sb" '.body = $b' <<<"$json" 2>/dev/null) || refuse "could not merge a stamped comment body back into its JSON (too large to re-embed)"
+                json="$stamped"
             fi
             args+=(--input -); use_stdin=1
         else

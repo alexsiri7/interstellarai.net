@@ -325,6 +325,20 @@ STUB
     [[ "$output" == *"FAIL gh resolves to $T/home/.local/bin/gh, not $T/ghshim/gh — factory comments would lack <!-- lachesis:automated --> (re-run install.sh)"* ]]
 }
 
+@test "selftest survives no gh resolving anywhere and still reaches the PATH-check line and the summary" {
+    # archon_env's PATH is gh-shim, then the factory's own toolchains, then a
+    # fixed system tail; emptying all three (ARCHON_AS_SYSTEM_PATH_TAIL is the
+    # test-only override for the tail, which install.sh's real PATH cannot
+    # otherwise avoid putting a real gh on) makes `command -v gh` itself find
+    # nothing, the one shape that reaches the bare `out=$(...)` assignment's
+    # failure under `set -e`.
+    export ARCHON_AS_GH_SHIM_DIR="$T/no-such-shim"
+    export ARCHON_AS_SYSTEM_PATH_TAIL="$T/no-such-system-bin"
+    run "$W" selftest
+    [[ "$output" == *"FAIL gh resolves to nothing, not $T/no-such-shim/gh — factory comments would lack <!-- lachesis:automated --> (re-run install.sh)"* ]]
+    [[ "$output" == *"selftest: "*" failure(s)"* ]]
+}
+
 @test "selftest survives a getent that fails for a missing asiri account and still reaches the PATH-check line" {
     mkdir -p "$T/bin"
     cat > "$T/bin/getent" <<'STUB'
