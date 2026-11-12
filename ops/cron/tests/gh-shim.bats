@@ -101,6 +101,17 @@ stdin_is() { diff <(printf '%s' "$1") "$T/stdin"; }
     stdin_is "hi"$'\n\n'"$MARKER"
 }
 
+@test "a -b=value / -F=file shorthand strips the leading = like real gh's own pflag parser" {
+    run gh issue comment 5 -b=hi
+    [ "$status" -eq 0 ]
+    stdin_is "hi"$'\n\n'"$MARKER"
+
+    printf 'from a file\n' > f.md
+    run gh pr comment 7 -F=f.md
+    [ "$status" -eq 0 ]
+    stdin_is "from a file"$'\n\n'"$MARKER"
+}
+
 @test "issue|pr close -c/--comment: the comment value is stamped, other args kept in order" {
     run gh issue close 3 -c "done" --reason completed
     [ "$status" -eq 0 ]
@@ -109,6 +120,12 @@ stdin_is() { diff <(printf '%s' "$1") "$T/stdin"; }
     run gh pr close 3 --comment=done
     [ "$status" -eq 0 ]
     argv_is pr close 3 "--comment=done"$'\n\n'"$MARKER"
+}
+
+@test "issue close -c=value shorthand strips the leading = like real gh's own pflag parser" {
+    run gh issue close 3 -c=done --reason completed
+    [ "$status" -eq 0 ]
+    argv_is issue close 3 -c "done"$'\n\n'"$MARKER" --reason completed
 }
 
 @test "api -f body= and -F body=@file to an issue-comments endpoint are stamped" {
@@ -120,6 +137,18 @@ stdin_is() { diff <(printf '%s' "$1") "$T/stdin"; }
     run gh api -X PATCH 'repos/{owner}/{repo}/issues/comments/9' -F body=@f.md
     [ "$status" -eq 0 ]
     argv_is api -X PATCH 'repos/{owner}/{repo}/issues/comments/9' -f "body=edited"$'\n\n'"$MARKER"
+}
+
+@test "api -X=POST -f=body=... shorthand strips the leading = like real gh's own pflag parser" {
+    run gh api -X=POST -f=body=x repos/a/b/issues/4/comments
+    [ "$status" -eq 0 ]
+    argv_is api -X=POST -f "body=x"$'\n\n'"$MARKER" repos/a/b/issues/4/comments
+}
+
+@test "api -f body=x <endpoint-after-flags>, defaulting to POST, is stamped" {
+    run gh api -f body=x repos/a/b/issues/4/comments
+    [ "$status" -eq 0 ]
+    argv_is api -f "body=x"$'\n\n'"$MARKER" repos/a/b/issues/4/comments
 }
 
 @test "an issue-comments endpoint as a full URL, with slashes or a query string, is stamped" {
@@ -163,6 +192,12 @@ stdin_is() { diff <(printf '%s' "$1") "$T/stdin"; }
     argv_is api -X PATCH -f body=x repos/a/b/issues/4
     run gh api -f body=x repos/a/b/issues/4/comments -X GET
     argv_is api -f body=x repos/a/b/issues/4/comments -X GET
+}
+
+@test "a GraphQL addComment via -f=query=... shorthand is still refused, not let through unmarked" {
+    run gh api graphql -f=query='mutation { addComment(input: {subjectId: "x", body: "y"}) { clientMutationId } }'
+    [ "$status" -eq 2 ]
+    [ ! -e "$T/argv" ]
 }
 
 @test "a GraphQL addComment is refused before the real gh runs" {
@@ -240,5 +275,41 @@ stdin_is() { diff <(printf '%s' "$1") "$T/stdin"; }
 
     run gh pr comment 5 --body=x --body-file=f.md
     argv_is pr comment 5 --body=x --body-file=f.md
+    [ ! -e "$T/stdin" ]
+}
+
+@test "an empty body stays empty (not marker-only) through -b, --body-file, -c, and --input" {
+    run gh issue comment 5 -b ""
+    [ "$status" -eq 0 ]
+    argv_is issue comment 5 --body-file -
+    stdin_is ""
+
+    printf '' > empty.md
+    run gh pr comment 7 --body-file empty.md
+    [ "$status" -eq 0 ]
+    stdin_is ""
+
+    run gh issue close 3 -c ""
+    [ "$status" -eq 0 ]
+    argv_is issue close 3 -c ""
+
+    printf '{"body":""}' > empty.json
+    run gh api repos/a/b/issues/4/comments --input empty.json
+    [ "$status" -eq 0 ]
+    [ "$(jq -r .body "$T/stdin")" = "" ]
+}
+
+@test "a body too large for jq's --arg (E2BIG) reaches the real gh unchanged, not emptied" {
+    big=$(head -c 152001 /dev/zero | tr '\0' 'x')
+    printf '%s' "$big" > big.md
+    run gh issue comment 5 -F big.md
+    [ "$status" -eq 0 ]
+    argv_is issue comment 5 -F big.md
+    [ ! -e "$T/stdin" ]
+
+    printf '{"body":"%s"}' "$big" > big.json
+    run gh api repos/a/b/issues/4/comments --input big.json
+    [ "$status" -eq 0 ]
+    argv_is api repos/a/b/issues/4/comments --input big.json
     [ ! -e "$T/stdin" ]
 }

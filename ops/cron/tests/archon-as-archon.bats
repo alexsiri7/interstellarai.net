@@ -325,6 +325,26 @@ STUB
     [[ "$output" == *"FAIL gh resolves to $T/home/.local/bin/gh, not $T/ghshim/gh — factory comments would lack <!-- lachesis:automated --> (re-run install.sh)"* ]]
 }
 
+@test "selftest survives a getent that fails for a missing asiri account and still reaches the PATH-check line" {
+    mkdir -p "$T/bin"
+    cat > "$T/bin/getent" <<'STUB'
+#!/usr/bin/env bash
+[ "$1" = passwd ] && [ "$2" = asiri ] && exit 2
+exec /usr/bin/getent "$@"
+STUB
+    chmod +x "$T/bin/getent"
+    export PATH="$T/bin:$PATH"
+    mkdir -p "$T/ghshim"
+    cat > "$T/ghshim/gh" <<'STUB'
+#!/usr/bin/env bash
+STUB
+    chmod +x "$T/ghshim/gh"
+    export ARCHON_AS_GH_SHIM_DIR="$T/ghshim"
+    run "$W" selftest
+    [[ "$output" == *"PASS gh: the comment-marking wrapper is first on PATH (#298)"* ]]
+    [[ "$output" == *"selftest: "*" failure(s)"* ]]
+}
+
 @test "selftest sweep skips exactly Debian's dpkg/apt/alternatives backups in /var/backups" {
     eval "$(grep -E '^SYSTEM_BACKUPS_RE=' "$W")"
     for f in dpkg.status.0 dpkg.status.1.gz dpkg.arch.0 dpkg.arch.6.gz dpkg.diversions.0 dpkg.statoverride.3.gz \

@@ -17,8 +17,8 @@
 # rewritten, whether its query comes from -f/-F query= or --input; so is an
 # `issue|pr comment` whose body comes from --attach (gh can append unreferenced
 # attachments after the marker) or -e/--editor (no body this wrapper can read
-# and stamp). Everything else, and any body source that cannot be read, goes to
-# the real gh unchanged.
+# and stamp). Everything else, and any body source that cannot be read or
+# stamped (e.g. too large for jq's argv), goes to the real gh unchanged.
 #
 # set -u, not -e: the wrapper must never fail where the real gh would succeed.
 set -u
@@ -40,9 +40,10 @@ orig=("$@")
 # codepoint like a non-breaking space, in any locale) so every caller agrees
 # on what counts as already-stamped.
 stamp() {
-    local t="$1"
-    printf '%s' "$(jq -nr --arg t "$t" --arg m "$MARKER" \
-        '($t | sub("\\s+$"; "")) as $s | if $s == "" or ($s | endswith($m)) then $s else $s + "\n\n" + $m end')"
+    local t="$1" out
+    out=$(jq -nr --arg t "$t" --arg m "$MARKER" \
+        '($t | sub("\\s+$"; "")) as $s | if $s == "" or ($s | endswith($m)) then $s else $s + "\n\n" + $m end') || return 1
+    printf '%s' "$out"
 }
 read_src() { if [ "$1" = - ]; then cat; else cat -- "$1"; fi; }
 passthrough() { exec "$real" "${orig[@]}"; }
@@ -62,7 +63,7 @@ dispatch_action() {
 }
 
 comment_cmd() {
-    local out=() tail=() body="" found=0 have_b=0 have_f=0 b
+    local out=() tail=() body="" found=0 have_b=0 have_f=0 b v
     local a=("$@") i=0
     while [ "$i" -lt "${#a[@]}" ]; do
         case "${a[$i]}" in
@@ -83,10 +84,10 @@ comment_cmd() {
         case "$1" in
             -b|--body) [ $# -ge 2 ] || passthrough; body="$2"; found=1; shift 2 ;;
             --body=*) body="${1#--body=}"; found=1; shift ;;
-            -b?*) body="${1#-b}"; found=1; shift ;;
+            -b?*) v="${1#-b}"; body="${v#=}"; found=1; shift ;;
             -F|--body-file) [ $# -ge 2 ] || passthrough; b=$(read_src "$2") || passthrough; body="$b"; found=1; shift 2 ;;
             --body-file=*) b=$(read_src "${1#--body-file=}") || passthrough; body="$b"; found=1; shift ;;
-            -F?*) b=$(read_src "${1#-F}") || passthrough; body="$b"; found=1; shift ;;
+            -F?*) v="${1#-F}"; v="${v#=}"; b=$(read_src "$v") || passthrough; body="$b"; found=1; shift ;;
             --attach|--attach=*) refuse "attach files via a second, already-stamped comment -- gh appends unreferenced --attach content after $MARKER" ;;
             -e|--editor) refuse "pass the body with -b/--body or --body-file so it can be stamped with $MARKER, not -e/--editor" ;;
             --) tail=("$@"); break ;;
@@ -94,16 +95,17 @@ comment_cmd() {
         esac
     done
     [ "$found" = 1 ] || passthrough
-    exec "$real" "${out[@]}" --body-file - "${tail[@]}" < <(stamp "$body")
+    local stamped; stamped=$(stamp "$body") || passthrough
+    exec "$real" "${out[@]}" --body-file - "${tail[@]}" < <(printf '%s' "$stamped")
 }
 
 close_cmd() {
-    local out=()
+    local out=() v s
     while [ $# -gt 0 ]; do
         case "$1" in
-            -c|--comment) [ $# -ge 2 ] || break; out+=("$1" "$(stamp "$2")"); shift 2 ;;
-            --comment=*) out+=("--comment=$(stamp "${1#--comment=}")"); shift ;;
-            -c?*) out+=(-c "$(stamp "${1#-c}")"); shift ;;
+            -c|--comment) [ $# -ge 2 ] || break; s=$(stamp "$2") || passthrough; out+=("$1" "$s"); shift 2 ;;
+            --comment=*) s=$(stamp "${1#--comment=}") || passthrough; out+=("--comment=$s"); shift ;;
+            -c?*) v="${1#-c}"; v="${v#=}"; s=$(stamp "$v") || passthrough; out+=(-c "$s"); shift ;;
             --) break ;;
             *) out+=("$1"); shift ;;
         esac
@@ -121,7 +123,7 @@ split_opt() {
             OPT="$1" VAL="${2-}" NUSED=2 ;;
         --method=*|--raw-field=*|--field=*|--header=*|--jq=*|--template=*|--hostname=*|--cache=*|--preview=*|--input=*)
             OPT="${1%%=*}" VAL="${1#*=}" ;;
-        -[XfFHqtp]?*) OPT="${1:0:2}" VAL="${1:2}" ;;
+        -[XfFHqtp]?*) OPT="${1:0:2}" VAL="${1:2}" VAL="${VAL#=}" ;;
     esac
     case "$OPT" in --method) OPT=-X ;; --raw-field) OPT=-f ;; --field) OPT=-F ;; esac
 }
@@ -175,7 +177,7 @@ api_path() {
 }
 
 api_cmd() {
-    local endpoint="" method="" fields=0 args=() json="" stamped use_stdin=0 v
+    local endpoint="" method="" fields=0 args=() json="" stamped sb use_stdin=0 v
     shift
     # Pass 1: the endpoint and method can come after the fields.
     local a=("$@")
@@ -205,12 +207,14 @@ api_cmd() {
         if [[ "$OPT" == -f || "$OPT" == -F ]] && [[ "$VAL" == body=* ]]; then
             v="${VAL#body=}"
             if [ "$OPT" = -F ] && [[ "$v" == @* ]]; then v=$(read_src "${v#@}") || passthrough; fi
-            args+=(-f "body=$(stamp "$v")")
+            sb=$(stamp "$v") || passthrough
+            args+=(-f "body=$sb")
         elif [ "$OPT" = --input ]; then
             json=$(read_src "$VAL") || passthrough
             if [ "$(jq -r '.body | type' <<<"$json" 2>/dev/null)" = string ]; then
                 v=$(jq -r '.body' <<<"$json" 2>/dev/null) || v=""
-                stamped=$(jq -c --arg b "$(stamp "$v")" '.body = $b' <<<"$json" 2>/dev/null) && json="$stamped"
+                sb=$(stamp "$v") || passthrough
+                stamped=$(jq -c --arg b "$sb" '.body = $b' <<<"$json" 2>/dev/null) && json="$stamped"
             fi
             args+=(--input -); use_stdin=1
         else
