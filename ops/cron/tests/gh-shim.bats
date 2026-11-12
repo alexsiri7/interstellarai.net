@@ -83,6 +83,14 @@ stdin_is() { diff <(printf '%s' "$1") "$T/stdin"; }
     argv_is api -X PATCH 'repos/{owner}/{repo}/issues/comments/9' -f "body=edited"$'\n\n'"$MARKER"
 }
 
+@test "an issue-comments endpoint as a full URL, with slashes or a query string, is stamped" {
+    for ep in https://api.github.com/repos/a/b/issues/4/comments /repos/a/b/issues/4/comments/ 'repos/a/b/issues/4/comments?x=1'; do
+        run gh api "$ep" -f body=x
+        [ "$status" -eq 0 ]
+        argv_is api "$ep" -f "body=x"$'\n\n'"$MARKER"
+    done
+}
+
 @test "api --input JSON to an issue-comments endpoint: .body stamped, other keys kept" {
     printf '{"body":"hello","extra":1}' > in.json
     run gh api repos/a/b/issues/4/comments --input in.json
@@ -123,6 +131,21 @@ stdin_is() { diff <(printf '%s' "$1") "$T/stdin"; }
     [ ! -e "$T/argv" ]
 
     run bash -c 'echo "mutation { addComment(input: {subjectId: \"x\", body: \"y\"}) { clientMutationId } }" | gh api graphql -F query=@-'
+    [ "$status" -eq 2 ]
+    [ ! -e "$T/argv" ]
+}
+
+@test "a GraphQL comment mutation is refused however the graphql endpoint is spelled" {
+    for ep in /graphql graphql/ //graphql 'graphql?x=1' https://api.github.com/graphql; do
+        run gh api -X POST -f 'query=mutation { addComment(input: {subjectId: "x", body: "y"}) { clientMutationId } }' "$ep"
+        [ "$status" -eq 2 ]
+        [ ! -e "$T/argv" ]
+    done
+}
+
+@test "a malformed-JSON --input graphql mutation is still refused via the raw-text fallback" {
+    printf 'not json {{{ mutation addComment garbage' > q.json
+    run gh api graphql --input q.json
     [ "$status" -eq 2 ]
     [ ! -e "$T/argv" ]
 }

@@ -126,6 +126,19 @@ graphql_cmd() {
     exec "$real" api "${args[@]}"
 }
 
+# api_path <endpoint>: the path gh api requests, without a scheme://host, a
+# query string, or leading and trailing slashes. gh sends a full URL as is and
+# appends any other path to https://api.github.com/, so /graphql and
+# https://api.github.com/graphql reach the same endpoint as graphql.
+api_path() {
+    local p="$1"
+    [[ "$p" == *://* ]] && { p="${p#*://}"; p="${p#*/}"; }
+    p="${p%%\?*}"
+    while [[ "$p" == /* ]]; do p="${p#/}"; done
+    while [[ "$p" == */ ]]; do p="${p%/}"; done
+    printf '%s' "$p"
+}
+
 api_cmd() {
     local endpoint="" method="" fields=0 args=() json="" stamped use_stdin=0 v
     shift
@@ -142,10 +155,11 @@ api_cmd() {
         shift
         [ "$NUSED" = 2 ] && [ $# -gt 0 ] && shift
     done
+    endpoint=$(api_path "$endpoint")
     [ "$endpoint" = graphql ] && graphql_cmd "${a[@]}"
     [ -n "$method" ] || { [ "$fields" = 1 ] && method=POST || method=GET; }
     method="${method^^}"
-    [[ "$endpoint" =~ ^/?repos/[^/]+/[^/]+/issues/([0-9]+/comments|comments/[0-9]+)/?$ ]] || passthrough
+    [[ "$endpoint" =~ ^repos/[^/]+/[^/]+/issues/([0-9]+/comments|comments/[0-9]+)$ ]] || passthrough
     [[ "$method" == POST || "$method" == PATCH ]] || passthrough
 
     # Pass 2: rewrite the body. JSON jq cannot parse goes on unchanged, from the
