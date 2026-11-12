@@ -14,7 +14,7 @@
 # of `issue|pr close|reopen`, and `api` POST/PATCH to repos/{o}/{r}/issues/{n}/comments
 # or repos/{o}/{r}/issues/comments/{id} (-f/-F body=, or --input JSON's .body).
 # A GraphQL addComment/updateIssueComment is refused (exit 2) rather than
-# rewritten. Everything else, and any body source that cannot be read, goes to
+# rewritten, whether its query comes from -f/-F query= or --input. Everything else, and any body source that cannot be read, goes to
 # the real gh unchanged.
 #
 # set -u, not -e: the wrapper must never fail where the real gh would succeed.
@@ -42,7 +42,7 @@ read_src() { if [ "$1" = - ]; then cat; else cat -- "$1"; fi; }
 passthrough() { exec "$real" "${orig[@]}"; }
 
 comment_cmd() {
-    local out=("$1" "$2") body="" found=0 b
+    local out=("$1" "$2") tail=() body="" found=0 b
     shift 2
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -52,12 +52,12 @@ comment_cmd() {
             -F|--body-file) [ $# -ge 2 ] || passthrough; b=$(read_src "$2") || passthrough; body="$b"; found=1; shift 2 ;;
             --body-file=*) b=$(read_src "${1#--body-file=}") || passthrough; body="$b"; found=1; shift ;;
             -F?*) b=$(read_src "${1#-F}") || passthrough; body="$b"; found=1; shift ;;
-            --) out+=("$@"); break ;;
+            --) tail=("$@"); break ;;
             *) out+=("$1"); shift ;;
         esac
     done
     [ "$found" = 1 ] || passthrough
-    exec "$real" "${out[@]}" --body-file - < <(stamp "$body")
+    exec "$real" "${out[@]}" --body-file - "${tail[@]}" < <(stamp "$body")
 }
 
 close_cmd() {
@@ -90,8 +90,44 @@ split_opt() {
     case "$OPT" in --method) OPT=-X ;; --raw-field) OPT=-f ;; --field) OPT=-F ;; esac
 }
 
+# graphql_cmd <args>: refuses a comment mutation wherever its query comes from
+# (-f/-F query=, -F query=@<src>, --input <src>). A source read for the check
+# (a pipe or process substitution cannot be read twice) goes on to the real gh
+# as text: -F query=@<src> as -f query=, --input <src> on stdin.
+graphql_cmd() {
+    local query="" q input="" use_stdin=0 args=()
+    while [ $# -gt 0 ]; do
+        split_opt "$1" "${2-}"
+        if [[ "$OPT" == -f || "$OPT" == -F ]] && [[ "$VAL" == query=* ]]; then
+            q="${VAL#query=}"
+            if [ "$OPT" = -F ] && [[ "$q" == @* ]]; then
+                q=$(read_src "${q#@}") || passthrough
+                args+=(-f "query=$q")
+            else
+                args+=("${@:1:NUSED}")
+            fi
+            query="$query$q"
+        elif [ "$OPT" = --input ]; then
+            input=$(read_src "$VAL") || passthrough
+            q=$(jq -r '.query // empty' <<<"$input" 2>/dev/null) || q="$input"
+            query="$query$q"
+            args+=(--input -); use_stdin=1
+        else
+            args+=("${@:1:NUSED}")
+        fi
+        shift
+        [ "$NUSED" = 2 ] && [ $# -gt 0 ] && shift
+    done
+    if [[ "$query" =~ addComment|updateIssueComment ]]; then
+        echo "gh (factory wrapper): post issue and PR comments with 'gh issue comment' / 'gh pr comment' so they carry $MARKER (interstellarai.net#298)" >&2
+        exit 2
+    fi
+    [ "$use_stdin" = 1 ] && exec "$real" api "${args[@]}" < <(printf '%s' "$input")
+    exec "$real" api "${args[@]}"
+}
+
 api_cmd() {
-    local endpoint="" method="" fields=0 query="" q args=() json="" use_stdin=0 v
+    local endpoint="" method="" fields=0 args=() json="" stamped use_stdin=0 v
     shift
     # Pass 1: the endpoint and method can come after the fields.
     local a=("$@")
@@ -100,28 +136,20 @@ api_cmd() {
         split_opt "$1" "${2-}"
         case "$OPT" in
             -X) method="$VAL" ;;
-            -f|-F|--input)
-                fields=1
-                if [[ "$OPT" != --input && "$VAL" == query=* ]]; then
-                    q="${VAL#query=}"
-                    if [ "$OPT" = -F ] && [[ "$q" == @* && "$q" != @- ]]; then q=$(cat -- "${q#@}" 2>/dev/null); fi
-                    query="$query$q"
-                fi ;;
+            -f|-F|--input) fields=1 ;;
             "") [[ "$1" == -* ]] || endpoint="${endpoint:-$1}" ;;
         esac
         shift
         [ "$NUSED" = 2 ] && [ $# -gt 0 ] && shift
     done
-    if [ "$endpoint" = graphql ] && [[ "$query" =~ addComment|updateIssueComment ]]; then
-        echo "gh (factory wrapper): post issue and PR comments with 'gh issue comment' / 'gh pr comment' so they carry $MARKER (interstellarai.net#298)" >&2
-        exit 2
-    fi
+    [ "$endpoint" = graphql ] && graphql_cmd "${a[@]}"
     [ -n "$method" ] || { [ "$fields" = 1 ] && method=POST || method=GET; }
     method="${method^^}"
     [[ "$endpoint" =~ ^/?repos/[^/]+/[^/]+/issues/([0-9]+/comments|comments/[0-9]+)/?$ ]] || passthrough
     [[ "$method" == POST || "$method" == PATCH ]] || passthrough
 
-    # Pass 2: rewrite the body.
+    # Pass 2: rewrite the body. JSON jq cannot parse goes on unchanged, from the
+    # copy already read.
     set -- "${a[@]}"
     while [ $# -gt 0 ]; do
         split_opt "$1" "${2-}"
@@ -131,7 +159,7 @@ api_cmd() {
             args+=(-f "body=$(stamp "$v")")
         elif [ "$OPT" = --input ]; then
             json=$(read_src "$VAL") || passthrough
-            json=$(jq -c --arg m "$MARKER" 'if (.body|type)=="string" then .body |= (sub("\\s+$";"") | if . == "" or endswith($m) then . else . + "\n\n" + $m end) else . end' <<<"$json" 2>/dev/null) || passthrough
+            stamped=$(jq -c --arg m "$MARKER" 'if (.body|type)=="string" then .body |= (sub("\\s+$";"") | if . == "" or endswith($m) then . else . + "\n\n" + $m end) else . end' <<<"$json" 2>/dev/null) && json="$stamped"
             args+=(--input -); use_stdin=1
         else
             args+=("${@:1:NUSED}")

@@ -55,6 +55,13 @@ stdin_is() { diff <(printf '%s' "$1") "$T/stdin"; }
     stdin_is "done"$'\n\n'"$MARKER"
 }
 
+@test "a -- before the issue number stays after the rewritten body flag" {
+    run gh issue comment -b "hi" -- 5
+    [ "$status" -eq 0 ]
+    argv_is issue comment --body-file - -- 5
+    stdin_is "hi"$'\n\n'"$MARKER"
+}
+
 @test "issue|pr close -c/--comment: the comment value is stamped, other args kept in order" {
     run gh issue close 3 -c "done" --reason completed
     [ "$status" -eq 0 ]
@@ -85,10 +92,19 @@ stdin_is() { diff <(printf '%s' "$1") "$T/stdin"; }
     [ "$(jq -r .extra "$T/stdin")" = 1 ]
 }
 
-@test "api PATCH of a PR body with the endpoint after the flags is untouched" {
+@test "api --input - that jq cannot parse reaches the real gh with its bytes intact" {
+    printf 'not json {{{' | gh api -X POST repos/a/b/issues/4/comments --input -
+    argv_is api -X POST repos/a/b/issues/4/comments --input -
+    stdin_is 'not json {{{'
+}
+
+@test "api PATCH of an issue or PR body with the endpoint after the flags is untouched" {
     run gh api -X PATCH -f body=x repos/a/b/pulls/4
     [ "$status" -eq 0 ]
     argv_is api -X PATCH -f body=x repos/a/b/pulls/4
+    run gh api -X PATCH -f body=x repos/a/b/issues/4
+    [ "$status" -eq 0 ]
+    argv_is api -X PATCH -f body=x repos/a/b/issues/4
     run gh api -f body=x repos/a/b/issues/4/comments -X GET
     argv_is api -f body=x repos/a/b/issues/4/comments -X GET
 }
@@ -98,6 +114,27 @@ stdin_is() { diff <(printf '%s' "$1") "$T/stdin"; }
     [ "$status" -eq 2 ]
     [[ "$output" == *"gh issue comment"* ]]
     [ ! -e "$T/argv" ]
+}
+
+@test "a GraphQL comment mutation from --input or -F query=@- is refused too" {
+    printf '{"query":"mutation { updateIssueComment(input: {id: \\"x\\", body: \\"y\\"}) { clientMutationId } }"}' > q.json
+    run gh api graphql --input q.json
+    [ "$status" -eq 2 ]
+    [ ! -e "$T/argv" ]
+
+    run bash -c 'echo "mutation { addComment(input: {subjectId: \"x\", body: \"y\"}) { clientMutationId } }" | gh api graphql -F query=@-'
+    [ "$status" -eq 2 ]
+    [ ! -e "$T/argv" ]
+}
+
+@test "a GraphQL query read from a pipe or --input - reaches the real gh intact" {
+    run gh api graphql -F query=@<(echo 'query { viewer { login } }') -F n=1
+    [ "$status" -eq 0 ]
+    argv_is api graphql -f 'query=query { viewer { login } }' -F n=1
+
+    printf '{"query":"query { viewer { login } }"}' | gh api graphql --input -
+    argv_is api graphql --input -
+    stdin_is '{"query":"query { viewer { login } }"}'
 }
 
 @test "any other call passes through: same argv, the real gh's output and exit code" {

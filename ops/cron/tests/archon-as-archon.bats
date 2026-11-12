@@ -43,6 +43,18 @@ setup() {
     [[ "$output" == *"ENV=PATH=/usr/local/lib/archon-user/gh-shim:$T/home/.bun/bin:"* ]]
 }
 
+@test "archon-serve.service's PATH is the one archon_env builds, gh-shim first" {
+    mkdir -p "$T/home/.local/opt/flutter/bin" "$T/home/.local/opt/jdk/bin"
+    cd "$T/owner/reli"
+    run "$W" workflow run archon-ship "fix #12"
+    [ "$status" -eq 0 ]
+    env_path=$(grep '^ENV=PATH=' <<<"$output")
+    env_path="${env_path#ENV=PATH=}"
+    unit_path=$(grep '^Environment=PATH=' "$(dirname "$W")/archon-serve.service")
+    unit_path="${unit_path#Environment=PATH=}"
+    [ "${env_path//"$T/home"//mnt/ext-fast/archon-home}" = "$unit_path" ]
+}
+
 @test "--cwd pointing at the owner's clone is mapped and stripped" {
     run "$W" workflow run archon-pr-maintenance --cwd "$T/owner/filmduel" "PR #7"
     [ "$status" -eq 0 ]
