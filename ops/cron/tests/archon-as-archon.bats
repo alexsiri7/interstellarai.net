@@ -40,7 +40,7 @@ setup() {
     [[ "$output" == *"ENV=CLAUDECODE=0"* ]]
     [[ "$output" == *"ENV=ENABLE_CLAUDEAI_MCP_SERVERS=false"* ]]
     [[ "$output" == *"ENV=TMPDIR=$T/home/tmp"* ]]
-    [[ "$output" == *"ENV=PATH=$T/home/.bun/bin:"* ]]
+    [[ "$output" == *"ENV=PATH=/usr/local/lib/archon-user/gh-shim:$T/home/.bun/bin:"* ]]
 }
 
 @test "--cwd pointing at the owner's clone is mapped and stripped" {

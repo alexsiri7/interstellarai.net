@@ -114,12 +114,13 @@ sudoers_rules() { sed -e 's/#.*//' "$D/sudoers-archon-user" | sed -e ':a' -e '/\
     grep -qx 'Environment=CLAUDECODE=0' "$u"
     grep -qx 'Environment=HOST=127.0.0.1' "$u"
     grep -qx 'ExecStart=/mnt/ext-fast/archon-home/.bun/bin/bun /mnt/ext-fast/archon/packages/server/src/index.ts' "$u"
+    grep -q '^Environment=PATH=/usr/local/lib/archon-user/gh-shim:' "$u"
     ! grep -q '/home/asiri' "$u"
 }
 
 @test "the wrapper and every script here pass shellcheck" {
     command -v shellcheck >/dev/null || skip "shellcheck not installed"
-    run shellcheck -x -P SCRIPTDIR "$D/archon-as-archon" "$D/install.sh" "$D/verify.sh"
+    run shellcheck -x -P SCRIPTDIR "$D/archon-as-archon" "$D/install.sh" "$D/verify.sh" "$D/gh-shim/gh"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
 

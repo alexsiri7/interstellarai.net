@@ -25,7 +25,8 @@ Environment=TMPDIR=/mnt/ext-fast/archon-home/tmp
 Environment=CLAUDECODE=0
 Environment=ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING=1
 Environment=ENABLE_CLAUDEAI_MCP_SERVERS=false
-Environment=PATH=/mnt/ext-fast/archon-home/.bun/bin:/mnt/ext-fast/archon-home/.local/bin:/mnt/ext-fast/archon-home/.cargo/bin:/mnt/ext-fast/archon-home/.local/opt/flutter/bin:/mnt/ext-fast/archon-home/.local/opt/jdk/bin:/usr/local/bin:/usr/bin:/bin
+# Must match archon_env in archon-as-archon; the gh-shim directory comes first (#298).
+Environment=PATH=/usr/local/lib/archon-user/gh-shim:/mnt/ext-fast/archon-home/.bun/bin:/mnt/ext-fast/archon-home/.local/bin:/mnt/ext-fast/archon-home/.cargo/bin:/mnt/ext-fast/archon-home/.local/opt/flutter/bin:/mnt/ext-fast/archon-home/.local/opt/jdk/bin:/usr/local/bin:/usr/bin:/bin
 Environment=JAVA_HOME=/mnt/ext-fast/archon-home/.local/opt/jdk
 Environment=ANDROID_HOME=/mnt/ext-fast/archon-home/Android/Sdk
 Environment=ANDROID_SDK_ROOT=/mnt/ext-fast/archon-home/Android/Sdk

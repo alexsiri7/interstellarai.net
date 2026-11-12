@@ -39,6 +39,7 @@
 #      JDK, Android SDK, Playwright browsers, rustup/cargo, Flutter SDK)
 #   7. /etc/archon-user/projects, /usr/local/lib/archon-user/bin/archon,
 #      /usr/local/bin/archon-as-archon and its /usr/local/lib/archon-user/fuel_probe.py,
+#      the comment-marking /usr/local/lib/archon-user/gh-shim/gh,
 #      the root-owned ops snapshot
 #      (/usr/local/lib/archon-ops, bootstrapped from the live checkout when absent)
 #      and its entrypoints /usr/local/sbin/archon-{user-install,host-install,ops-promote},
@@ -792,7 +793,7 @@ true
 
 # ------------------------------------------------------------ 7. system ----
 say "7. wrapper, project list, ops snapshot + entrypoints, sudoers, systemd unit"
-run install -d -m 0755 -o root -g root "$ETC" "$LIBDIR" "$LIBDIR/bin"
+run install -d -m 0755 -o root -g root "$ETC" "$LIBDIR" "$LIBDIR/bin" "$LIBDIR/gh-shim"
 if [ -r "$PROJECTS_SRC" ]; then
     write_file "$ETC/projects" 0644 root:root "# Factory projects archon may work on (from ops/cron/archon-projects.txt at install time).
 # Adding a project: edit archon-projects.txt, add the repo to archon's PAT, re-run install.sh.
@@ -806,6 +807,8 @@ if [ -r "$WRAPPER_DST" ] && cmp -s "$SCRIPT_DIR/archon-as-archon" "$WRAPPER_DST"
 else run install -m 0755 -o root -g root "$SCRIPT_DIR/archon-as-archon" "$WRAPPER_DST" && done_ "installed $WRAPPER_DST"; fi
 if [ -r "$LIBDIR/fuel_probe.py" ] && cmp -s "$SCRIPT_DIR/fuel_probe.py" "$LIBDIR/fuel_probe.py"; then done_ "$LIBDIR/fuel_probe.py already done"
 else run install -m 0644 -o root -g root "$SCRIPT_DIR/fuel_probe.py" "$LIBDIR/fuel_probe.py" && done_ "installed $LIBDIR/fuel_probe.py"; fi
+if [ -r "$LIBDIR/gh-shim/gh" ] && cmp -s "$SCRIPT_DIR/gh-shim/gh" "$LIBDIR/gh-shim/gh"; then done_ "$LIBDIR/gh-shim/gh already done"
+else run install -m 0755 -o root -g root "$SCRIPT_DIR/gh-shim/gh" "$LIBDIR/gh-shim/gh" && done_ "installed $LIBDIR/gh-shim/gh"; fi
 install_ops_entrypoints
 install_sudoers
 if [ -r "$UNIT_DST" ] && cmp -s "$SCRIPT_DIR/$UNIT" "$UNIT_DST"; then done_ "$UNIT_DST already done"

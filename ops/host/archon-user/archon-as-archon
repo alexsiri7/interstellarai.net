@@ -77,6 +77,8 @@ OWNER_BASE=/mnt/ext-fast
 TMP_ROOT=/tmp
 ARCHON_BIN=/usr/local/lib/archon-user/bin/archon     # symlink -> <archon checkout>/packages/cli/src/cli.ts
 FUEL_PROBE=/usr/local/lib/archon-user/fuel_probe.py
+# First on every session's PATH: stamps <!-- lachesis:automated --> on the issue/PR comments agents post (#298)
+GH_SHIM_DIR=/usr/local/lib/archon-user/gh-shim
 GH_OWNER=alexsiri7
 DRY_EXEC=0
 
@@ -161,7 +163,7 @@ normalize_path() {
 
 # ------------------------------------------------------------- env ---------
 archon_env() {
-    local path="$ARCHON_HOME_DIR/.bun/bin:$ARCHON_HOME_DIR/.local/bin:$ARCHON_HOME_DIR/.cargo/bin"
+    local path="$GH_SHIM_DIR:$ARCHON_HOME_DIR/.bun/bin:$ARCHON_HOME_DIR/.local/bin:$ARCHON_HOME_DIR/.cargo/bin"
     [ -d "$ARCHON_HOME_DIR/.local/opt/flutter/bin" ] && path="$path:$ARCHON_HOME_DIR/.local/opt/flutter/bin"
     [ -d "$ARCHON_HOME_DIR/.local/opt/jdk/bin" ] && path="$path:$ARCHON_HOME_DIR/.local/opt/jdk/bin"
     path="$path:/usr/local/bin:/usr/bin:/bin"
@@ -675,6 +677,9 @@ verb_selftest() {
                          *) fail "tool missing: $t" ;; esac
         fi
     done
+    out=$(env -i "${ENV[@]}" bash -c 'command -v gh' 2>/dev/null)
+    if [ "$out" = "$GH_SHIM_DIR/gh" ]; then pass "gh: the comment-marking wrapper is first on PATH (#298)"
+    else fail "gh resolves to ${out:-nothing}, not $GH_SHIM_DIR/gh — factory comments would lack <!-- lachesis:automated --> (re-run install.sh)"; fi
     # cargo intermediates off / wherever an agent builds, /tmp included (#133)
     if grep -q '^build-dir = "'"$ARCHON_HOME_DIR"'/' "$ARCHON_HOME_DIR/.cargo/config.toml" 2>/dev/null; then
         pass "cargo build-dir: $(grep -m1 '^build-dir' "$ARCHON_HOME_DIR/.cargo/config.toml")"
