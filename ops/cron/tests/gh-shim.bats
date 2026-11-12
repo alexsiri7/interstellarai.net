@@ -84,7 +84,7 @@ stdin_is() { diff <(printf '%s' "$1") "$T/stdin"; }
 }
 
 @test "an issue-comments endpoint as a full URL, with slashes or a query string, is stamped" {
-    for ep in https://api.github.com/repos/a/b/issues/4/comments /repos/a/b/issues/4/comments/ 'repos/a/b/issues/4/comments?x=1'; do
+    for ep in https://api.github.com/repos/a/b/issues/4/comments /repos/a/b/issues/4/comments/ 'repos/a/b/issues/4/comments?x=1' 'repos/a/b/issues/4/comments?next=http://x.example/y'; do
         run gh api "$ep" -f body=x
         [ "$status" -eq 0 ]
         argv_is api "$ep" -f "body=x"$'\n\n'"$MARKER"
@@ -136,7 +136,7 @@ stdin_is() { diff <(printf '%s' "$1") "$T/stdin"; }
 }
 
 @test "a GraphQL comment mutation is refused however the graphql endpoint is spelled" {
-    for ep in /graphql graphql/ //graphql 'graphql?x=1' https://api.github.com/graphql; do
+    for ep in /graphql graphql/ //graphql 'graphql?x=1' 'graphql?next=http://x.example/y' https://api.github.com/graphql; do
         run gh api -X POST -f 'query=mutation { addComment(input: {subjectId: "x", body: "y"}) { clientMutationId } }' "$ep"
         [ "$status" -eq 2 ]
         [ ! -e "$T/argv" ]
