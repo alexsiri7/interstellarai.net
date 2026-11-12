@@ -456,7 +456,7 @@ Also written by `install.sh`:
 ## Tests
 
 ```bash
-bunx bats ops/cron/tests/archon-as-archon.bats ops/cron/tests/run-as.bats ops/cron/tests/archon-user-install.bats ops/cron/tests/archon-ops.bats
+bunx bats ops/cron/tests/archon-as-archon.bats ops/cron/tests/run-as.bats ops/cron/tests/archon-user-install.bats ops/cron/tests/archon-ops.bats ops/cron/tests/gh-shim.bats
 bunx bats ops/cron/tests/                   # whole suite: flag off must change nothing
 shellcheck -x -P SCRIPTDIR ops/host/archon-user/{install.sh,verify.sh,archon-as-archon} ops/host/archon-ops/archon-ops ops/cron/lib/run-as.sh ops/cron/ops-self-update.sh
 visudo -c -f ops/host/archon-user/sudoers-archon-user     # works without root

@@ -14,7 +14,10 @@
 # of `issue|pr close|reopen`, and `api` POST/PATCH to repos/{o}/{r}/issues/{n}/comments
 # or repos/{o}/{r}/issues/comments/{id} (-f/-F body=, or --input JSON's .body).
 # A GraphQL addComment/updateIssueComment is refused (exit 2) rather than
-# rewritten, whether its query comes from -f/-F query= or --input. Everything else, and any body source that cannot be read, goes to
+# rewritten, whether its query comes from -f/-F query= or --input; so is an
+# `issue|pr comment` whose body comes from --attach (gh can append unreferenced
+# attachments after the marker) or -e/--editor (no body this wrapper can read
+# and stamp). Everything else, and any body source that cannot be read, goes to
 # the real gh unchanged.
 #
 # set -u, not -e: the wrapper must never fail where the real gh would succeed.
@@ -40,10 +43,23 @@ stamp() {
 }
 read_src() { if [ "$1" = - ]; then cat; else cat -- "$1"; fi; }
 passthrough() { exec "$real" "${orig[@]}"; }
+refuse() { echo "gh (factory wrapper): $1 (interstellarai.net#298)" >&2; exit 2; }
+
+# dispatch_action <args after "issue"/"pr">: the action subcommand word
+# (comment, close, ...), skipping a persistent -R/--repo flag that gh accepts
+# before it, e.g. `gh issue -R o/r comment 12 ...`.
+dispatch_action() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -R|--repo) [ $# -ge 2 ] || return; shift 2 ;;
+            --repo=*|-R?*) shift ;;
+            *) printf '%s' "$1"; return ;;
+        esac
+    done
+}
 
 comment_cmd() {
-    local out=("$1" "$2") tail=() body="" found=0 b
-    shift 2
+    local out=() tail=() body="" found=0 b
     while [ $# -gt 0 ]; do
         case "$1" in
             -b|--body) [ $# -ge 2 ] || passthrough; body="$2"; found=1; shift 2 ;;
@@ -52,6 +68,8 @@ comment_cmd() {
             -F|--body-file) [ $# -ge 2 ] || passthrough; b=$(read_src "$2") || passthrough; body="$b"; found=1; shift 2 ;;
             --body-file=*) b=$(read_src "${1#--body-file=}") || passthrough; body="$b"; found=1; shift ;;
             -F?*) b=$(read_src "${1#-F}") || passthrough; body="$b"; found=1; shift ;;
+            --attach|--attach=*) refuse "attach files via a second, already-stamped comment -- gh appends unreferenced --attach content after $MARKER" ;;
+            -e|--editor) refuse "pass the body with -b/--body or --body-file so it can be stamped with $MARKER, not -e/--editor" ;;
             --) tail=("$@"); break ;;
             *) out+=("$1"); shift ;;
         esac
@@ -61,8 +79,7 @@ comment_cmd() {
 }
 
 close_cmd() {
-    local out=("$1" "$2")
-    shift 2
+    local out=()
     while [ $# -gt 0 ]; do
         case "$1" in
             -c|--comment) [ $# -ge 2 ] || break; out+=("$1" "$(stamp "$2")"); shift 2 ;;
@@ -119,8 +136,7 @@ graphql_cmd() {
         [ "$NUSED" = 2 ] && [ $# -gt 0 ] && shift
     done
     if [[ "$query" =~ addComment|updateIssueComment ]]; then
-        echo "gh (factory wrapper): post issue and PR comments with 'gh issue comment' / 'gh pr comment' so they carry $MARKER (interstellarai.net#298)" >&2
-        exit 2
+        refuse "post issue and PR comments with 'gh issue comment' / 'gh pr comment' so they carry $MARKER"
     fi
     [ "$use_stdin" = 1 ] && exec "$real" api "${args[@]}" < <(printf '%s' "$input")
     exec "$real" api "${args[@]}"
@@ -185,9 +201,14 @@ api_cmd() {
     exec "$real" api "${args[@]}"
 }
 
-case "${1:-} ${2:-}" in
-    "issue comment"|"pr comment") comment_cmd "$@" ;;
-    "issue close"|"issue reopen"|"pr close"|"pr reopen") close_cmd "$@" ;;
-    "api "*) api_cmd "$@" ;;
+case "${1:-}" in
+    issue|pr)
+        action=$(dispatch_action "${@:2}")
+        case "$1 $action" in
+            "issue comment"|"pr comment") comment_cmd "$@" ;;
+            "issue close"|"issue reopen"|"pr close"|"pr reopen") close_cmd "$@" ;;
+        esac
+        ;;
+    api) api_cmd "$@" ;;
 esac
 passthrough

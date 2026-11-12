@@ -55,6 +55,45 @@ stdin_is() { diff <(printf '%s' "$1") "$T/stdin"; }
     stdin_is "done"$'\n\n'"$MARKER"
 }
 
+@test "a -R/--repo flag before the comment subcommand is still stamped" {
+    run gh issue -R a/b comment 5 -b "hi"
+    [ "$status" -eq 0 ]
+    argv_is issue -R a/b comment 5 --body-file -
+    stdin_is "hi"$'\n\n'"$MARKER"
+
+    run gh pr --repo=a/b comment 5 -b "hi"
+    [ "$status" -eq 0 ]
+    argv_is pr --repo=a/b comment 5 --body-file -
+    stdin_is "hi"$'\n\n'"$MARKER"
+
+    run gh issue -Ra/b comment 5 -b "hi"
+    [ "$status" -eq 0 ]
+    argv_is issue -Ra/b comment 5 --body-file -
+    stdin_is "hi"$'\n\n'"$MARKER"
+}
+
+@test "--attach is refused: gh can append unreferenced content after the marker" {
+    run gh issue comment 5 --body "hi" --attach video.mp4
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"--attach"* ]]
+    [ ! -e "$T/argv" ]
+
+    run gh pr comment 5 --body "hi" --attach=video.mp4
+    [ "$status" -eq 2 ]
+    [ ! -e "$T/argv" ]
+}
+
+@test "-e/--editor is refused: the wrapper cannot read or stamp an editor body" {
+    run gh issue comment 5 -e
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"--editor"* || "$output" == *"-e/--editor"* ]]
+    [ ! -e "$T/argv" ]
+
+    run gh pr comment 5 --editor
+    [ "$status" -eq 2 ]
+    [ ! -e "$T/argv" ]
+}
+
 @test "a -- before the issue number stays after the rewritten body flag" {
     run gh issue comment -b "hi" -- 5
     [ "$status" -eq 0 ]
@@ -98,6 +137,15 @@ stdin_is() { diff <(printf '%s' "$1") "$T/stdin"; }
     argv_is api repos/a/b/issues/4/comments --input -
     [ "$(jq -r .body "$T/stdin")" = "hello"$'\n\n'"$MARKER" ]
     [ "$(jq -r .extra "$T/stdin")" = 1 ]
+}
+
+@test "api --input JSON whose .body already ends with the marker is not stamped twice" {
+    printf '%s' '{"body":"done\n\n'"$MARKER"'\n"}' > in.json
+    run gh api repos/a/b/issues/4/comments --input in.json
+    [ "$status" -eq 0 ]
+    argv_is api repos/a/b/issues/4/comments --input -
+    [ "$(jq -r '.body | [scan("lachesis:automated")] | length' "$T/stdin")" -eq 1 ]
+    [ "$(jq -r .body "$T/stdin")" = "done"$'\n\n'"$MARKER" ]
 }
 
 @test "api --input - that jq cannot parse reaches the real gh with its bytes intact" {
