@@ -85,6 +85,14 @@ teardown() { rm -rf "$TEST_TMP"; }
     [ ! -f "$HOME/psql-calls" ]
 }
 
+@test "the crontab schedule for story-sync.sh matches the script's header comment" {
+    local line schedule
+    line=$(grep -E '^[^#].*/story-sync\.sh ' "$BATS_TEST_DIRNAME/../crontab")
+    [ "$(grep -c . <<<"$line")" -eq 1 ]
+    schedule=$(awk '{print $1, $2, $3, $4, $5}' <<<"$line")
+    grep -qF "$schedule" "$SCRIPT"
+}
+
 @test "beats in a scene are exported as one line each, even when they contain >" {
     echo '{"objects":[],"relationships":[],"nodes":[{"id":"n1","parentId":null,"type":"SCENE","title":"The lesson","synopsis":"","status":"DRAFT","orderIndex":0,"content":"<!-- beat: CUTSCENE: The lesson --><!-- beat: > The cat sits. --><!-- beat: CAT: A song! -->"}]}' > "$STORY_JSON"
     run "$SCRIPT"
