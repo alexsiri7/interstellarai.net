@@ -284,19 +284,37 @@ test_failures() {
     grep -E '\(fail\) ' "$1" 2>/dev/null | sed -E 's/^[[:space:]]+//; s/ \[[0-9.]+m?s\]$//' | sort -u
 }
 
+# unnamed_failure_count <log>: failures bun counted in its own per-package "N
+# fail" summary line(s) that have no matching "(fail) <name>" line — a crashed
+# import, a top-level throw, anything bun reports as "# Unhandled error between
+# tests" instead of a named test. Summed across every package summary in a
+# `--filter '*'` run, since each package gets its own "<prefix> N fail" line.
+unnamed_failure_count() {
+    local named total
+    named=$(test_failures "$1" | grep -c .)
+    total=$(grep -oE '[0-9]+ fail$' "$1" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+    echo $(( total - named ))
+}
+
 # baseline_tests <step> <cmd...>: called after test step <step> failed under the
 # merge. Runs the same command on the pristine release tag (a detached worktree,
 # $PRISTINE, made once per run) and succeeds when every named failure under the
 # merge also fails there — upstream's own tests that do not pass on this host
-# (v0.14.0: 4 CLI integration and 6 OpenCode runtime tests). A step that failed
-# with no named failure (a crash, a timeout) is never excused. Leaves the merge's
-# log in STEP_LOG and the failures new under the merge in TEST_REGRESSIONS.
+# (v0.14.0: 4 CLI integration and 6 OpenCode runtime tests) — and the merge
+# introduces no new unnamed failure (a crash sharing the step with a named
+# failure that happens to match pristine must not hide the crash). A step that
+# failed with no named failure at all (a crash, a timeout) is never excused.
+# Leaves the merge's log in STEP_LOG and the failures new under the merge in
+# TEST_REGRESSIONS; PRISTINE_BUILD_FAILED is set if pristine itself could not be
+# built, in which case TEST_REGRESSIONS stays empty since nothing was compared.
 PRISTINE=""
 TEST_REGRESSIONS=""
+PRISTINE_BUILD_FAILED=""
 baseline_tests() {
     local step="$1"; shift
-    local merged_log="$STEP_LOG" after before
+    local merged_log="$STEP_LOG" after before after_unnamed before_unnamed
     TEST_REGRESSIONS=""
+    PRISTINE_BUILD_FAILED=""
     after=$(test_failures "$merged_log")
     [ -n "$after" ] || return 1
     if [ -z "$PRISTINE" ]; then
@@ -305,14 +323,19 @@ baseline_tests() {
         git -C "$LIVE_DIR" worktree prune 2>/dev/null || true
         if ! run_step pristine-checkout "$LIVE_DIR" git worktree add -q --detach "$PRISTINE" "$TAG" \
             || ! run_step pristine-install "$PRISTINE" bun install; then
-            STEP_LOG="$merged_log"; TEST_REGRESSIONS="$after"; return 1
+            PRISTINE_BUILD_FAILED="$STEP_LOG"; STEP_LOG="$merged_log"; return 1
         fi
     fi
     run_step "$step-pristine" "$PRISTINE" "$@"
     before=$(test_failures "$STEP_LOG")
+    after_unnamed=$(unnamed_failure_count "$merged_log")
+    before_unnamed=$(unnamed_failure_count "$STEP_LOG")
     STEP_LOG="$merged_log"
     TEST_REGRESSIONS=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | grep -v '^$' || true)
-    log "$step: $(printf '%s\n' "$after" | grep -c .) failure(s) under the merge, $(printf '%s\n' "$before" | grep -c .) on pristine $TAG, $(printf '%s\n' "$TEST_REGRESSIONS" | grep -c .) new"
+    if [ "$after_unnamed" -gt "$before_unnamed" ]; then
+        TEST_REGRESSIONS="${TEST_REGRESSIONS:+$TEST_REGRESSIONS$'\n'}<$(( after_unnamed - before_unnamed )) unnamed failure(s) under the merge not on pristine $TAG — see $merged_log>"
+    fi
+    log "$step: $(printf '%s\n' "$after" | grep -c .) named + $after_unnamed unnamed failure(s) under the merge, $(printf '%s\n' "$before" | grep -c .) named + $before_unnamed unnamed on pristine $TAG, $(printf '%s\n' "$TEST_REGRESSIONS" | grep -c .) new"
     [ -z "$TEST_REGRESSIONS" ] && { log "$step: every failure also fails on pristine $TAG — not a regression"; return 0; }
     return 1
 }
@@ -331,6 +354,10 @@ test_fail_detail() {
         printf 'Failing under the merge and not on pristine %s:\n\n' "$TAG"
         printf '%s\n' "$TEST_REGRESSIONS" | head -n 40 | sed 's/^/    /'
     else
+        if [ -n "$PRISTINE_BUILD_FAILED" ]; then
+            printf 'Could not build pristine %s to compare against — see %s. Every current failure, not yet compared to pristine:\n\n' \
+                "$TAG" "$PRISTINE_BUILD_FAILED"
+        fi
         grep -E '\(fail\)' "$STEP_LOG" | sort -u | head -n 40 | sed 's/^/    /'
     fi
     step_tail
