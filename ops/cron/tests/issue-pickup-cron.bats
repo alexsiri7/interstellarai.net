@@ -1512,6 +1512,23 @@ issue_body() {
     [ "$(gh_calls -- 'issues/9 ')" -eq 0 ]
 }
 
+@test "gate: only the refs after the phrase, up to the clause's end, are body-named blockers" {
+    lachesis_on
+    next_offers alexsiri7/testproj 42
+    issue_body 42 $'Part of #121; depends on #120.\nUnblocked by #30; no longer depends on #9. See #31.\nWaits on alexsiri7/interstellarai.net#5.'
+    for n in 121 120 30 9 31; do printf 'issue\topen\n' > "$T/fixtures/ref-alexsiri7-testproj-$n"; done
+    printf 'issue\topen\n' > "$T/fixtures/ref-alexsiri7-interstellarai.net-5"
+
+    lachesis_pick testproj
+
+    [ "$SUMMARY_ACTION" = "none" ]
+    run sed -n 's/^add_dependency .*"blocked_by_issue_number":\([0-9]*\)}$/\1/p' "$LACHESIS_ARGV"
+    [ "$output" = $'120\n9' ]
+    run jq -c '.waits_on' <<<"$(sed -n 's/^ask_question //p' "$LACHESIS_ARGV")"
+    [ "$output" = '[{"repo":"alexsiri7/interstellarai.net","issue":5}]' ]
+    for n in 121 30 31; do [ "$(gh_calls -- "issues/$n ")" -eq 0 ]; done
+}
+
 @test "gate: body-named refs that are closed, PRs, missing, in an issues-disabled repo or in code blocks launch as usual" {
     lachesis_on
     next_offers alexsiri7/testproj 42

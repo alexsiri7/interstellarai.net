@@ -157,11 +157,12 @@ has_open_blockers() {
 
 # launch_blockers <project> <issue> [body] — the open issues blocking <issue>,
 # checked right before a launch (#306): its native blocked_by dependencies and
-# its sub-issues, in any repository, and the open issues its body names on a
-# "depends on / blocked by / waits on" line or in the list right under one.
-# Loose mentions ("Related: #9") never count, and a named ref that is a PR, is
-# closed or does not resolve (404, or 410 for a repo with issues disabled) is
-# ignored, so a typo cannot hold an issue forever.
+# its sub-issues, in any repository, and the open issues its body names after
+# "depends on / blocked by / waits on" in the same clause (up to a ';' or the
+# end of a sentence) or in the list right under such a line. Other mentions
+# never count ("Part of #121; depends on #120" names only #120), and a named
+# ref that is a PR, is closed or does not resolve (404, or 410 for a repo with
+# issues disabled) is ignored, so a typo cannot hold an issue forever.
 # Prints `owner/repo<TAB>number<TAB>source` (dependency, sub-issue or body), one
 # per blocker. Exit 0 with blockers, 1 with none, 2 when a lookup failed: unlike
 # has_open_blockers this one gates a launch, so the caller fails closed.
@@ -179,8 +180,12 @@ launch_blockers() {
     fence { next }
     list && /^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]/ { print; next }
     { list = 0 }
-    tolower($0) ~ /(^|[^a-z])(depends? on|blocked (by|on)|waits? (on|for))([^a-z]|$)/ {
-      print; list = /:[[:space:]]*$/
+    {
+      n = split($0, clause, /;|\.[[:space:]]/)
+      for (i = 1; i <= n; i++)
+        if (match(tolower(clause[i]), /(^|[^a-z])(depends? on|blocked (by|on)|waits? (on|for))([^a-z]|$)/)) {
+          print substr(clause[i], RSTART + RLENGTH - 1); list = /:[[:space:]]*$/
+        }
     }' <<<"$body" \
     | grep -oE 'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/[0-9]+|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+|(^|[^A-Za-z0-9/_.-])#[0-9]+' \
     | while IFS= read -r ref; do
