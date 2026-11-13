@@ -64,6 +64,10 @@ setup() {
     export STUB_SCRIPTS_CRASH=""          # non-empty: an unnamed failure (crash) in the test-scripts step under the new tree —
                                            # plain `bun test`, with no --filter wrapper and so no package prefix on any line
     export STUB_SCRIPTS_CRASH_PRISTINE="" # same, on the pristine release tag
+    export STUB_SCRIPTS_SILENT_CRASH=""          # non-empty: the test-scripts process dies mid-run (process.exit, a segfault)
+                                                  # under the new tree, with no marker and no closing "Ran N tests..." summary —
+                                                  # every scripts/ file after that point never runs
+    export STUB_SCRIPTS_SILENT_CRASH_PRISTINE="" # same, on the pristine release tag
     export STUB_VALIDATE_NEW_ERROR=""    # workflow that errors only under the new CLI
     export STUB_VALIDATE_NEW_DROP=""     # workflow the new CLI no longer lists
     export STUB_GENERATE_CHANGE=0        # 1: generate:bundled rewrites the generated file
@@ -195,10 +199,19 @@ case "$*" in
         fi
         exit "$rc" ;;
     "test --timeout 30000 ./scripts/")
-        fail="$STUB_SCRIPTS_FAIL"; crash="$STUB_SCRIPTS_CRASH"; timing="5000.00ms"
-        case "$PWD" in *-pristine) fail="$STUB_SCRIPTS_FAIL_PRISTINE"; crash="$STUB_SCRIPTS_CRASH_PRISTINE"; timing="6500.00ms" ;; esac
+        fail="$STUB_SCRIPTS_FAIL"; crash="$STUB_SCRIPTS_CRASH"; silent_crash="$STUB_SCRIPTS_SILENT_CRASH"; timing="5000.00ms"
+        case "$PWD" in *-pristine)
+            fail="$STUB_SCRIPTS_FAIL_PRISTINE"; crash="$STUB_SCRIPTS_CRASH_PRISTINE"
+            silent_crash="$STUB_SCRIPTS_SILENT_CRASH_PRISTINE"; timing="6500.00ms" ;;
+        esac
         nfail=0; rc=0
         if [ -n "$fail" ]; then echo "(fail) $fail [$timing]"; nfail=$((nfail+1)); fi
+        # A raw process.exit()/segfault mid-run kills the whole bun test
+        # process with no marker and no closing summary — every file after
+        # this point never runs (confirmed against real bun 1.4.3). Exits
+        # right here: nothing below this point is ever printed by real bun
+        # either.
+        if [ -n "$silent_crash" ]; then exit 1; fi
         # An import-time throw gets no "(fail) <name>" line of its own, but real
         # bun still bumps the final "N fail" tally for it (confirmed against bun
         # 1.4.3: a package with only a crashing file still prints "1 fail"); the
@@ -221,6 +234,12 @@ case "$*" in
         else
             echo " 147 pass"; echo " 0 fail"
         fi
+        # bun's own closing summary, printed once the process reaches its own
+        # completion — a marked crash above still reaches it (bun catches
+        # that one), which is exactly what makes its absence meaningful: only
+        # a process death with no trace (the silent_crash case above) skips
+        # straight to exit without ever printing this line.
+        echo "Ran 147 tests across 3 files."
         exit "$rc" ;;
     "run generate:bundled")
         [ "$STUB_GENERATE_CHANGE" = 1 ] && echo "// regenerated for $(cat VERSION)" >> packages/workflows/src/defaults/bundled-defaults.generated.ts
@@ -348,6 +367,16 @@ live_sha() { git -C "$T/live" rev-parse HEAD; }
 live_branch() { git -C "$T/live" branch --show-current; }
 restarts() { grep -c 'restart archon-serve.service' "$SYSTEMCTL_ARGV" 2>/dev/null || echo 0; }
 issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
+
+# Load one function out of the cron script without executing the script.
+load_fn() {
+    # shellcheck disable=SC1090
+    source <(awk -v fn="$1" '
+        $0 ~ "^" fn "\\(\\)" { p = 1 }
+        p { print }
+        p && /^}$/ { p = 0 }
+    ' "$SCRIPT")
+}
 
 @test "no newer release (pre-releases ignored): logs the current version, status ok/noop, nothing touched" {
     # a pre-release tag alone must not count
@@ -636,6 +665,27 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
     ! git -C "$T/live" worktree list | grep -q pristine
 }
 
+@test "a scripts/ crash that kills the process mid-run is never excused, even though the named failure reached before it matches pristine" {
+    publish_release 0.11.0
+    export STUB_TEST_FAIL="trigger CLI durable execution > replays on both hosts"
+    export STUB_TEST_FAIL_PRISTINE="$STUB_TEST_FAIL"
+    export STUB_SCRIPTS_FAIL="scripts/some-script.test.ts > does the thing"
+    export STUB_SCRIPTS_FAIL_PRISTINE="$STUB_SCRIPTS_FAIL"
+    # A raw process.exit() in a later scripts/ file kills the whole bun
+    # process with no marker and no closing "Ran N tests..." summary — every
+    # file after the pristine-shared named failure never runs, so a
+    # regression hiding in one of those later files would go uncompared
+    # unless the step itself is still failed outright.
+    export STUB_SCRIPTS_SILENT_CRASH=1
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "test-scripts" ]
+    grep -q 'exited before its closing summary under the merge' "$GH_ARGV"
+    [ "$(live_branch)" = "upstream-sync-0.10" ]
+    [ ! -d "$T/wt/archon-update-v0.11.0-pristine" ]
+    ! git -C "$T/live" worktree list | grep -q pristine
+}
+
 @test "an unnamed failure sharing its step with a pristine-matched named failure is still a regression" {
     publish_release 0.11.0
     export STUB_TEST_FAIL="trigger CLI durable execution > replays on both hosts"
@@ -751,6 +801,38 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
     [ "$(status_field last_run_failed)" = "test" ]
     grep -q 'unnamed failure(s) under the merge not on pristine v0.11.0 in @archon/providers' "$GH_ARGV"
     [ "$(live_branch)" = "upstream-sync-0.10" ]
+}
+
+@test "unnamed_failure_packages keeps two distinct crashes in one package as two identities, not one collapsed by re-pairing" {
+    # The forward scan for a marker's own "error: " line can cross into a
+    # SECOND marker first (two crashes in the same package, the first with
+    # no intervening error line before the second fires) — the re-pairing
+    # branch exists so the first marker keeps its own, un-paired identity
+    # instead of absorbing the second crash's error text. Nothing in the
+    # end-to-end fixtures puts two markers in one log (STUB_TEST_CRASH is a
+    # single scalar), so this exercises unnamed_failure_packages directly,
+    # loaded from the real script, against a synthetic log.
+    load_fn unnamed_failure_packages
+
+    local log="$T/two-crashes.log"
+    cat > "$log" <<'LOG'
+@archon/cli test: (pass) something [1.00ms]
+@archon/cli test:
+@archon/cli test: # Unhandled error between tests
+@archon/cli test: # Unhandled error between tests
+@archon/cli test: -------------------------------
+@archon/cli test: 1 | throw new Error("...");
+@archon/cli test:               ^
+@archon/cli test: error: second, distinct crash
+@archon/cli test:       at /scratch/crash2.test.ts:1:11
+@archon/cli test: -------------------------------
+LOG
+
+    run unnamed_failure_packages "$log"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -c .)" -eq 2 ]
+    printf '%s\n' "$output" | grep -qx '@archon/cli test: # Unhandled error between tests'
+    printf '%s\n' "$output" | grep -q 'second, distinct crash'
 }
 
 @test "a new crash in a package is not cancelled by a different, non-reproducing crash already known in that same package" {

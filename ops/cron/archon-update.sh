@@ -497,9 +497,28 @@ baseline_tests() {
     if [ "$(group_counts "$merged_log")" != "$(group_counts "$pristine_log")" ]; then
         TEST_REGRESSIONS="${TEST_REGRESSIONS:+$TEST_REGRESSIONS$'\n'}<not every test group ran on both sides — merge $merged_log vs pristine $pristine_log>"
     fi
+    if [ "$step" = "test-scripts" ] && scripts_log_truncated "$merged_log"; then
+        TEST_REGRESSIONS="${TEST_REGRESSIONS:+$TEST_REGRESSIONS$'\n'}<test-scripts exited before its closing summary under the merge — a crash after a named failure, never excused — see $merged_log>"
+    fi
     log "$step: $(printf '%s\n' "$after" | grep -c .) named + $after_unnamed unnamed failure(s) under the merge, $(printf '%s\n' "$before" | grep -c .) named + $before_unnamed unnamed on pristine $TAG, $(printf '%s\n' "$TEST_REGRESSIONS" | grep -c .) new"
     [ -z "$TEST_REGRESSIONS" ] && { log "$step: every failure also fails on pristine $TAG — not a regression"; return 0; }
     return 1
+}
+
+# scripts_log_truncated <log>: true when a test-scripts log (plain `bun
+# test`, no --filter wrapper, so no per-package line to key crash detection
+# on the way crash_group_counts does for the `test` step) ends before bun's
+# own closing "Ran N tests across M files." line. Real bun always prints that
+# line once its own process reaches completion, marked-crash failures
+# included (confirmed against bun 1.4.3) — its absence means a raw
+# process.exit() or segfault killed the process itself, silently skipping
+# every test file after that point. Nothing ran there to compare against
+# pristine, so this is never excused by a baseline match, even when every
+# named failure reached before the crash matches pristine (see
+# baseline_tests, invariant: an unnamed failure sharing a step with a
+# pristine-matched named failure must not hide the crash).
+scripts_log_truncated() {
+    [ -s "$1" ] && ! grep -qE '^Ran [0-9]+ tests? across [0-9]+ files?\.' "$1" 2>/dev/null
 }
 
 drop_pristine() {
