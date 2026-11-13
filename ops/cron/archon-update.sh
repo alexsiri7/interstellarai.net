@@ -308,14 +308,36 @@ unnamed_failure_count() {
     echo $(( total - named ))
 }
 
+# unnamed_failure_packages <log>: the packages (bun's "<pkg> test" prefix) that
+# had an unnamed failure — a "# Unhandled error between tests" crash, or a
+# package that exited non-zero with no "Ran " summary line at all — one per
+# line, sorted unique. Identity-based counterpart to unnamed_failure_count: a
+# scalar total can cancel a new crash in one package against an unrelated,
+# non-reproducing crash in a different package on the other side, so the
+# merge-vs-pristine regression decision compares these package sets with
+# comm -13 instead of comparing the scalar counts.
+unnamed_failure_packages() {
+    {
+        grep -E ': # Unhandled error between tests$' "$1" 2>/dev/null | sed -E 's/^([^:]+):.*$/\1/'
+        while IFS= read -r prefix; do
+            [ -n "$prefix" ] || continue
+            grep -qF "${prefix}: Ran " "$1" 2>/dev/null || printf '%s\n' "$prefix"
+        done < <(grep -oE '^[^:]+: Exited with code [1-9][0-9]*$' "$1" 2>/dev/null | sed -E 's/^([^:]+):.*$/\1/' | sort -u)
+    } | sort -u
+}
+
 # group_counts <log>: how many test groups each package in a `--filter '*'
 # test` log ran to completion, one "<count> <package>" line per package,
 # sorted by package. Upstream's own per-package runner (package-tests.ts)
 # prints one "◀ <pkg> <file> <secs>s" line per completed group and, on a full
-# run (no explicit file/group selectors — exactly how `--filter '*' test`
-# invokes it), stops admitting any later group once one has failed. A group
-# neither run ever reaches is invisible to the named/unnamed failure counts
-# above, so this is compared merge-vs-pristine separately.
+# run (no explicit file/group selectors), stops admitting any later group once
+# one has failed — which the `test` step's command and its pristine rerun both
+# avoid by always passing one (empty, match-everything) selector, putting the
+# runner in its "requested" mode, which finishes every group regardless of
+# failures. A mismatch here now means the merge and pristine trees genuinely
+# discover a different number of test files for a package (added/removed/
+# renamed tests), not a truncated run — the two sides are still compared
+# merge-vs-pristine, as a second guard against relying on that alone.
 group_counts() {
     grep -E ': ◀ ' "$1" 2>/dev/null | sed -E 's/^([^:]+):.*$/\1/' | sort | uniq -c \
         | awk '{print $2, $1}' | sort
@@ -340,7 +362,7 @@ TEST_REGRESSIONS=""
 PRISTINE_BUILD_FAILED=""
 baseline_tests() {
     local step="$1"; shift
-    local merged_log="$STEP_LOG" pristine_log after before after_unnamed before_unnamed
+    local merged_log="$STEP_LOG" pristine_log after before after_unnamed before_unnamed new_unnamed_pkgs
     TEST_REGRESSIONS=""
     PRISTINE_BUILD_FAILED=""
     after=$(test_failures "$merged_log")
@@ -361,8 +383,9 @@ baseline_tests() {
     before_unnamed=$(unnamed_failure_count "$pristine_log")
     STEP_LOG="$merged_log"
     TEST_REGRESSIONS=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | grep -v '^$' || true)
-    if [ "$after_unnamed" -gt "$before_unnamed" ]; then
-        TEST_REGRESSIONS="${TEST_REGRESSIONS:+$TEST_REGRESSIONS$'\n'}<$(( after_unnamed - before_unnamed )) unnamed failure(s) under the merge not on pristine $TAG — see $merged_log>"
+    new_unnamed_pkgs=$(comm -13 <(unnamed_failure_packages "$pristine_log") <(unnamed_failure_packages "$merged_log") | grep -v '^$' || true)
+    if [ -n "$new_unnamed_pkgs" ]; then
+        TEST_REGRESSIONS="${TEST_REGRESSIONS:+$TEST_REGRESSIONS$'\n'}<unnamed failure(s) under the merge not on pristine $TAG in $(printf '%s' "$new_unnamed_pkgs" | tr '\n' ' ') — see $merged_log>"
     fi
     if [ "$(group_counts "$merged_log")" != "$(group_counts "$pristine_log")" ]; then
         TEST_REGRESSIONS="${TEST_REGRESSIONS:+$TEST_REGRESSIONS$'\n'}<not every test group ran on both sides — merge $merged_log vs pristine $pristine_log>"
@@ -390,7 +413,7 @@ test_fail_detail() {
             printf 'Could not build pristine %s to compare against — see %s. Every current failure, not yet compared to pristine:\n\n' \
                 "$TAG" "$PRISTINE_BUILD_FAILED"
         fi
-        grep -E '\(fail\)' "$STEP_LOG" | sort -u | head -n 40 | sed 's/^/    /'
+        test_failures "$STEP_LOG" | head -n 40 | sed 's/^/    /'
     fi
     step_tail
 }
@@ -631,7 +654,14 @@ fi
 if ! run_step type-check "$WORKTREE" bun run type-check; then
     fail_run type-check "bun run type-check failed" "$(step_tail)"
 fi
-if ! run_step test "$WORKTREE" bun --filter '*' test && ! baseline_tests test bun --filter '*' test; then
+# The trailing '' is a match-everything selector forwarded to every package's
+# test script (package-tests.ts): it puts the runner in "requested" mode, which
+# runs every test group to completion instead of stopping at the first failing
+# group the way a selector-less full run does. Without it, a failure early in
+# a package's group order would hide every later group from both this run and
+# the pristine rerun below, so a real regression in one of those later groups
+# would never show up in either log to compare.
+if ! run_step test "$WORKTREE" bun --filter '*' test '' && ! baseline_tests test bun --filter '*' test ''; then
     drop_pristine
     fail_run test "package tests failed" "$(test_fail_detail)"
 fi
