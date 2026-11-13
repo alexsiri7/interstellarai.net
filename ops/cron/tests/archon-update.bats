@@ -42,11 +42,11 @@ setup() {
     export STUB_TEST_CRASH_PRISTINE=""   # non-empty: an unnamed failure (crash) on the pristine release tag
     export STUB_TEST_SILENT_CRASH=""          # non-empty: an unrelated package exits non-zero with no summary at all, under the new tree
     export STUB_TEST_SILENT_CRASH_PRISTINE="" # same, on the pristine release tag
-    export STUB_TEST_SAME_PKG_SILENT_CRASH=""          # non-empty: the SAME package as STUB_TEST_FAIL/STUB_TEST_CRASH also exits
-                                                        # non-zero with no summary of its own, alongside that package's own normal
-                                                        # completion line — models a second group of one package crashing silently
-                                                        # while a sibling group of the same package finishes and prints its own
-                                                        # summary, under the new tree
+    export STUB_TEST_SAME_PKG_SILENT_CRASH=""          # count: this many groups of the SAME package as STUB_TEST_FAIL/
+                                                        # STUB_TEST_CRASH also exit non-zero with no summary of their own,
+                                                        # alongside that package's other, normal groups — models some of one
+                                                        # package's groups crashing silently while its siblings finish and
+                                                        # print their own summaries, under the new tree
     export STUB_TEST_SAME_PKG_SILENT_CRASH_PRISTINE="" # same, on the pristine release tag
     export STUB_TEST_GROUPS=2            # total package-test-runner groups, under the new tree
     export STUB_TEST_GROUPS_PRISTINE=2   # same, on the pristine release tag
@@ -170,16 +170,26 @@ case "$*" in
         else
             echo "@archon/cli test:  2 pass"; echo "@archon/cli test:  0 fail"
         fi
-        # package-tests.ts's/bun's own per-process completion line — printed here
-        # for @archon/cli's own run regardless of pass/fail, same as real bun. A
-        # sibling group of the SAME package silently crashing (same_pkg_silent,
-        # below) must still be caught even though this line exists for the prefix.
-        echo "@archon/cli test: Ran $print_to tests across $print_to files. [12.00ms]"
+        # package-tests.ts's/bun's own per-process completion line — one per
+        # group, printed by that group's own (child) bun test process once it
+        # finishes, same as real bun (confirmed against bun 1.4.3: a raw,
+        # markerless process.exit() during a test suppresses this line for
+        # that one process, even though the parent still logs that group's own
+        # "◀" line once the child exits, any code — see the ◀ loop above).
+        # same_pkg_silent is a COUNT: that many of this package's groups exit
+        # with no completion line of their own, while the rest (and the ◀
+        # count, which never changes) are unaffected.
+        ran_groups=$((print_to - ${same_pkg_silent:-0}))
+        i=1
+        while [ "$i" -le "$ran_groups" ]; do
+            echo "@archon/cli test: Ran 1 test across 1 file. [1.00ms]"
+            i=$((i+1))
+        done
         if [ -n "$silent" ]; then
             echo "@archon/providers test: Exited with code 7"
             rc=1
         fi
-        if [ -n "$same_pkg_silent" ]; then
+        if [ -n "$same_pkg_silent" ] && [ "$same_pkg_silent" -gt 0 ]; then
             echo "@archon/cli test: Exited with code 9"
             rc=1
         fi
@@ -622,6 +632,8 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
     [[ "$output" == *"test-scripts: 1 named + 1 unnamed failure(s) under the merge, 1 named + 0 unnamed on pristine v0.11.0, 1 new"* ]]
     grep -q 'unnamed failure(s) under the merge not on pristine v0.11.0 in scripts' "$GH_ARGV"
     [ "$(live_branch)" = "upstream-sync-0.10" ]
+    [ ! -d "$T/wt/archon-update-v0.11.0-pristine" ]
+    ! git -C "$T/live" worktree list | grep -q pristine
 }
 
 @test "an unnamed failure sharing its step with a pristine-matched named failure is still a regression" {
@@ -670,11 +682,30 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
     # the SAME package (@archon/cli) exits non-zero with no summary of its own.
     # The completion line belongs to the first group, not the second, and must
     # not be read as covering it.
-    export STUB_TEST_SAME_PKG_SILENT_CRASH="a sibling group crashed silently"
+    export STUB_TEST_SAME_PKG_SILENT_CRASH=1
     run "$SCRIPT"
     [ "$status" -eq 1 ]
     [ "$(status_field last_run_failed)" = "test" ]
     [[ "$output" == *"test: 1 named + 1 unnamed failure(s) under the merge, 1 named + 0 unnamed on pristine v0.11.0, 1 new"* ]]
+    grep -q 'unnamed failure(s) under the merge not on pristine v0.11.0 in @archon/cli' "$GH_ARGV"
+    [ "$(live_branch)" = "upstream-sync-0.10" ]
+}
+
+@test "a pre-existing silently-crashed group on pristine is not re-flagged, but one more under the merge still is" {
+    publish_release 0.11.0
+    export STUB_TEST_FAIL="trigger CLI durable execution > replays on both hosts"
+    export STUB_TEST_FAIL_PRISTINE="$STUB_TEST_FAIL"
+    export STUB_TEST_GROUPS=3
+    export STUB_TEST_GROUPS_PRISTINE=3
+    # Pristine already has one silently-crashed group (flaky, known); the
+    # merge has two. A detector that only asks "did this package crash on
+    # pristine at all" would cancel the merge's extra one out — the count,
+    # not just the identity, has to go up.
+    export STUB_TEST_SAME_PKG_SILENT_CRASH=2
+    export STUB_TEST_SAME_PKG_SILENT_CRASH_PRISTINE=1
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "test" ]
     grep -q 'unnamed failure(s) under the merge not on pristine v0.11.0 in @archon/cli' "$GH_ARGV"
     [ "$(live_branch)" = "upstream-sync-0.10" ]
 }
@@ -699,6 +730,7 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
     [ "$(status_field last_run_failed)" = "test" ]
     grep -q 'Failing under the merge and not on pristine v0.11.0' "$GH_ARGV"
     grep -q 'a regression introduced only under the merge, in a later group' "$GH_ARGV"
+    ! grep -q 'trigger CLI durable execution > replays on both hosts' "$GH_ARGV"
     [ "$(live_branch)" = "upstream-sync-0.10" ]
     [ "$(grep -c '◀' "$T/logs/archon-update-v0.11.0-test.log")" -eq 5 ]
     [ "$(grep -c '◀' "$T/logs/archon-update-v0.11.0-test-pristine.log")" -eq 5 ]

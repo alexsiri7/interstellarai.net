@@ -334,10 +334,19 @@ unnamed_failure_count() {
 # crash's own marker (re-pairing from there) if one never appears. The
 # test-scripts step's unprefixed form of the same marker is paired the same
 # way, under the implicit identity "scripts" (no --filter wrapper there, so no
-# package prefix at all); a package that exited non-zero with no summary line
-# at all is kept whole ("<pkg> test: Exited with code N"), so two different
-# exit codes in the same package are not conflated either. One identity per
-# line, sorted unique.
+# package prefix at all). A package that exited non-zero with NO test-group
+# ("◀ <pkg> ...") line at all is kept whole ("<pkg>: Exited with code N") —
+# that is the only remaining use of that trailer as an identity. Once a
+# package has at least one group, bun prints this same trailer for every
+# package that exits non-zero, named failure or not (confirmed against real
+# bun 1.4.3), so a package's own pristine-matched named failure already
+# produces an identical trailer there too — matching on it would cancel a
+# genuinely new, markerless crash sharing the package with that named
+# failure. That case is instead caught by crash_group_regressions() below,
+# which compares how many of a package's groups actually finished: a raw
+# process.exit() during a group leaves that group's own "Ran N tests..." line
+# unprinted, even though the parent still logs its "◀" line once the child
+# exits, any code.
 unnamed_failure_packages() {
     {
         awk '
@@ -364,8 +373,59 @@ unnamed_failure_packages() {
                 print "scripts: " line
             }
         ' "$1" 2>/dev/null
-        grep -E '^[^:]+: Exited with code [1-9][0-9]*$' "$1" 2>/dev/null
+        awk '
+            /: ◀ / { n = index($0, ":"); has_groups[substr($0, 1, n - 1)] = 1 }
+            /^[^:]+: Exited with code [1-9][0-9]*$/ {
+                n = index($0, ":"); pending[substr($0, 1, n - 1)] = $0
+            }
+            END { for (p in pending) if (!(p in has_groups)) print pending[p] }
+        ' "$1" 2>/dev/null
     } | sort -u
+}
+
+# crash_group_counts <log>: "<crashed> <pkg>" per package with at least one
+# test group — crashed is how many of that package's groups printed a "◀
+# <pkg> ..." completion (upstream's package-tests.ts prints this from the
+# parent once a group's child process exits, any code — confirmed against
+# real package-tests.ts at v0.14.0) with no matching "<pkg>: Ran N tests
+# across M files." of its own. A marked crash ("# Unhandled error between
+# tests") still finishes its group and prints both the marker and the Ran
+# line (confirmed against real bun 1.4.3), so it is never counted here — its
+# identity comes from unnamed_failure_packages' marker pairing instead, one
+# incident one identity. Only a group whose process died with no trace at
+# all (a raw process.exit(), a segfault) leaves its "◀" unpaired.
+crash_group_counts() {
+    awk '
+        /: ◀ / { n = index($0, ":"); groups[substr($0, 1, n - 1)]++ }
+        /: Ran [0-9]+ tests? across [0-9]+ files?\./ { n = index($0, ":"); ran[substr($0, 1, n - 1)]++ }
+        END { for (p in groups) print (groups[p] - ran[p]), p }
+    ' "$1" 2>/dev/null
+}
+
+# crash_group_regressions <merged_log> <pristine_log>: packages whose
+# crash_group_counts() is higher under the merge than pristine already had,
+# one per line. A markerless crashed group carries nothing to pair on beyond
+# the package it is in, so a per-package count is the best available signal:
+# a package whose pristine run already had one such crashed group is not
+# re-flagged for having exactly one again, only for having MORE than
+# pristine did.
+crash_group_regressions() {
+    awk '
+        # crash_group_counts prints "<count> <pkg>", and <pkg> itself can
+        # contain a space (e.g. "@archon/cli test"), so split only on the
+        # first one — a plain $1/$2 split would truncate it there.
+        {
+            sp = index($0, " "); count = substr($0, 1, sp - 1); pkg = substr($0, sp + 1)
+        }
+        NR == FNR { merge[pkg] = count; next }
+        { pristine[pkg] = count }
+        END {
+            for (p in merge) {
+                before = (p in pristine) ? pristine[p] : 0
+                if (merge[p] > before) print p
+            }
+        }
+    ' <(crash_group_counts "$1") <(crash_group_counts "$2") | sort
 }
 
 # group_counts <log>: how many test groups each package in a `--filter '*'
@@ -404,7 +464,7 @@ TEST_REGRESSIONS=""
 PRISTINE_BUILD_FAILED=""
 baseline_tests() {
     local step="$1"; shift
-    local merged_log="$STEP_LOG" pristine_log after before after_unnamed before_unnamed new_unnamed new_unnamed_pkgs
+    local merged_log="$STEP_LOG" pristine_log after before after_unnamed before_unnamed new_unnamed new_unnamed_pkgs new_crashed_pkgs
     TEST_REGRESSIONS=""
     PRISTINE_BUILD_FAILED=""
     after=$(test_failures "$merged_log")
@@ -429,6 +489,10 @@ baseline_tests() {
     if [ -n "$new_unnamed" ]; then
         new_unnamed_pkgs=$(printf '%s\n' "$new_unnamed" | sed -E 's/^([^:]+):.*$/\1/' | sort -u)
         TEST_REGRESSIONS="${TEST_REGRESSIONS:+$TEST_REGRESSIONS$'\n'}<unnamed failure(s) under the merge not on pristine $TAG in $(printf '%s' "$new_unnamed_pkgs" | tr '\n' ' ') — see $merged_log>"
+    fi
+    new_crashed_pkgs=$(crash_group_regressions "$merged_log" "$pristine_log")
+    if [ -n "$new_crashed_pkgs" ]; then
+        TEST_REGRESSIONS="${TEST_REGRESSIONS:+$TEST_REGRESSIONS$'\n'}<unnamed failure(s) under the merge not on pristine $TAG in $(printf '%s' "$new_crashed_pkgs" | tr '\n' ' ') — see $merged_log>"
     fi
     if [ "$(group_counts "$merged_log")" != "$(group_counts "$pristine_log")" ]; then
         TEST_REGRESSIONS="${TEST_REGRESSIONS:+$TEST_REGRESSIONS$'\n'}<not every test group ran on both sides — merge $merged_log vs pristine $pristine_log>"
