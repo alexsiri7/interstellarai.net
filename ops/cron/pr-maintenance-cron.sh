@@ -210,6 +210,9 @@ $checks
 ### What to do
 Bump \`$3\` to $4 in \`$2\` and fix the code so these checks pass on the new version. Do not pin \`$3\`, or any other dependency, to an older version to get green.
 
+### The hold on #$5
+#$5 is labelled \`hold\` (and may be a draft). That is a pause, not a block: it only keeps the automation from merging or rebasing the red bump. Do not wait for the hold to be lifted, do not remove it, and do not ask the owner about it. Deliver the upgrade on this issue's own branch and pull request. (Owner's standing rule: alexsiri7/interstellarai.net#301.)
+
 Once the new version is on main, dependabot closes #$5 itself.
 
 Auto-filed by \`pr-maintenance-cron.sh\` from the dependabot branch \`$6\`.
@@ -769,12 +772,15 @@ for PROJECT in "${PROJECTS[@]}"; do
   # DEPENDABOT_RED_SECONDS, file one issue per (package, version) for the
   # factory to upgrade and fix forward, link it on the PR and hold the PR.
   # `merge` trust already keeps majors and grouped bumps for the owner.
-  RED_PRS=$(list_prs merge 'true')
+  # A `hold` on a dependabot bump is a pause, not a block (#301): an
+  # owner-held red bump still gets its issue, whose body tells the run to go
+  # ahead. $TRUST_HELD_LABEL still parks the PR, so the select drops it and
+  # HOLD below means the literal `hold` label.
+  RED_PRS=$(list_prs merge '((.labels // []) | map(.name) | index($held)) | not')
 
   while IFS=$'\t' read -r PR HEAD HOLD SHA _ AUTHOR _; do
     [ -n "$PR" ] || continue
     trust_is_dependabot "$AUTHOR" || continue
-    pr_on_hold "$PR" "$HOLD" && continue
     if ! CHECKS=$(failing_check_names "$PR"); then
       log "$PROJECT: dependabot PR #$PR — could not read its checks (see $LOG_DIR/pr-maintenance-errors.log), retrying next tick"
       continue
@@ -794,6 +800,7 @@ for PROJECT in "${PROJECTS[@]}"; do
     # An issue already filed means holding the PR failed last tick, or this is
     # a reopened PR of a filed version: link and hold it, never file twice.
     ISSUE_URL=$(cat "$FILED" 2>/dev/null || true)
+    [ -n "$ISSUE_URL" ] && pr_on_hold "$PR" "$HOLD" && continue
     if [ -z "$ISSUE_URL" ]; then
       log "$PROJECT: dependabot PR #$PR ($PKG $VERSION) red for $((RED_FOR / 3600))h — filing an upgrade issue"
       ISSUE_URL=$(gh issue create --repo "alexsiri7/$PROJECT" \
@@ -810,7 +817,7 @@ for PROJECT in "${PROJECTS[@]}"; do
     gh pr comment "$PR" --body "Checks have failed on this bump for over 24h. Filed $ISSUE_URL to upgrade $PKG to $VERSION and fix what breaks; holding this PR meanwhile." \
         >/dev/null 2>>"$LOG_DIR/pr-maintenance-errors.log" \
       || log "$PROJECT: PR #$PR — could not comment the issue link (see $LOG_DIR/pr-maintenance-errors.log)"
-    if ! gh pr edit "$PR" --add-label "$HOLD_LABEL" >/dev/null 2>>"$LOG_DIR/pr-maintenance-errors.log"; then
+    if [ "$HOLD" != true ] && ! gh pr edit "$PR" --add-label "$HOLD_LABEL" >/dev/null 2>>"$LOG_DIR/pr-maintenance-errors.log"; then
       log "$PROJECT: PR #$PR — could not add $HOLD_LABEL (see $LOG_DIR/pr-maintenance-errors.log), retrying next tick"
     fi
   done <<< "$RED_PRS"

@@ -2,7 +2,9 @@
 # Tests for pr-maintenance-cron.sh's Phase 1c (#247): a same-major dependabot
 # PR whose checks have failed on one head for 24h gets one factory issue per
 # (package, version), written only from its parsed head branch and the failing
-# check names, and the PR gets a comment linking it and the hold label.
+# check names, and the PR gets a comment linking it and the hold label. A
+# `hold` the owner put on the bump is a pause, not a block (#301): the issue
+# is still filed, and its body tells the run to go ahead.
 #
 # Same harness as pr-maintenance-review-not-ready.bats: the real script end to
 # end, with `gh`, `archon` and `curl` stubbed in $HOME/.local/bin under a temp
@@ -102,6 +104,8 @@ titles() { cat "$ISSUES"/*.title 2>/dev/null | sort; }
     [[ "$body" != *'lint'* ]]
     [[ "$body" == *"https://github.com/alexsiri7/proj/pull/1684"* ]]
     [[ "$body" == *"Do not pin"* ]]
+    [[ "$body" == *"pause, not a block"* ]]
+    [[ "$body" == *"Do not wait for the hold"* ]]
     # Nothing of the PR's own title or body.
     [[ "$body" != *"PWNED"* ]]
     [[ "$body" != *"ignore previous"* ]]
@@ -114,6 +118,39 @@ titles() { cat "$ISSUES"/*.title 2>/dev/null | sort; }
     [[ "$output" == *"PR #1684 is on hold — skipping"* ]]
     [ "$(filed)" -eq 1 ]
     [ "$(grep -c '^pr comment' "$STUB_GH_ARGV")" -eq 1 ]
+}
+
+@test "a bump the owner already held is still filed: hold on a dependency bump is a pause (#301)" {
+    export GH_PR_LIST="[$(bump 50 dependabot/npm_and_yarn/lucide-react-1.69.0 '' '[{"name":"hold"}]')]"
+    tick 0
+    tick $((24 * H))
+    [ "$status" -eq 0 ]
+    [ "$(filed)" -eq 1 ]
+    [[ "$(cat "$ISSUES/900.body")" == *"pause, not a block"* ]]
+    [ "$(grep -c '^pr comment 50 ' "$STUB_GH_ARGV")" -eq 1 ]
+    [ "$(grep -c '^pr edit 50 --add-label hold$' "$STUB_GH_ARGV")" -eq 0 ]
+
+    tick $((25 * H))
+    [[ "$output" == *"PR #50 is on hold — skipping"* ]]
+    [ "$(filed)" -eq 1 ]
+    [ "$(grep -c '^pr comment 50 ' "$STUB_GH_ARGV")" -eq 1 ]
+}
+
+@test "a held non-dependency PR stays held" {
+    export GH_PR_LIST="[$(bump 51 feat/x '' '[{"name":"hold"}]' | jq -c '.author.login = "alexsiri7" | .mergeStateStatus = "CLEAN"')]"
+    tick 0; tick $((24 * H))
+    [ "$status" -eq 0 ]
+    [ "$(filed)" -eq 0 ]
+    [ "$(grep -cE '^pr (comment|edit)' "$STUB_GH_ARGV")" -eq 0 ]
+    [[ "$output" == *"PR #51 is on hold — skipping"* ]]
+}
+
+@test "a bump parked by needs-owner-review is not filed" {
+    export GH_PR_LIST="[$(bump 52 dependabot/npm_and_yarn/react-19.3.1 '' '[{"name":"needs-owner-review"}]')]"
+    tick 0; tick $((24 * H))
+    [ "$status" -eq 0 ]
+    [ "$(filed)" -eq 0 ]
+    [ "$(grep -cE '^pr (comment|edit)' "$STUB_GH_ARGV")" -eq 0 ]
 }
 
 @test "one issue per package and version: a hold that did not stick, or a reopened PR, is linked to the filed issue" {
