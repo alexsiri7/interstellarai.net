@@ -76,8 +76,9 @@
 #      a marker pipeline-status shows in red
 #  12. Stalled tool calls: a running archon run whose current tool call has had
 #      no progress for TOOL_CALL_STALL_MAX_SECONDS (2h; the engine's
-#      metadata.tool_call_attention) → ntfy once per stall episode, nothing
-#      more (#243)
+#      metadata.tool_call_attention) → ntfy once per stall episode (#243); after
+#      TOOL_CALL_ABANDON_SECONDS (4h) → abandon the run, ntfy, and comment on
+#      the issue or PR its message names (#293)
 #  13. Unreleased main (lib/releases.sh, release_lag_check): main commits not
 #      covered by the project's own release evidence (a matching tag, a
 #      successful dispatch run, or the newest release-* tag) for over 48h, on
@@ -252,6 +253,10 @@ PARKED_WAIT_MAX_SECONDS="${PARKED_WAIT_MAX_SECONDS:-1800}"
 # alerts. A plain Bash call reports no progress until it returns, so this sits
 # well past a long build.
 TOOL_CALL_STALL_MAX_SECONDS="${TOOL_CALL_STALL_MAX_SECONDS:-7200}"
+# How long a stalled tool call may stay silent before check_stalled_tool_calls
+# abandons its run: 2h past the alert, and completed runs take at most 1.5h
+# end to end.
+TOOL_CALL_ABANDON_SECONDS="${TOOL_CALL_ABANDON_SECONDS:-14400}"
 # check_published_prs: how far back the ship run logs are read, and how many
 # of their PRs (newest first) are resolved per project per tick.
 PUBLISHED_PR_WINDOW_DAYS="${PUBLISHED_PR_WINDOW_DAYS:-14}"
@@ -3319,31 +3324,39 @@ archon workflow get $run_id --json" \
 # ----------------------------------------------------------------------------
 # Check 12: A running archon run whose tool call has stopped making progress.
 # A run whose tool call never returns stays `running`, which check_parked_runs
-# never looks at, and nothing here noticed #243 for 36h: a generated wait loop
-# (`until ! pgrep -f "bats-exec-suite"`) matched its own `bash -c` argv and
-# held a ship run until someone killed it by hand. The engine records such a
+# never looks at. A generated wait loop (`until ! pgrep -f "bats-exec-suite"`)
+# that matched its own `bash -c` argv held a ship run 36h (#243), and two such
+# wedged calls held kith's pickup for ~41h (#293). The engine records such a
 # call in metadata.tool_call_attention; this ntfys once per run per stall
-# episode. It never kills or abandons anything: from here a slow build and a
-# wedged loop look the same.
+# episode at TOOL_CALL_STALL_MAX_SECONDS, since from there a slow build and a
+# wedged loop look the same. Past TOOL_CALL_ABANDON_SECONDS it abandons the
+# run and comments on the issue or PR its message names; unstick_stale and
+# pr-maintenance pick that item up again. A call with no readable progress time
+# is only alerted: how long it has been silent is unknown.
 # ----------------------------------------------------------------------------
 check_stalled_tool_calls() {
   local marker_dir="$STATE_DIR/stalled-tool-calls"
-  local run_id wf origin msg since call silent silence seen="" marker id
+  local run_id wf origin msg since call silent silence seen="" marker id now
   if ! archon_runs_known; then
     log "stalled-tool-calls: no archon run snapshot this tick — skipping"
     return 0
   fi
+  now=$(date +%s)
   # \037, not tab: see check_parked_runs.
   while IFS=$'\037' read -r run_id wf origin msg since call; do
     [ -n "$run_id" ] || continue
     seen="$seen $run_id"
-    [ -e "$marker_dir/alerted-$run_id" ] && continue
     if [ "$since" -gt 0 ]; then
-      silent=$(( $(date +%s) - since ))
+      silent=$(( now - since ))
       silence="no progress for $(( silent / 3600 ))h$(( silent % 3600 / 60 ))m"
+      if [ "$silent" -gt "$TOOL_CALL_ABANDON_SECONDS" ]; then
+        abandon_stalled_run
+        continue
+      fi
     else
       silence="listed as stalled, with no readable lastProgressAt"
     fi
+    [ -e "$marker_dir/alerted-$run_id" ] && continue
     log "stalled-tool-calls: $wf $run_id — $call: $silence — alerting"
     notify "Archon tool call stalled: ${origin##*/}" \
       "$wf — ${msg:-no user message}
@@ -3353,12 +3366,54 @@ archon workflow status $run_id — check whether its process is wedged (e.g. a w
       high warning
     touch "$marker_dir/alerted-$run_id"
   done < <(archon_stalled_tool_calls "$TOOL_CALL_STALL_MAX_SECONDS" | tr '\t' '\037')
-  for marker in "$marker_dir"/alerted-*; do
+  for marker in "$marker_dir"/alerted-* "$marker_dir"/abandon-failed-*; do
     [ -e "$marker" ] || continue
-    id="${marker##*/alerted-}"
+    id="${marker##*/}"
+    id="${id#alerted-}"
+    id="${id#abandon-failed-}"
     case " $seen " in *" $id "*) continue ;; esac
     rm -f "$marker"
   done
+}
+
+# abandon_stalled_run — end the run check_stalled_tool_calls is looking at
+# (its loop variables) and say so; a failed abandon is retried every tick and
+# alerted once per episode.
+abandon_stalled_run() {
+  local limit="$(( TOOL_CALL_ABANDON_SECONDS / 3600 ))h" target
+  if ! CLAUDECODE=0 ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING=1 \
+      archon workflow abandon "$run_id" --cwd "$ARCHON_RUNS_CWD" >/dev/null 2>&1; then
+    log "stalled-tool-calls: $wf $run_id — $call: $silence — could not abandon — retrying next tick"
+    [ -e "$marker_dir/abandon-failed-$run_id" ] && return 0
+    notify "Archon run could not be ended: ${origin##*/}" \
+      "$wf — ${msg:-no user message}
+$call: $silence (limit $limit)
+run $run_id
+archon workflow abandon $run_id — end it by hand" \
+      high warning
+    touch "$marker_dir/abandon-failed-$run_id"
+    return 0
+  fi
+  log "stalled-tool-calls: $wf $run_id — $call: $silence — abandoned"
+  local said="no #N in its message to comment on"
+  if [ -n "$origin" ] && [[ "$msg" =~ \#([0-9]+) ]]; then
+    target="${BASH_REMATCH[1]}"
+    # $call is model-written text: it stays in the ntfy, out of a public comment.
+    if gh api -X POST "repos/alexsiri7/${origin##*/}/issues/$target/comments" \
+        -f body="Ended archon run \`$run_id\` ($wf): its tool call made no progress for ${silence#no progress for }; pipeline-health ends a run after $limit without progress. The usual crons pick this up again.
+
+<!-- lachesis:automated -->" >/dev/null 2>&1; then
+      said="commented on #$target"
+    else
+      log "stalled-tool-calls: $wf $run_id — could not comment on #$target"
+      said="could not comment on #$target — say so there by hand"
+    fi
+  fi
+  notify "Archon run ended: ${origin##*/}" \
+    "$wf — ${msg:-no user message}
+$call: $silence (limit $limit)
+run $run_id abandoned; $said" \
+    high hourglass
 }
 
 # ----------------------------------------------------------------------------
