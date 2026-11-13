@@ -61,7 +61,14 @@
 #      live CLI lists in a directory must still be listed by the new one. A
 #      release that stops shipping a workflow (v0.12.0 dropped the legacy
 #      defaults) otherwise passes, because a missing workflow has no errors.
-#      The test suite is `bun --filter '*' test && bun test --timeout 30000 ./scripts/`, the
+#      Tests are judged against a baseline the same way, but only when they
+#      fail: the same command then runs on the pristine release tag (a detached
+#      worktree, $ARCHON_WORKTREE_BASE/archon-update-<tag>-pristine, removed
+#      after), and only a named test that fails under the merge and passes on
+#      the tag fails the run. A step that fails with no named test failure is
+#      never excused. (v0.14.0 ships 10 tests that fail on this host as released.)
+#      The test suite is `bun --filter '*' test '' && bun test --timeout 30000 ./scripts/`
+#      (the trailing '' is the match-everything selector explained below), the
 #      serial form of package.json's `test` script: `bun run test` adds
 #      --parallel, which on this box turns 5 s per-test timeouts into red
 #      (2026-09-19: 5 fail parallel, 8766 pass / 0 fail serial, 1m40 + 2s).
@@ -271,6 +278,271 @@ run_step() {
 }
 
 step_tail() { tail -n 30 "$STEP_LOG" 2>/dev/null | sed 's/^/    /'; }
+
+# test_failures <log>: the named failures of a bun test log — "(fail) <name>"
+# lines with the package prefix kept and the timing dropped — sorted, unique.
+test_failures() {
+    grep -E '\(fail\) ' "$1" 2>/dev/null | sed -E 's/^[[:space:]]+//; s/ \[[0-9.]+m?s\]$//' | sort -u
+}
+
+# unnamed_failure_count <log>: failures bun counted in its own per-package "N
+# fail" summary line(s) that have no matching "(fail) <name>" line — a crashed
+# import, a top-level throw, anything bun reports via a "# Unhandled error
+# between tests" marker instead of a named test, is already added into that
+# package's own "N fail" tally by bun itself (confirmed against real bun
+# 1.4.3), so summing "N fail" across every package summary and subtracting
+# the named count already accounts for every MARKED crash — no
+# "# Unhandled error between tests" marker is added on top of that, which
+# would double-count the same crash.
+# The gap that sum alone misses is a crash with no marker at all: bun's
+# `--filter` orchestrator prints "<pkg>: Exited with code N" for every
+# package that exits non-zero, marked crash or not, so on its own it can't
+# tell a redundant trailer (same crash the "N fail" sum already has, via its
+# marker) from a genuinely uncounted one (no marker for that package at all —
+# a missing script, a config error, or a sibling test group within the
+# package's own runner that crashed without reaching that package's final
+# tally). Only the latter is additional: an "Exited with code" line is counted
+# iff its package printed no "# Unhandled error between tests" marker at all.
+# Never negative: an unrelated named failure must not offset a crash.
+unnamed_failure_count() {
+    local named total unmarked_exits
+    named=$(test_failures "$1" | grep -c .)
+    total=$(grep -oE '[0-9]+ fail$' "$1" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+    unmarked_exits=$(awk '
+        NR == FNR {
+            if ($0 ~ /: # Unhandled error between tests$/) { split($0, a, ":"); marker[a[1]] = 1 }
+            next
+        }
+        /^[^:]+: Exited with code [1-9][0-9]*$/ {
+            split($0, a, ":"); if (!(a[1] in marker)) n++
+        }
+        END { print n+0 }
+    ' "$1" "$1" 2>/dev/null)
+    total=$(( total + ${unmarked_exits:-0} ))
+    [ "$total" -ge "$named" ] || total=$named
+    echo $(( total - named ))
+}
+
+# unnamed_failure_packages <log>: one identity per unnamed failure — richer
+# than a bare package name, so the merge-vs-pristine regression decision
+# (comm -13, in baseline_tests) does not cancel a new crash in a package
+# against an unrelated, already-known, non-reproducing crash in that SAME
+# package. A "# Unhandled error between tests" crash is paired with the
+# "error: ..." line that names it — NOT the literal next line: real bun always
+# prints a "---" separator (then source context) right after the marker, so
+# the search scans forward for the first "error: " line, crossing into a later
+# crash's own marker (re-pairing from there) if one never appears. The
+# test-scripts step's unprefixed form of the same marker is paired the same
+# way, under the implicit identity "scripts" (no --filter wrapper there, so no
+# package prefix at all). A package that exited non-zero with NO test-group
+# ("◀ <pkg> ...") line at all is kept whole ("<pkg>: Exited with code N") —
+# that is the only remaining use of that trailer as an identity. Once a
+# package has at least one group, bun prints this same trailer for every
+# package that exits non-zero, named failure or not (confirmed against real
+# bun 1.4.3), so a package's own pristine-matched named failure already
+# produces an identical trailer there too — matching on it would cancel a
+# genuinely new, markerless crash sharing the package with that named
+# failure. That case is instead caught by crash_group_regressions() below,
+# which compares how many of a package's groups actually finished: a raw
+# process.exit() during a group leaves that group's own "Ran N tests..." line
+# unprinted, even though the parent still logs its "◀" line once the child
+# exits, any code.
+unnamed_failure_packages() {
+    {
+        awk '
+            /: # Unhandled error between tests$/ {
+                line = $0; n = 0
+                while (n < 30) {
+                    if ((getline nxt) <= 0) { print line; next }
+                    n++
+                    if (nxt ~ /error: /) { print line " :: " nxt; next }
+                    if (nxt ~ /: # Unhandled error between tests$/) { print line; line = nxt; n = 0; continue }
+                }
+                print line
+            }
+        ' "$1" 2>/dev/null
+        awk '
+            /^# Unhandled error between tests$/ {
+                line = $0; n = 0
+                while (n < 30) {
+                    if ((getline nxt) <= 0) { print "scripts: " line; next }
+                    n++
+                    if (nxt ~ /^error: /) { print "scripts: " line " :: " nxt; next }
+                    if (nxt ~ /^# Unhandled error between tests$/) { print "scripts: " line; line = nxt; n = 0; continue }
+                }
+                print "scripts: " line
+            }
+        ' "$1" 2>/dev/null
+        awk '
+            /: ◀ / { n = index($0, ":"); has_groups[substr($0, 1, n - 1)] = 1 }
+            /^[^:]+: Exited with code [1-9][0-9]*$/ {
+                n = index($0, ":"); pending[substr($0, 1, n - 1)] = $0
+            }
+            END { for (p in pending) if (!(p in has_groups)) print pending[p] }
+        ' "$1" 2>/dev/null
+    } | sort -u
+}
+
+# crash_group_counts <log>: "<crashed> <pkg>" per package with at least one
+# test group — crashed is how many of that package's groups printed a "◀
+# <pkg> ..." completion (upstream's package-tests.ts prints this from the
+# parent once a group's child process exits, any code — confirmed against
+# real package-tests.ts at v0.14.0) with no matching "<pkg>: Ran N tests
+# across M files." of its own. A marked crash ("# Unhandled error between
+# tests") still finishes its group and prints both the marker and the Ran
+# line (confirmed against real bun 1.4.3), so it is never counted here — its
+# identity comes from unnamed_failure_packages' marker pairing instead, one
+# incident one identity. Only a group whose process died with no trace at
+# all (a raw process.exit(), a segfault) leaves its "◀" unpaired.
+crash_group_counts() {
+    awk '
+        /: ◀ / { n = index($0, ":"); groups[substr($0, 1, n - 1)]++ }
+        /: Ran [0-9]+ tests? across [0-9]+ files?\./ { n = index($0, ":"); ran[substr($0, 1, n - 1)]++ }
+        END { for (p in groups) print (groups[p] - ran[p]), p }
+    ' "$1" 2>/dev/null
+}
+
+# crash_group_regressions <merged_log> <pristine_log>: packages whose
+# crash_group_counts() is higher under the merge than pristine already had,
+# one per line. A markerless crashed group carries nothing to pair on beyond
+# the package it is in, so a per-package count is the best available signal:
+# a package whose pristine run already had one such crashed group is not
+# re-flagged for having exactly one again, only for having MORE than
+# pristine did.
+crash_group_regressions() {
+    awk '
+        # crash_group_counts prints "<count> <pkg>", and <pkg> itself can
+        # contain a space (e.g. "@archon/cli test"), so split only on the
+        # first one — a plain $1/$2 split would truncate it there.
+        {
+            sp = index($0, " "); count = substr($0, 1, sp - 1); pkg = substr($0, sp + 1)
+        }
+        NR == FNR { merge[pkg] = count; next }
+        { pristine[pkg] = count }
+        END {
+            for (p in merge) {
+                before = (p in pristine) ? pristine[p] : 0
+                if (merge[p] > before) print p
+            }
+        }
+    ' <(crash_group_counts "$1") <(crash_group_counts "$2") | sort
+}
+
+# group_counts <log>: how many test groups each package in a `--filter '*'
+# test` log ran to completion, one "<count> <package>" line per package,
+# sorted by package. Upstream's own per-package runner (package-tests.ts)
+# prints one "◀ <pkg> <file> <secs>s" line per completed group and, on a full
+# run (no explicit file/group selectors), stops admitting any later group once
+# one has failed — which the `test` step's command and its pristine rerun both
+# avoid by always passing one (empty, match-everything) selector, putting the
+# runner in its "requested" mode, which finishes every group regardless of
+# failures. A mismatch here now means the merge and pristine trees genuinely
+# discover a different number of test files for a package (added/removed/
+# renamed tests), not a truncated run — the two sides are still compared
+# merge-vs-pristine, as a second guard against relying on that alone.
+group_counts() {
+    grep -E ': ◀ ' "$1" 2>/dev/null | sed -E 's/^([^:]+):.*$/\1/' | sort | uniq -c \
+        | awk '{print $2, $1}' | sort
+}
+
+# baseline_tests <step> <cmd...>: called after test step <step> failed under the
+# merge. Runs the same command on the pristine release tag (a detached worktree,
+# $PRISTINE, made once per run) and succeeds when every named failure under the
+# merge also fails there — upstream's own tests that do not pass on this host
+# (v0.14.0: 4 CLI integration and 6 OpenCode runtime tests) — and the merge
+# introduces no new unnamed failure (a crash sharing the step with a named
+# failure that happens to match pristine must not hide the crash). A step that
+# failed with no named failure at all (a crash, a timeout) is never excused,
+# and neither is one where the two sides ran a different number of test groups
+# for the same package: some group ran on only one side, so a regression in a
+# group the other side never reached would go uncompared. Leaves the merge's
+# log in STEP_LOG and the failures new under the merge in TEST_REGRESSIONS;
+# PRISTINE_BUILD_FAILED is set if pristine itself could not be built, in which
+# case TEST_REGRESSIONS stays empty since nothing was compared.
+PRISTINE=""
+TEST_REGRESSIONS=""
+PRISTINE_BUILD_FAILED=""
+baseline_tests() {
+    local step="$1"; shift
+    local merged_log="$STEP_LOG" pristine_log after before after_unnamed before_unnamed new_unnamed new_unnamed_pkgs new_crashed_pkgs
+    TEST_REGRESSIONS=""
+    PRISTINE_BUILD_FAILED=""
+    after=$(test_failures "$merged_log")
+    [ -n "$after" ] || return 1
+    if [ -z "$PRISTINE" ]; then
+        PRISTINE="$WORKTREE_BASE/archon-update-$TAG-pristine"
+        git -C "$LIVE_DIR" worktree remove --force "$PRISTINE" 2>/dev/null || rm -rf "$PRISTINE"
+        git -C "$LIVE_DIR" worktree prune 2>/dev/null || true
+        if ! run_step pristine-checkout "$LIVE_DIR" git worktree add -q --detach "$PRISTINE" "$TAG" \
+            || ! run_step pristine-install "$PRISTINE" bun install; then
+            PRISTINE_BUILD_FAILED="$STEP_LOG"; STEP_LOG="$merged_log"; return 1
+        fi
+    fi
+    run_step "$step-pristine" "$PRISTINE" "$@"
+    pristine_log="$STEP_LOG"
+    before=$(test_failures "$pristine_log")
+    after_unnamed=$(unnamed_failure_count "$merged_log")
+    before_unnamed=$(unnamed_failure_count "$pristine_log")
+    STEP_LOG="$merged_log"
+    TEST_REGRESSIONS=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | grep -v '^$' || true)
+    new_unnamed=$(comm -13 <(unnamed_failure_packages "$pristine_log") <(unnamed_failure_packages "$merged_log") | grep -v '^$' || true)
+    if [ -n "$new_unnamed" ]; then
+        new_unnamed_pkgs=$(printf '%s\n' "$new_unnamed" | sed -E 's/^([^:]+):.*$/\1/' | sort -u)
+        TEST_REGRESSIONS="${TEST_REGRESSIONS:+$TEST_REGRESSIONS$'\n'}<unnamed failure(s) under the merge not on pristine $TAG in $(printf '%s' "$new_unnamed_pkgs" | tr '\n' ' ') — see $merged_log>"
+    fi
+    new_crashed_pkgs=$(crash_group_regressions "$merged_log" "$pristine_log")
+    if [ -n "$new_crashed_pkgs" ]; then
+        TEST_REGRESSIONS="${TEST_REGRESSIONS:+$TEST_REGRESSIONS$'\n'}<unnamed failure(s) under the merge not on pristine $TAG in $(printf '%s' "$new_crashed_pkgs" | tr '\n' ' ') — see $merged_log>"
+    fi
+    if [ "$(group_counts "$merged_log")" != "$(group_counts "$pristine_log")" ]; then
+        TEST_REGRESSIONS="${TEST_REGRESSIONS:+$TEST_REGRESSIONS$'\n'}<not every test group ran on both sides — merge $merged_log vs pristine $pristine_log>"
+    fi
+    if [ "$step" = "test-scripts" ] && scripts_log_truncated "$merged_log"; then
+        TEST_REGRESSIONS="${TEST_REGRESSIONS:+$TEST_REGRESSIONS$'\n'}<test-scripts exited before its closing summary under the merge — a crash after a named failure, never excused — see $merged_log>"
+    fi
+    log "$step: $(printf '%s\n' "$after" | grep -c .) named + $after_unnamed unnamed failure(s) under the merge, $(printf '%s\n' "$before" | grep -c .) named + $before_unnamed unnamed on pristine $TAG, $(printf '%s\n' "$TEST_REGRESSIONS" | grep -c .) new"
+    [ -z "$TEST_REGRESSIONS" ] && { log "$step: every failure also fails on pristine $TAG — not a regression"; return 0; }
+    return 1
+}
+
+# scripts_log_truncated <log>: true when a test-scripts log (plain `bun
+# test`, no --filter wrapper, so no per-package line to key crash detection
+# on the way crash_group_counts does for the `test` step) ends before bun's
+# own closing "Ran N tests across M files." line. Real bun always prints that
+# line once its own process reaches completion, marked-crash failures
+# included (confirmed against bun 1.4.3) — its absence means a raw
+# process.exit() or segfault killed the process itself, silently skipping
+# every test file after that point. Nothing ran there to compare against
+# pristine, so this is never excused by a baseline match, even when every
+# named failure reached before the crash matches pristine (see
+# baseline_tests, invariant: an unnamed failure sharing a step with a
+# pristine-matched named failure must not hide the crash).
+scripts_log_truncated() {
+    [ -s "$1" ] && ! grep -qE '^Ran [0-9]+ tests? across [0-9]+ files?\.' "$1" 2>/dev/null
+}
+
+drop_pristine() {
+    [ -n "$PRISTINE" ] || return 0
+    git -C "$LIVE_DIR" worktree remove --force "$PRISTINE" 2>/dev/null || rm -rf "$PRISTINE"
+    git -C "$LIVE_DIR" worktree prune 2>/dev/null || true
+    PRISTINE=""
+}
+
+# test_fail_detail: the issue text for a failed test step — the regressions when a
+# baseline ran, else every failure, then the log's tail.
+test_fail_detail() {
+    if [ -n "$TEST_REGRESSIONS" ]; then
+        printf 'Failing under the merge and not on pristine %s:\n\n' "$TAG"
+        printf '%s\n' "$TEST_REGRESSIONS" | head -n 40 | sed 's/^/    /'
+    else
+        if [ -n "$PRISTINE_BUILD_FAILED" ]; then
+            printf 'Could not build pristine %s to compare against — see %s. Every current failure, not yet compared to pristine:\n\n' \
+                "$TAG" "$PRISTINE_BUILD_FAILED"
+        fi
+        test_failures "$STEP_LOG" | head -n 40 | sed 's/^/    /'
+    fi
+    step_tail
+}
 
 # Newest final release tag on the upstream remote: vX.Y.Z only, semver order.
 latest_release_tag() {
@@ -508,15 +780,26 @@ fi
 if ! run_step type-check "$WORKTREE" bun run type-check; then
     fail_run type-check "bun run type-check failed" "$(step_tail)"
 fi
-if ! run_step test "$WORKTREE" bun --filter '*' test; then
-    fail_run test "package tests failed" "$(grep -E '\(fail\)' "$STEP_LOG" | sort -u | head -n 40 | sed 's/^/    /'; step_tail)"
+# The trailing '' is a match-everything selector forwarded to every package's
+# test script (package-tests.ts): it puts the runner in "requested" mode, which
+# runs every test group to completion instead of stopping at the first failing
+# group the way a selector-less full run does. Without it, a failure early in
+# a package's group order would hide every later group from both this run and
+# the pristine rerun below, so a real regression in one of those later groups
+# would never show up in either log to compare.
+if ! run_step test "$WORKTREE" bun --filter '*' test '' && ! baseline_tests test bun --filter '*' test ''; then
+    drop_pristine
+    fail_run test "package tests failed" "$(test_fail_detail)"
 fi
 # --timeout: from v0.12.0 nine scripts/ tests drive the TypeScript compiler and take
 # 5.5-6.5 s each on this box, so bun's 5 s default fails them (they pass at 30 s;
 # pristine v0.12.1 fails the same nine at 5 s).
-if ! run_step test-scripts "$WORKTREE" bun test --timeout 30000 ./scripts/; then
-    fail_run test-scripts "scripts/ tests failed" "$(grep -E '\(fail\)' "$STEP_LOG" | sort -u | head -n 40 | sed 's/^/    /'; step_tail)"
+if ! run_step test-scripts "$WORKTREE" bun test --timeout 30000 ./scripts/ \
+    && ! baseline_tests test-scripts bun test --timeout 30000 ./scripts/; then
+    drop_pristine
+    fail_run test-scripts "scripts/ tests failed" "$(test_fail_detail)"
 fi
+drop_pristine
 if grep -q '"generate:bundled"' "$WORKTREE/package.json" 2>/dev/null; then
     if ! run_step generate-bundled "$WORKTREE" bun run generate:bundled; then
         fail_run generate-bundled "bun run generate:bundled failed" "$(step_tail)"

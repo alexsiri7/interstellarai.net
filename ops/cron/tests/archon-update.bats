@@ -37,6 +37,37 @@ setup() {
     export SYSTEMCTL_ARGV="$T/systemctl-argv"
     export STUB_TYPECHECK_RC=0
     export STUB_TEST_FAIL=""             # name of a test that fails under the new tree
+    export STUB_TEST_FAIL_PRISTINE=""    # name of a test that fails on the pristine release tag
+    export STUB_TEST_CRASH=""            # non-empty: an unnamed failure (crash) under the new tree
+    export STUB_TEST_CRASH_PRISTINE=""   # non-empty: an unnamed failure (crash) on the pristine release tag
+    export STUB_TEST_SILENT_CRASH=""          # non-empty: an unrelated package exits non-zero with no summary at all, under the new tree
+    export STUB_TEST_SILENT_CRASH_PRISTINE="" # same, on the pristine release tag
+    export STUB_TEST_SAME_PKG_SILENT_CRASH=""          # count: this many groups of the SAME package as STUB_TEST_FAIL/
+                                                        # STUB_TEST_CRASH also exit non-zero with no summary of their own,
+                                                        # alongside that package's other, normal groups — models some of one
+                                                        # package's groups crashing silently while its siblings finish and
+                                                        # print their own summaries, under the new tree
+    export STUB_TEST_SAME_PKG_SILENT_CRASH_PRISTINE="" # same, on the pristine release tag
+    export STUB_TEST_GROUPS=2            # total package-test-runner groups, under the new tree
+    export STUB_TEST_GROUPS_PRISTINE=2   # same, on the pristine release tag
+    export STUB_TEST_FAIL_GROUP=""          # group index (1-based) STUB_TEST_FAIL occurs in; default: the last group
+    export STUB_TEST_FAIL_GROUP_PRISTINE="" # same, for STUB_TEST_FAIL_PRISTINE
+    export STUB_TEST_HIDDEN_FAIL=""          # name of a test that only fails in a group after STUB_TEST_FAIL_GROUP — reached
+                                              # only when the real archon-update.sh invocation is run in "requested" mode
+                                              # (an explicit selector forwarded to package-tests.ts), not on a selector-less
+                                              # full run, which stops admitting groups once STUB_TEST_FAIL_GROUP fails
+    export STUB_TEST_HIDDEN_FAIL_PRISTINE="" # same, on the pristine release tag
+    export STUB_TEST_HIDDEN_FAIL_GROUP=""          # group index (1-based) STUB_TEST_HIDDEN_FAIL occurs in; default: the last group
+    export STUB_TEST_HIDDEN_FAIL_GROUP_PRISTINE="" # same, for STUB_TEST_HIDDEN_FAIL_PRISTINE
+    export STUB_SCRIPTS_FAIL=""          # name of a scripts/ test that fails under the new tree
+    export STUB_SCRIPTS_FAIL_PRISTINE="" # name of a scripts/ test that fails on the pristine release tag
+    export STUB_SCRIPTS_CRASH=""          # non-empty: an unnamed failure (crash) in the test-scripts step under the new tree —
+                                           # plain `bun test`, with no --filter wrapper and so no package prefix on any line
+    export STUB_SCRIPTS_CRASH_PRISTINE="" # same, on the pristine release tag
+    export STUB_SCRIPTS_SILENT_CRASH=""          # non-empty: the test-scripts process dies mid-run (process.exit, a segfault)
+                                                  # under the new tree, with no marker and no closing "Ran N tests..." summary —
+                                                  # every scripts/ file after that point never runs
+    export STUB_SCRIPTS_SILENT_CRASH_PRISTINE="" # same, on the pristine release tag
     export STUB_VALIDATE_NEW_ERROR=""    # workflow that errors only under the new CLI
     export STUB_VALIDATE_NEW_DROP=""     # workflow the new CLI no longer lists
     export STUB_GENERATE_CHANGE=0        # 1: generate:bundled rewrites the generated file
@@ -46,6 +77,7 @@ setup() {
     export STUB_ARCHON_RUNS_FAIL=0       # 1: the run listing is unreadable
     export STUB_PGREP_HIT=0
     export STUB_GH_CLOSE_FAIL=""         # issue URL whose `gh issue close` fails
+    export STUB_PRISTINE_INSTALL_FAIL=0  # 1: `bun install` fails in the pristine worktree only
 
     write_stubs
     build_repos
@@ -76,20 +108,139 @@ STUB
 echo "$PWD :: $*" >> "$BUN_ARGV"
 case "$*" in
     "install"|"install --frozen-lockfile")
+        case "$PWD" in
+            *-pristine) [ "$STUB_PRISTINE_INSTALL_FAIL" = 1 ] && { echo "stub: bun install failed in pristine worktree" >&2; exit 1; } ;;
+        esac
         mkdir -p node_modules
         if [ "$STUB_BUN_LOCK_CHANGE" = 1 ] && [ "$*" = "install" ]; then echo "# resolved by stub" >> bun.lock; fi
         exit 0 ;;
     "run type-check")
         echo "@archon/cli type-check: Exited with code $STUB_TYPECHECK_RC"; exit "$STUB_TYPECHECK_RC" ;;
-    "--filter * test")
+    "--filter * test"|"--filter * test "*)
+        # A trailing (possibly empty) extra arg puts the real package-tests.ts in
+        # "requested" mode, which runs every group to completion. No extra arg models
+        # a selector-less full run, which stops admitting groups once one fails.
+        forced=0; case "$*" in "--filter * test "*) forced=1 ;; esac
+        # Independent default timings on each side (not one shared literal): two
+        # separate process runs essentially never report identical millisecond
+        # timings, so a bats case that hard-codes the same one on both sides could
+        # pass with or without test_failures()'s timing-strip actually running.
+        timing="5000.00ms"; groups="$STUB_TEST_GROUPS"; fail="$STUB_TEST_FAIL"; fail_group="${STUB_TEST_FAIL_GROUP:-$groups}"
+        hidden="$STUB_TEST_HIDDEN_FAIL"; hidden_group="${STUB_TEST_HIDDEN_FAIL_GROUP:-$groups}"
+        crash="$STUB_TEST_CRASH"; silent="$STUB_TEST_SILENT_CRASH"; same_pkg_silent="$STUB_TEST_SAME_PKG_SILENT_CRASH"
+        case "$PWD" in *-pristine)
+            timing="6500.00ms"; groups="$STUB_TEST_GROUPS_PRISTINE"; fail="$STUB_TEST_FAIL_PRISTINE"
+            fail_group="${STUB_TEST_FAIL_GROUP_PRISTINE:-$groups}"
+            hidden="$STUB_TEST_HIDDEN_FAIL_PRISTINE"
+            hidden_group="${STUB_TEST_HIDDEN_FAIL_GROUP_PRISTINE:-$groups}"
+            crash="$STUB_TEST_CRASH_PRISTINE"; silent="$STUB_TEST_SILENT_CRASH_PRISTINE"
+            same_pkg_silent="$STUB_TEST_SAME_PKG_SILENT_CRASH_PRISTINE" ;;
+        esac
+        print_to="$groups"
+        if [ "$forced" = 0 ] && [ -n "$fail" ] && [ "$fail_group" -lt "$print_to" ]; then print_to="$fail_group"; fi
         echo "@archon/cli test: (pass) something [1.00ms]"
-        if [ -n "$STUB_TEST_FAIL" ]; then
-            echo "@archon/cli test: (fail) $STUB_TEST_FAIL [5000.00ms]"
-            echo "@archon/cli test:  1 pass"; echo "@archon/cli test:  1 fail"; exit 1
+        i=1
+        while [ "$i" -le "$print_to" ]; do
+            echo "@archon/cli test: ◀ @archon/cli group-$i.test.ts 0.1s"
+            i=$((i+1))
+        done
+        nfail=0
+        if [ -n "$fail" ] && [ "$fail_group" -le "$print_to" ]; then
+            echo "@archon/cli test: (fail) $fail [$timing]"; nfail=$((nfail+1))
         fi
-        echo "@archon/cli test:  2 pass"; echo "@archon/cli test:  0 fail"; exit 0 ;;
+        if [ -n "$hidden" ] && [ "$forced" = 1 ] && [ "$hidden_group" -le "$print_to" ]; then
+            echo "@archon/cli test: (fail) $hidden [$timing]"; nfail=$((nfail+1))
+        fi
+        if [ -n "$crash" ]; then
+            # Mirrors real bun 1.4.3: the line right after the marker is always
+            # the "---" separator, then source context, THEN the "error: " line
+            # — never the error text itself immediately after the marker. A
+            # fixture that put "error: $crash" right after the marker (as this
+            # one used to) would pass even against code that paired the marker
+            # with the literal next line instead of the actual error line.
+            echo "@archon/cli test: "
+            echo "@archon/cli test: # Unhandled error between tests"
+            echo "@archon/cli test: -------------------------------"
+            echo "@archon/cli test: 1 | throw new Error(\"...\");"
+            echo "@archon/cli test:               ^"
+            echo "@archon/cli test: error: $crash"
+            echo "@archon/cli test:       at /scratch/crash.test.ts:1:11"
+            echo "@archon/cli test: -------------------------------"
+            nfail=$((nfail+1))
+        fi
+        rc=0
+        if [ "$nfail" -gt 0 ]; then
+            echo "@archon/cli test:  1 pass"; echo "@archon/cli test:  $nfail fail"; rc=1
+        else
+            echo "@archon/cli test:  2 pass"; echo "@archon/cli test:  0 fail"
+        fi
+        # package-tests.ts's/bun's own per-process completion line — one per
+        # group, printed by that group's own (child) bun test process once it
+        # finishes, same as real bun (confirmed against bun 1.4.3: a raw,
+        # markerless process.exit() during a test suppresses this line for
+        # that one process, even though the parent still logs that group's own
+        # "◀" line once the child exits, any code — see the ◀ loop above).
+        # same_pkg_silent is a COUNT: that many of this package's groups exit
+        # with no completion line of their own, while the rest (and the ◀
+        # count, which never changes) are unaffected.
+        ran_groups=$((print_to - ${same_pkg_silent:-0}))
+        i=1
+        while [ "$i" -le "$ran_groups" ]; do
+            echo "@archon/cli test: Ran 1 test across 1 file. [1.00ms]"
+            i=$((i+1))
+        done
+        if [ -n "$silent" ]; then
+            echo "@archon/providers test: Exited with code 7"
+            rc=1
+        fi
+        if [ -n "$same_pkg_silent" ] && [ "$same_pkg_silent" -gt 0 ]; then
+            echo "@archon/cli test: Exited with code 9"
+            rc=1
+        fi
+        exit "$rc" ;;
     "test --timeout 30000 ./scripts/")
-        echo " 147 pass"; echo " 0 fail"; exit 0 ;;
+        fail="$STUB_SCRIPTS_FAIL"; crash="$STUB_SCRIPTS_CRASH"; silent_crash="$STUB_SCRIPTS_SILENT_CRASH"; timing="5000.00ms"
+        case "$PWD" in *-pristine)
+            fail="$STUB_SCRIPTS_FAIL_PRISTINE"; crash="$STUB_SCRIPTS_CRASH_PRISTINE"
+            silent_crash="$STUB_SCRIPTS_SILENT_CRASH_PRISTINE"; timing="6500.00ms" ;;
+        esac
+        nfail=0; rc=0
+        if [ -n "$fail" ]; then echo "(fail) $fail [$timing]"; nfail=$((nfail+1)); fi
+        # A raw process.exit()/segfault mid-run kills the whole bun test
+        # process with no marker and no closing summary — every file after
+        # this point never runs (confirmed against real bun 1.4.3). Exits
+        # right here: nothing below this point is ever printed by real bun
+        # either.
+        if [ -n "$silent_crash" ]; then exit 1; fi
+        # An import-time throw gets no "(fail) <name>" line of its own, but real
+        # bun still bumps the final "N fail" tally for it (confirmed against bun
+        # 1.4.3: a package with only a crashing file still prints "1 fail"); the
+        # marker's next line is always the "---" separator and source context,
+        # not the error text, so the error line is emitted a few lines down.
+        if [ -n "$crash" ]; then
+            echo
+            echo "# Unhandled error between tests"
+            echo "-------------------------------"
+            echo "1 | throw new Error(\"...\");"
+            echo "              ^"
+            echo "error: $crash"
+            echo "      at /scratch/crash.test.ts:1:11"
+            echo "-------------------------------"
+            nfail=$((nfail+1))
+            rc=1
+        fi
+        if [ "$nfail" -gt 0 ]; then
+            echo " $((147 - nfail)) pass"; echo " $nfail fail"; rc=1
+        else
+            echo " 147 pass"; echo " 0 fail"
+        fi
+        # bun's own closing summary, printed once the process reaches its own
+        # completion — a marked crash above still reaches it (bun catches
+        # that one), which is exactly what makes its absence meaningful: only
+        # a process death with no trace (the silent_crash case above) skips
+        # straight to exit without ever printing this line.
+        echo "Ran 147 tests across 3 files."
+        exit "$rc" ;;
     "run generate:bundled")
         [ "$STUB_GENERATE_CHANGE" = 1 ] && echo "// regenerated for $(cat VERSION)" >> packages/workflows/src/defaults/bundled-defaults.generated.ts
         echo "Wrote bundled-defaults.generated.ts"; exit 0 ;;
@@ -217,6 +368,16 @@ live_branch() { git -C "$T/live" branch --show-current; }
 restarts() { grep -c 'restart archon-serve.service' "$SYSTEMCTL_ARGV" 2>/dev/null || echo 0; }
 issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
 
+# Load one function out of the cron script without executing the script.
+load_fn() {
+    # shellcheck disable=SC1090
+    source <(awk -v fn="$1" '
+        $0 ~ "^" fn "\\(\\)" { p = 1 }
+        p { print }
+        p && /^}$/ { p = 0 }
+    ' "$SCRIPT")
+}
+
 @test "no newer release (pre-releases ignored): logs the current version, status ok/noop, nothing touched" {
     # a pre-release tag alone must not count
     rm -rf "$T/rel" && git clone -q "$T/upstream.git" "$T/rel" 2>/dev/null
@@ -252,7 +413,7 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
     # every proof step ran in the worktree, in order
     grep -q "^$wt :: install\$" "$BUN_ARGV"
     grep -q "^$wt :: run type-check\$" "$BUN_ARGV"
-    grep -q "^$wt :: --filter \* test\$" "$BUN_ARGV"
+    grep -q "^$wt :: --filter \* test \$" "$BUN_ARGV"
     grep -q "^$wt :: test --timeout 30000 ./scripts/\$" "$BUN_ARGV"
     grep -q "^$wt :: run generate:bundled\$" "$BUN_ARGV"
     grep -q "^$T/projects/reli :: $wt/packages/cli/src/cli.ts validate workflows --cwd $T/projects/reli\$" "$BUN_ARGV"
@@ -440,6 +601,285 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
     [ ! -f "$SYSTEMCTL_ARGV" ]
 }
 
+@test "a test that also fails on the pristine release tag is not a regression: proven, swapped" {
+    publish_release 0.11.0
+    export STUB_TEST_FAIL="trigger CLI durable execution > replays on both hosts"
+    export STUB_TEST_FAIL_PRISTINE="$STUB_TEST_FAIL"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"test: 1 named + 0 unnamed failure(s) under the merge, 1 named + 0 unnamed on pristine v0.11.0, 0 new"* ]]
+    [[ "$output" == *"every failure also fails on pristine v0.11.0"* ]]
+    grep -q -- '-pristine :: --filter \* test' "$BUN_ARGV"
+    grep -q 'generate:bundled' "$BUN_ARGV"
+    [ "$(live_branch)" = "upstream-sync-0.11.0" ]
+    [ ! -d "$T/wt/archon-update-v0.11.0-pristine" ]
+    ! git -C "$T/live" worktree list | grep -q pristine
+}
+
+@test "a test failing only under the merge still fails, and the issue names only it" {
+    publish_release 0.11.0
+    export STUB_TEST_FAIL="workflowRunCommand > applies the config"
+    export STUB_TEST_FAIL_PRISTINE="some upstream test that fails here"
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "test" ]
+    [[ "$output" == *"test: 1 named + 0 unnamed failure(s) under the merge, 1 named + 0 unnamed on pristine v0.11.0, 1 new"* ]]
+    grep -q 'Failing under the merge and not on pristine v0.11.0' "$GH_ARGV"
+    grep -q 'workflowRunCommand > applies the config' "$GH_ARGV"
+    [ "$(live_branch)" = "upstream-sync-0.10" ]
+    [ ! -d "$T/wt/archon-update-v0.11.0-pristine" ]
+}
+
+@test "scripts/ test failing only under the merge is also judged against pristine, reusing the same pristine worktree" {
+    publish_release 0.11.0
+    export STUB_TEST_FAIL="trigger CLI durable execution > replays on both hosts"
+    export STUB_TEST_FAIL_PRISTINE="$STUB_TEST_FAIL"
+    export STUB_SCRIPTS_FAIL="scripts/some-script.test.ts > does the thing"
+    export STUB_SCRIPTS_FAIL_PRISTINE="$STUB_SCRIPTS_FAIL"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"test-scripts: 1 named + 0 unnamed failure(s) under the merge, 1 named + 0 unnamed on pristine v0.11.0, 0 new"* ]]
+    grep -q -- '-pristine :: test --timeout 30000 ./scripts/' "$BUN_ARGV"
+    [ "$(grep -c -- '-pristine :: install' "$BUN_ARGV")" -eq 1 ]
+    [ "$(live_branch)" = "upstream-sync-0.11.0" ]
+    [ ! -d "$T/wt/archon-update-v0.11.0-pristine" ]
+}
+
+@test "a scripts/ crash with no --filter package prefix is caught as an unnamed failure, not hidden by a pristine-matched named failure" {
+    publish_release 0.11.0
+    export STUB_TEST_FAIL="trigger CLI durable execution > replays on both hosts"
+    export STUB_TEST_FAIL_PRISTINE="$STUB_TEST_FAIL"
+    export STUB_SCRIPTS_FAIL="scripts/some-script.test.ts > does the thing"
+    export STUB_SCRIPTS_FAIL_PRISTINE="$STUB_SCRIPTS_FAIL"
+    # test-scripts runs plain `bun test`, with no --filter wrapper and so no
+    # package prefix at all — a crash there must still be caught even though it
+    # cannot carry a package prefix the way the --filter 'test' step's crashes do.
+    export STUB_SCRIPTS_CRASH="scripts/crash.test.ts throws at import time"
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "test-scripts" ]
+    [[ "$output" == *"test-scripts: 1 named + 1 unnamed failure(s) under the merge, 1 named + 0 unnamed on pristine v0.11.0, 1 new"* ]]
+    grep -q 'unnamed failure(s) under the merge not on pristine v0.11.0 in scripts' "$GH_ARGV"
+    [ "$(live_branch)" = "upstream-sync-0.10" ]
+    [ ! -d "$T/wt/archon-update-v0.11.0-pristine" ]
+    ! git -C "$T/live" worktree list | grep -q pristine
+}
+
+@test "a scripts/ crash that kills the process mid-run is never excused, even though the named failure reached before it matches pristine" {
+    publish_release 0.11.0
+    export STUB_TEST_FAIL="trigger CLI durable execution > replays on both hosts"
+    export STUB_TEST_FAIL_PRISTINE="$STUB_TEST_FAIL"
+    export STUB_SCRIPTS_FAIL="scripts/some-script.test.ts > does the thing"
+    export STUB_SCRIPTS_FAIL_PRISTINE="$STUB_SCRIPTS_FAIL"
+    # A raw process.exit() in a later scripts/ file kills the whole bun
+    # process with no marker and no closing "Ran N tests..." summary — every
+    # file after the pristine-shared named failure never runs, so a
+    # regression hiding in one of those later files would go uncompared
+    # unless the step itself is still failed outright.
+    export STUB_SCRIPTS_SILENT_CRASH=1
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "test-scripts" ]
+    grep -q 'exited before its closing summary under the merge' "$GH_ARGV"
+    [ "$(live_branch)" = "upstream-sync-0.10" ]
+    [ ! -d "$T/wt/archon-update-v0.11.0-pristine" ]
+    ! git -C "$T/live" worktree list | grep -q pristine
+}
+
+@test "an unnamed failure sharing its step with a pristine-matched named failure is still a regression" {
+    publish_release 0.11.0
+    export STUB_TEST_FAIL="trigger CLI durable execution > replays on both hosts"
+    export STUB_TEST_FAIL_PRISTINE="$STUB_TEST_FAIL"
+    export STUB_TEST_CRASH="boom at module load"
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "test" ]
+    [[ "$output" == *"test: 1 named + 1 unnamed failure(s) under the merge, 1 named + 0 unnamed on pristine v0.11.0, 1 new"* ]]
+    grep -q 'unnamed failure(s) under the merge not on pristine v0.11.0' "$GH_ARGV"
+    [ "$(live_branch)" = "upstream-sync-0.10" ]
+}
+
+@test "a whole-step crash with no named failure is never excused and never provisions pristine" {
+    publish_release 0.11.0
+    export STUB_TEST_CRASH="boom at module load"
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "test" ]
+    [ ! -d "$T/wt/archon-update-v0.11.0-pristine" ]
+    ! grep -q -- '-pristine ::' "$BUN_ARGV"
+    [ "$(live_branch)" = "upstream-sync-0.10" ]
+    grep -q 'error: boom at module load' "$GH_ARGV"
+}
+
+@test "a silent crash in an unrelated package is not hidden by a pristine-matched named failure" {
+    publish_release 0.11.0
+    export STUB_TEST_FAIL="trigger CLI durable execution > replays on both hosts"
+    export STUB_TEST_FAIL_PRISTINE="$STUB_TEST_FAIL"
+    export STUB_TEST_SILENT_CRASH="boom, no summary printed at all"
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "test" ]
+    [[ "$output" == *"test: 1 named + 1 unnamed failure(s) under the merge, 1 named + 0 unnamed on pristine v0.11.0, 1 new"* ]]
+    grep -q 'unnamed failure(s) under the merge not on pristine v0.11.0' "$GH_ARGV"
+    [ "$(live_branch)" = "upstream-sync-0.10" ]
+}
+
+@test "a silent crash in one group is caught even though a sibling group of the same package completed and printed its own summary" {
+    publish_release 0.11.0
+    export STUB_TEST_FAIL="trigger CLI durable execution > replays on both hosts"
+    export STUB_TEST_FAIL_PRISTINE="$STUB_TEST_FAIL"
+    # @archon/cli's own group prints its usual completion line; a second group of
+    # the SAME package (@archon/cli) exits non-zero with no summary of its own.
+    # The completion line belongs to the first group, not the second, and must
+    # not be read as covering it.
+    export STUB_TEST_SAME_PKG_SILENT_CRASH=1
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "test" ]
+    [[ "$output" == *"test: 1 named + 1 unnamed failure(s) under the merge, 1 named + 0 unnamed on pristine v0.11.0, 1 new"* ]]
+    grep -q 'unnamed failure(s) under the merge not on pristine v0.11.0 in @archon/cli' "$GH_ARGV"
+    [ "$(live_branch)" = "upstream-sync-0.10" ]
+}
+
+@test "a pre-existing silently-crashed group on pristine is not re-flagged, but one more under the merge still is" {
+    publish_release 0.11.0
+    export STUB_TEST_FAIL="trigger CLI durable execution > replays on both hosts"
+    export STUB_TEST_FAIL_PRISTINE="$STUB_TEST_FAIL"
+    export STUB_TEST_GROUPS=3
+    export STUB_TEST_GROUPS_PRISTINE=3
+    # Pristine already has one silently-crashed group (flaky, known); the
+    # merge has two. A detector that only asks "did this package crash on
+    # pristine at all" would cancel the merge's extra one out — the count,
+    # not just the identity, has to go up.
+    export STUB_TEST_SAME_PKG_SILENT_CRASH=2
+    export STUB_TEST_SAME_PKG_SILENT_CRASH_PRISTINE=1
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "test" ]
+    grep -q 'unnamed failure(s) under the merge not on pristine v0.11.0 in @archon/cli' "$GH_ARGV"
+    [ "$(live_branch)" = "upstream-sync-0.10" ]
+}
+
+@test "a regression hidden behind a shared, earlier-group failure is still caught because every group runs on both sides" {
+    publish_release 0.11.0
+    export STUB_TEST_GROUPS=5
+    export STUB_TEST_GROUPS_PRISTINE=5
+    export STUB_TEST_FAIL="trigger CLI durable execution > replays on both hosts"
+    export STUB_TEST_FAIL_PRISTINE="$STUB_TEST_FAIL"
+    export STUB_TEST_FAIL_GROUP=2
+    export STUB_TEST_FAIL_GROUP_PRISTINE=2
+    # On a selector-less full run, upstream's package-tests.ts stops admitting
+    # groups once group 2's failure lands, so group 4 — where this regression
+    # lives, only under the merge — would never run on either side, and the
+    # equal (truncated) group counts would not catch that either. Reached only
+    # because the real run always forwards a match-everything selector.
+    export STUB_TEST_HIDDEN_FAIL="a regression introduced only under the merge, in a later group"
+    export STUB_TEST_HIDDEN_FAIL_GROUP=4
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "test" ]
+    grep -q 'Failing under the merge and not on pristine v0.11.0' "$GH_ARGV"
+    grep -q 'a regression introduced only under the merge, in a later group' "$GH_ARGV"
+    ! grep -q 'trigger CLI durable execution > replays on both hosts' "$GH_ARGV"
+    [ "$(live_branch)" = "upstream-sync-0.10" ]
+    [ "$(grep -c '◀' "$T/logs/archon-update-v0.11.0-test.log")" -eq 5 ]
+    [ "$(grep -c '◀' "$T/logs/archon-update-v0.11.0-test-pristine.log")" -eq 5 ]
+}
+
+@test "a new crash in one package is not cancelled out by an unrelated, non-reproducing crash in a different package on pristine" {
+    publish_release 0.11.0
+    export STUB_TEST_FAIL="trigger CLI durable execution > replays on both hosts"
+    export STUB_TEST_FAIL_PRISTINE="$STUB_TEST_FAIL"
+    # Pristine's only unnamed failure is a crash in @archon/cli (e.g. a flaky,
+    # non-reproducing timeout); the merge has none there, but introduces a new,
+    # unrelated one in @archon/providers. The scalar counts are equal (1 vs 1)
+    # on both sides, which must not cancel this out: identity, not count, decides.
+    export STUB_TEST_CRASH_PRISTINE="flaky OpenCode timeout, does not reproduce"
+    export STUB_TEST_SILENT_CRASH="new crash introduced only under the merge"
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "test" ]
+    grep -q 'unnamed failure(s) under the merge not on pristine v0.11.0 in @archon/providers' "$GH_ARGV"
+    [ "$(live_branch)" = "upstream-sync-0.10" ]
+}
+
+@test "unnamed_failure_packages keeps two distinct crashes in one package as two identities, not one collapsed by re-pairing" {
+    # The forward scan for a marker's own "error: " line can cross into a
+    # SECOND marker first (two crashes in the same package, the first with
+    # no intervening error line before the second fires) — the re-pairing
+    # branch exists so the first marker keeps its own, un-paired identity
+    # instead of absorbing the second crash's error text. Nothing in the
+    # end-to-end fixtures puts two markers in one log (STUB_TEST_CRASH is a
+    # single scalar), so this exercises unnamed_failure_packages directly,
+    # loaded from the real script, against a synthetic log.
+    load_fn unnamed_failure_packages
+
+    local log="$T/two-crashes.log"
+    cat > "$log" <<'LOG'
+@archon/cli test: (pass) something [1.00ms]
+@archon/cli test:
+@archon/cli test: # Unhandled error between tests
+@archon/cli test: # Unhandled error between tests
+@archon/cli test: -------------------------------
+@archon/cli test: 1 | throw new Error("...");
+@archon/cli test:               ^
+@archon/cli test: error: second, distinct crash
+@archon/cli test:       at /scratch/crash2.test.ts:1:11
+@archon/cli test: -------------------------------
+LOG
+
+    run unnamed_failure_packages "$log"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -c .)" -eq 2 ]
+    printf '%s\n' "$output" | grep -qx '@archon/cli test: # Unhandled error between tests'
+    printf '%s\n' "$output" | grep -q 'second, distinct crash'
+}
+
+@test "a new crash in a package is not cancelled by a different, non-reproducing crash already known in that same package" {
+    publish_release 0.11.0
+    export STUB_TEST_FAIL="trigger CLI durable execution > replays on both hosts"
+    export STUB_TEST_FAIL_PRISTINE="$STUB_TEST_FAIL"
+    # Both sides crash in the SAME package (@archon/cli, the only package the
+    # stub can crash via STUB_TEST_CRASH), but for two unrelated reasons. A
+    # package-name-only comparison would see "@archon/cli crashed on both
+    # sides" and wrongly cancel this; the crash text itself must disagree.
+    export STUB_TEST_CRASH="new regression in the parser"
+    export STUB_TEST_CRASH_PRISTINE="flaky OpenCode timeout, does not reproduce"
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "test" ]
+    grep -q 'unnamed failure(s) under the merge not on pristine v0.11.0 in @archon/cli' "$GH_ARGV"
+    grep -q 'new regression in the parser' "$GH_ARGV"
+    [ "$(live_branch)" = "upstream-sync-0.10" ]
+}
+
+@test "a different number of test groups run on the merge and pristine sides is never excused" {
+    publish_release 0.11.0
+    export STUB_TEST_FAIL="trigger CLI durable execution > replays on both hosts"
+    export STUB_TEST_FAIL_PRISTINE="$STUB_TEST_FAIL"
+    export STUB_TEST_GROUPS=2
+    export STUB_TEST_GROUPS_PRISTINE=5
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "test" ]
+    grep -q 'not every test group ran on both sides' "$GH_ARGV"
+    [ "$(live_branch)" = "upstream-sync-0.10" ]
+}
+
+@test "pristine could not be built: every current failure shown, not excused, worktree is gone" {
+    publish_release 0.11.0
+    export STUB_TEST_FAIL="workflowRunCommand > applies the config"
+    export STUB_PRISTINE_INSTALL_FAIL=1
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "test" ]
+    grep -q 'Could not build pristine v0.11.0 to compare against' "$GH_ARGV"
+    grep -q 'workflowRunCommand > applies the config' "$GH_ARGV"
+    [ "$(live_branch)" = "upstream-sync-0.10" ]
+    [ ! -d "$T/wt/archon-update-v0.11.0-pristine" ]
+    ! git -C "$T/live" worktree list | grep -q pristine
+}
+
 @test "health check fails after the swap: rolled back to the previous sha, ntfy, branch left on the fork" {
     publish_release 0.11.0
     export STUB_HEALTH_FAIL_VERSION=0.11.0
@@ -518,7 +958,7 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
     [[ "$output" != *"+ git merge --no-edit"* ]]
     wt="$T/wt/archon-update-v0.11.0"
     grep -q "^$wt :: run type-check\$" "$BUN_ARGV"
-    grep -q "^$wt :: --filter \* test\$" "$BUN_ARGV"
+    grep -q "^$wt :: --filter \* test \$" "$BUN_ARGV"
     [ "$(live_branch)" = "upstream-sync-0.11.0" ]
     [ "$(live_sha)" = "$resolved" ]
     [ "$(git -C "$T/origin.git" rev-parse refs/heads/upstream-sync-0.11.0)" = "$resolved" ]
