@@ -25,6 +25,9 @@ _SHIP_VERDICT_SH=1
 # as "No delivery started" did (only "No delivery needed" can close) instead of
 # matching nothing and being re-queued by unstick_stale.
 VERDICT_RE='^(No delivery (needed|started)|Not done|No work owed in this repository): '
+# The stop for a run that found its issue blocked: settle defers it to the
+# blocker, and pickup holds the issue an hour after one (#306).
+VERDICT_BLOCKED='Not done: blocked on '
 
 SHIP_VERDICT_STOCK_WORDS='test|tests|testing|todo|tbd|fixme|placeholder|dummy|lorem|ipsum|xxx|foo|bar|baz|null|none|undefined|n|a|na'
 
@@ -38,7 +41,7 @@ verdict_is_placeholder() {
   local reason words
   [[ "$1" =~ $VERDICT_RE ]] || return 1
   reason=${1#"${BASH_REMATCH[0]}"}
-  reason=${reason#blocked on }
+  reason=${reason#"${VERDICT_BLOCKED#Not done: }"}
   reason=${reason#the work item needs contract work before a run can start.}
   reason=${reason#the investigation was inconclusive.}
   reason=${reason#planning stopped on calls only a person can make.}

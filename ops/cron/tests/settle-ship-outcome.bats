@@ -805,6 +805,36 @@ assert_released() {
     [ "$(gh_calls '/comments')" -eq 0 ]
 }
 
+# #306: pickup holds an issue an hour after its blocked-verdict comment, by
+# matching the text this script posts. Both comments a blocked verdict leaves,
+# parked and released, go through pickup's own blocked_verdict_recent.
+@test "the comments a blocked verdict leaves hold the issue in issue-pickup for an hour" {
+    local pickup body
+    pickup="$(dirname "$SCRIPT")/../issue-pickup-cron.sh"
+    # shellcheck disable=SC1090
+    source <(grep -E '^LAUNCH_BLOCKED_COOLDOWN_SECONDS=' "$pickup")
+    # shellcheck source=../lib/ship-verdict.sh
+    source "$(dirname "$SCRIPT")/ship-verdict.sh"
+    # shellcheck disable=SC1090
+    source <(awk '/^blocked_verdict_recent\(\)/ { p = 1 } p { print } p && /^}$/ { p = 0 }' "$pickup")
+    printf 'pr\topen\n' > "$T/fixtures/state-9"
+    printf 'open\tfalse\tfalse\talexsiri7\n' > "$T/fixtures/pull-9"
+    touch "$T/fixtures/gone-186"
+
+    for pr in 9 186; do
+        printf 'Not done: blocked on PR #%s. Triage stopped.\n' "$pr" > "$RUN_LOG"
+        : > "$GH_ARGV"
+        rm -f "$T/fixtures/comments-json-7"
+        run "$SCRIPT" testproj 7 "$RUN_LOG"
+        [ "$status" -eq 0 ]
+        body=$(awk '/^issue comment 7 / { sub(/^.* --body /, ""); p = 1 } p' "$GH_ARGV")
+        [[ "$body" == "archon-ship finished without a PR: Not done: blocked on PR #$pr."* ]]
+        jq -n --arg b "$body" --arg at "$(date -u -d '-5 min' +%FT%TZ)" \
+            '[{created_at: $at, body: "earlier"}, {created_at: $at, body: $b}]' > "$T/fixtures/comments-json-7"
+        blocked_verdict_recent testproj 7
+    done
+}
+
 @test "an open PR by an untrusted author, a fork, a closed or a merged PR each release" {
     printf 'pr\topen\n' > "$T/fixtures/state-9"
     printf 'open\tfalse\tfalse\tstranger\n' > "$T/fixtures/pull-9"
