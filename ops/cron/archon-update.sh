@@ -61,6 +61,12 @@
 #      live CLI lists in a directory must still be listed by the new one. A
 #      release that stops shipping a workflow (v0.12.0 dropped the legacy
 #      defaults) otherwise passes, because a missing workflow has no errors.
+#      Tests are judged against a baseline the same way, but only when they
+#      fail: the same command then runs on the pristine release tag (a detached
+#      worktree, $ARCHON_WORKTREE_BASE/archon-update-<tag>-pristine, removed
+#      after), and only a named test that fails under the merge and passes on
+#      the tag fails the run. A step that fails with no named test failure is
+#      never excused. (v0.14.0 ships 10 tests that fail on this host as released.)
 #      The test suite is `bun --filter '*' test && bun test --timeout 30000 ./scripts/`, the
 #      serial form of package.json's `test` script: `bun run test` adds
 #      --parallel, which on this box turns 5 s per-test timeouts into red
@@ -271,6 +277,64 @@ run_step() {
 }
 
 step_tail() { tail -n 30 "$STEP_LOG" 2>/dev/null | sed 's/^/    /'; }
+
+# test_failures <log>: the named failures of a bun test log — "(fail) <name>"
+# lines with the package prefix kept and the timing dropped — sorted, unique.
+test_failures() {
+    grep -E '\(fail\) ' "$1" 2>/dev/null | sed -E 's/^[[:space:]]+//; s/ \[[0-9.]+m?s\]$//' | sort -u
+}
+
+# baseline_tests <step> <cmd...>: called after test step <step> failed under the
+# merge. Runs the same command on the pristine release tag (a detached worktree,
+# $PRISTINE, made once per run) and succeeds when every named failure under the
+# merge also fails there — upstream's own tests that do not pass on this host
+# (v0.14.0: 4 CLI integration and 6 OpenCode runtime tests). A step that failed
+# with no named failure (a crash, a timeout) is never excused. Leaves the merge's
+# log in STEP_LOG and the failures new under the merge in TEST_REGRESSIONS.
+PRISTINE=""
+TEST_REGRESSIONS=""
+baseline_tests() {
+    local step="$1"; shift
+    local merged_log="$STEP_LOG" after before
+    TEST_REGRESSIONS=""
+    after=$(test_failures "$merged_log")
+    [ -n "$after" ] || return 1
+    if [ -z "$PRISTINE" ]; then
+        PRISTINE="$WORKTREE_BASE/archon-update-$TAG-pristine"
+        git -C "$LIVE_DIR" worktree remove --force "$PRISTINE" 2>/dev/null || rm -rf "$PRISTINE"
+        git -C "$LIVE_DIR" worktree prune 2>/dev/null || true
+        if ! run_step pristine-checkout "$LIVE_DIR" git worktree add -q --detach "$PRISTINE" "$TAG" \
+            || ! run_step pristine-install "$PRISTINE" bun install; then
+            STEP_LOG="$merged_log"; TEST_REGRESSIONS="$after"; return 1
+        fi
+    fi
+    run_step "$step-pristine" "$PRISTINE" "$@"
+    before=$(test_failures "$STEP_LOG")
+    STEP_LOG="$merged_log"
+    TEST_REGRESSIONS=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | grep -v '^$' || true)
+    log "$step: $(printf '%s\n' "$after" | grep -c .) failure(s) under the merge, $(printf '%s\n' "$before" | grep -c .) on pristine $TAG, $(printf '%s\n' "$TEST_REGRESSIONS" | grep -c .) new"
+    [ -z "$TEST_REGRESSIONS" ] && { log "$step: every failure also fails on pristine $TAG — not a regression"; return 0; }
+    return 1
+}
+
+drop_pristine() {
+    [ -n "$PRISTINE" ] || return 0
+    git -C "$LIVE_DIR" worktree remove --force "$PRISTINE" 2>/dev/null || rm -rf "$PRISTINE"
+    git -C "$LIVE_DIR" worktree prune 2>/dev/null || true
+    PRISTINE=""
+}
+
+# test_fail_detail: the issue text for a failed test step — the regressions when a
+# baseline ran, else every failure, then the log's tail.
+test_fail_detail() {
+    if [ -n "$TEST_REGRESSIONS" ]; then
+        printf 'Failing under the merge and not on pristine %s:\n\n' "$TAG"
+        printf '%s\n' "$TEST_REGRESSIONS" | head -n 40 | sed 's/^/    /'
+    else
+        grep -E '\(fail\)' "$STEP_LOG" | sort -u | head -n 40 | sed 's/^/    /'
+    fi
+    step_tail
+}
 
 # Newest final release tag on the upstream remote: vX.Y.Z only, semver order.
 latest_release_tag() {
@@ -508,15 +572,19 @@ fi
 if ! run_step type-check "$WORKTREE" bun run type-check; then
     fail_run type-check "bun run type-check failed" "$(step_tail)"
 fi
-if ! run_step test "$WORKTREE" bun --filter '*' test; then
-    fail_run test "package tests failed" "$(grep -E '\(fail\)' "$STEP_LOG" | sort -u | head -n 40 | sed 's/^/    /'; step_tail)"
+if ! run_step test "$WORKTREE" bun --filter '*' test && ! baseline_tests test bun --filter '*' test; then
+    drop_pristine
+    fail_run test "package tests failed" "$(test_fail_detail)"
 fi
 # --timeout: from v0.12.0 nine scripts/ tests drive the TypeScript compiler and take
 # 5.5-6.5 s each on this box, so bun's 5 s default fails them (they pass at 30 s;
 # pristine v0.12.1 fails the same nine at 5 s).
-if ! run_step test-scripts "$WORKTREE" bun test --timeout 30000 ./scripts/; then
-    fail_run test-scripts "scripts/ tests failed" "$(grep -E '\(fail\)' "$STEP_LOG" | sort -u | head -n 40 | sed 's/^/    /'; step_tail)"
+if ! run_step test-scripts "$WORKTREE" bun test --timeout 30000 ./scripts/ \
+    && ! baseline_tests test-scripts bun test --timeout 30000 ./scripts/; then
+    drop_pristine
+    fail_run test-scripts "scripts/ tests failed" "$(test_fail_detail)"
 fi
+drop_pristine
 if grep -q '"generate:bundled"' "$WORKTREE/package.json" 2>/dev/null; then
     if ! run_step generate-bundled "$WORKTREE" bun run generate:bundled; then
         fail_run generate-bundled "bun run generate:bundled failed" "$(step_tail)"

@@ -37,6 +37,7 @@ setup() {
     export SYSTEMCTL_ARGV="$T/systemctl-argv"
     export STUB_TYPECHECK_RC=0
     export STUB_TEST_FAIL=""             # name of a test that fails under the new tree
+    export STUB_TEST_FAIL_PRISTINE=""    # name of a test that fails on the pristine release tag
     export STUB_VALIDATE_NEW_ERROR=""    # workflow that errors only under the new CLI
     export STUB_VALIDATE_NEW_DROP=""     # workflow the new CLI no longer lists
     export STUB_GENERATE_CHANGE=0        # 1: generate:bundled rewrites the generated file
@@ -83,8 +84,10 @@ case "$*" in
         echo "@archon/cli type-check: Exited with code $STUB_TYPECHECK_RC"; exit "$STUB_TYPECHECK_RC" ;;
     "--filter * test")
         echo "@archon/cli test: (pass) something [1.00ms]"
-        if [ -n "$STUB_TEST_FAIL" ]; then
-            echo "@archon/cli test: (fail) $STUB_TEST_FAIL [5000.00ms]"
+        fail="$STUB_TEST_FAIL"
+        case "$PWD" in *-pristine) fail="$STUB_TEST_FAIL_PRISTINE" ;; esac
+        if [ -n "$fail" ]; then
+            echo "@archon/cli test: (fail) $fail [5000.00ms]"
             echo "@archon/cli test:  1 pass"; echo "@archon/cli test:  1 fail"; exit 1
         fi
         echo "@archon/cli test:  2 pass"; echo "@archon/cli test:  0 fail"; exit 0 ;;
@@ -438,6 +441,35 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
     [ "$(live_branch)" = "upstream-sync-0.10" ]
     ! git -C "$T/origin.git" show-ref --verify --quiet refs/heads/upstream-sync-0.11.0
     [ ! -f "$SYSTEMCTL_ARGV" ]
+}
+
+@test "a test that also fails on the pristine release tag is not a regression: proven, swapped" {
+    publish_release 0.11.0
+    export STUB_TEST_FAIL="trigger CLI durable execution > replays on both hosts"
+    export STUB_TEST_FAIL_PRISTINE="$STUB_TEST_FAIL"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"test: 1 failure(s) under the merge, 1 on pristine v0.11.0, 0 new"* ]]
+    [[ "$output" == *"every failure also fails on pristine v0.11.0"* ]]
+    grep -q -- '-pristine :: --filter \* test' "$BUN_ARGV"
+    grep -q 'generate:bundled' "$BUN_ARGV"
+    [ "$(live_branch)" = "upstream-sync-0.11.0" ]
+    [ ! -d "$T/wt/archon-update-v0.11.0-pristine" ]
+    ! git -C "$T/live" worktree list | grep -q pristine
+}
+
+@test "a test failing only under the merge still fails, and the issue names only it" {
+    publish_release 0.11.0
+    export STUB_TEST_FAIL="workflowRunCommand > applies the config"
+    export STUB_TEST_FAIL_PRISTINE="some upstream test that fails here"
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "test" ]
+    [[ "$output" == *"test: 1 failure(s) under the merge, 1 on pristine v0.11.0, 1 new"* ]]
+    grep -q 'Failing under the merge and not on pristine v0.11.0' "$GH_ARGV"
+    grep -q 'workflowRunCommand > applies the config' "$GH_ARGV"
+    [ "$(live_branch)" = "upstream-sync-0.10" ]
+    [ ! -d "$T/wt/archon-update-v0.11.0-pristine" ]
 }
 
 @test "health check fails after the swap: rolled back to the previous sha, ntfy, branch left on the fork" {
