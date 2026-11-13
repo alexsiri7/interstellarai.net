@@ -67,7 +67,8 @@
 #      after), and only a named test that fails under the merge and passes on
 #      the tag fails the run. A step that fails with no named test failure is
 #      never excused. (v0.14.0 ships 10 tests that fail on this host as released.)
-#      The test suite is `bun --filter '*' test && bun test --timeout 30000 ./scripts/`, the
+#      The test suite is `bun --filter '*' test '' && bun test --timeout 30000 ./scripts/`
+#      (the trailing '' is the match-everything selector explained below), the
 #      serial form of package.json's `test` script: `bun run test` adds
 #      --parallel, which on this box turns 5 s per-test timeouts into red
 #      (2026-09-19: 5 fail parallel, 8766 pass / 0 fail serial, 1m40 + 2s).
@@ -289,40 +290,44 @@ test_failures() {
 # import, a top-level throw, anything bun reports as "# Unhandled error between
 # tests" instead of a named test. Summed across every package summary in a
 # `--filter '*'` run, since each package gets its own "<prefix> N fail" line.
-# Also counts a package that exited non-zero with no "N fail" summary at all —
-# bun's `--filter` orchestrator reports those only as "<pkg>: Exited with code
-# N", with nothing to add to `total`, so a crash sharing the step with an
-# unrelated named failure would otherwise vanish from the count entirely.
+# Also counts every "<pkg>: Exited with code N" line — bun's `--filter`
+# orchestrator's fallback when a package produced no summary at all — and
+# every unprefixed "# Unhandled error between tests" (the test-scripts step
+# runs plain `bun test`, with no --filter wrapper and so no package prefix on
+# any line). Both are one-crash-per-line signals that never also appear in a
+# package's own "N fail" tally, so counting every occurrence can't double-count
+# a crash that is already named or already tallied some other way — unlike
+# checking whether the package ever printed a completion line ANYWHERE in the
+# log, which an unrelated, successfully-finishing group of the same package
+# can satisfy, hiding a sibling group's silent crash.
 # Never negative: an unrelated named failure must not offset a crash.
 unnamed_failure_count() {
-    local named total silent prefix
+    local named total
     named=$(test_failures "$1" | grep -c .)
     total=$(grep -oE '[0-9]+ fail$' "$1" 2>/dev/null | awk '{s+=$1} END{print s+0}')
-    silent=0
-    while IFS= read -r prefix; do
-        [ -n "$prefix" ] || continue
-        grep -qF "${prefix}Ran " "$1" 2>/dev/null || silent=$(( silent + 1 ))
-    done < <(grep -oE '^[^:]+: Exited with code [1-9][0-9]*$' "$1" 2>/dev/null | sed -E 's/:.*$/: /' | sort -u)
-    total=$(( total + silent ))
+    total=$(( total + $(grep -cE '^[^:]+: Exited with code [1-9][0-9]*$' "$1" 2>/dev/null) ))
+    total=$(( total + $(grep -cE '^# Unhandled error between tests$' "$1" 2>/dev/null) ))
     [ "$total" -ge "$named" ] || total=$named
     echo $(( total - named ))
 }
 
-# unnamed_failure_packages <log>: the packages (bun's "<pkg> test" prefix) that
-# had an unnamed failure — a "# Unhandled error between tests" crash, or a
-# package that exited non-zero with no "Ran " summary line at all — one per
-# line, sorted unique. Identity-based counterpart to unnamed_failure_count: a
-# scalar total can cancel a new crash in one package against an unrelated,
-# non-reproducing crash in a different package on the other side, so the
-# merge-vs-pristine regression decision compares these package sets with
-# comm -13 instead of comparing the scalar counts.
+# unnamed_failure_packages <log>: one identity per unnamed failure — richer
+# than a bare package name, so the merge-vs-pristine regression decision
+# (comm -13, in baseline_tests) does not cancel a new crash in a package
+# against an unrelated, already-known, non-reproducing crash in that SAME
+# package. A "# Unhandled error between tests" crash is paired with its
+# following "error: ..." line (the marker line alone is identical for every
+# crash in the package); the test-scripts step's unprefixed form of the same
+# marker is paired the same way, under the implicit identity "scripts" (no
+# --filter wrapper there, so no package prefix at all); a package that exited
+# non-zero with no summary line at all is kept whole ("<pkg> test: Exited with
+# code N"), so two different exit codes in the same package are not conflated
+# either. One identity per line, sorted unique.
 unnamed_failure_packages() {
     {
-        grep -E ': # Unhandled error between tests$' "$1" 2>/dev/null | sed -E 's/^([^:]+):.*$/\1/'
-        while IFS= read -r prefix; do
-            [ -n "$prefix" ] || continue
-            grep -qF "${prefix}: Ran " "$1" 2>/dev/null || printf '%s\n' "$prefix"
-        done < <(grep -oE '^[^:]+: Exited with code [1-9][0-9]*$' "$1" 2>/dev/null | sed -E 's/^([^:]+):.*$/\1/' | sort -u)
+        awk '/: # Unhandled error between tests$/ { line = $0; if ((getline nxt) > 0) { print line " :: " nxt } else { print line } }' "$1" 2>/dev/null
+        awk '/^# Unhandled error between tests$/ { line = $0; if ((getline nxt) > 0) { print "scripts: " line " :: " nxt } else { print "scripts: " line } }' "$1" 2>/dev/null
+        grep -E '^[^:]+: Exited with code [1-9][0-9]*$' "$1" 2>/dev/null
     } | sort -u
 }
 
@@ -362,7 +367,7 @@ TEST_REGRESSIONS=""
 PRISTINE_BUILD_FAILED=""
 baseline_tests() {
     local step="$1"; shift
-    local merged_log="$STEP_LOG" pristine_log after before after_unnamed before_unnamed new_unnamed_pkgs
+    local merged_log="$STEP_LOG" pristine_log after before after_unnamed before_unnamed new_unnamed new_unnamed_pkgs
     TEST_REGRESSIONS=""
     PRISTINE_BUILD_FAILED=""
     after=$(test_failures "$merged_log")
@@ -383,8 +388,9 @@ baseline_tests() {
     before_unnamed=$(unnamed_failure_count "$pristine_log")
     STEP_LOG="$merged_log"
     TEST_REGRESSIONS=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | grep -v '^$' || true)
-    new_unnamed_pkgs=$(comm -13 <(unnamed_failure_packages "$pristine_log") <(unnamed_failure_packages "$merged_log") | grep -v '^$' || true)
-    if [ -n "$new_unnamed_pkgs" ]; then
+    new_unnamed=$(comm -13 <(unnamed_failure_packages "$pristine_log") <(unnamed_failure_packages "$merged_log") | grep -v '^$' || true)
+    if [ -n "$new_unnamed" ]; then
+        new_unnamed_pkgs=$(printf '%s\n' "$new_unnamed" | sed -E 's/^([^:]+):.*$/\1/' | sort -u)
         TEST_REGRESSIONS="${TEST_REGRESSIONS:+$TEST_REGRESSIONS$'\n'}<unnamed failure(s) under the merge not on pristine $TAG in $(printf '%s' "$new_unnamed_pkgs" | tr '\n' ' ') — see $merged_log>"
     fi
     if [ "$(group_counts "$merged_log")" != "$(group_counts "$pristine_log")" ]; then

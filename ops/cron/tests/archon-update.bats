@@ -42,6 +42,12 @@ setup() {
     export STUB_TEST_CRASH_PRISTINE=""   # non-empty: an unnamed failure (crash) on the pristine release tag
     export STUB_TEST_SILENT_CRASH=""          # non-empty: an unrelated package exits non-zero with no summary at all, under the new tree
     export STUB_TEST_SILENT_CRASH_PRISTINE="" # same, on the pristine release tag
+    export STUB_TEST_SAME_PKG_SILENT_CRASH=""          # non-empty: the SAME package as STUB_TEST_FAIL/STUB_TEST_CRASH also exits
+                                                        # non-zero with no summary of its own, alongside that package's own normal
+                                                        # completion line — models a second group of one package crashing silently
+                                                        # while a sibling group of the same package finishes and prints its own
+                                                        # summary, under the new tree
+    export STUB_TEST_SAME_PKG_SILENT_CRASH_PRISTINE="" # same, on the pristine release tag
     export STUB_TEST_GROUPS=2            # total package-test-runner groups, under the new tree
     export STUB_TEST_GROUPS_PRISTINE=2   # same, on the pristine release tag
     export STUB_TEST_FAIL_GROUP=""          # group index (1-based) STUB_TEST_FAIL occurs in; default: the last group
@@ -55,6 +61,9 @@ setup() {
     export STUB_TEST_HIDDEN_FAIL_GROUP_PRISTINE="" # same, for STUB_TEST_HIDDEN_FAIL_PRISTINE
     export STUB_SCRIPTS_FAIL=""          # name of a scripts/ test that fails under the new tree
     export STUB_SCRIPTS_FAIL_PRISTINE="" # name of a scripts/ test that fails on the pristine release tag
+    export STUB_SCRIPTS_CRASH=""          # non-empty: an unnamed failure (crash) in the test-scripts step under the new tree —
+                                           # plain `bun test`, with no --filter wrapper and so no package prefix on any line
+    export STUB_SCRIPTS_CRASH_PRISTINE="" # same, on the pristine release tag
     export STUB_VALIDATE_NEW_ERROR=""    # workflow that errors only under the new CLI
     export STUB_VALIDATE_NEW_DROP=""     # workflow the new CLI no longer lists
     export STUB_GENERATE_CHANGE=0        # 1: generate:bundled rewrites the generated file
@@ -108,15 +117,20 @@ case "$*" in
         # "requested" mode, which runs every group to completion. No extra arg models
         # a selector-less full run, which stops admitting groups once one fails.
         forced=0; case "$*" in "--filter * test "*) forced=1 ;; esac
-        groups="$STUB_TEST_GROUPS"; fail="$STUB_TEST_FAIL"; fail_group="${STUB_TEST_FAIL_GROUP:-$groups}"
+        # Independent default timings on each side (not one shared literal): two
+        # separate process runs essentially never report identical millisecond
+        # timings, so a bats case that hard-codes the same one on both sides could
+        # pass with or without test_failures()'s timing-strip actually running.
+        timing="5000.00ms"; groups="$STUB_TEST_GROUPS"; fail="$STUB_TEST_FAIL"; fail_group="${STUB_TEST_FAIL_GROUP:-$groups}"
         hidden="$STUB_TEST_HIDDEN_FAIL"; hidden_group="${STUB_TEST_HIDDEN_FAIL_GROUP:-$groups}"
-        crash="$STUB_TEST_CRASH"; silent="$STUB_TEST_SILENT_CRASH"
+        crash="$STUB_TEST_CRASH"; silent="$STUB_TEST_SILENT_CRASH"; same_pkg_silent="$STUB_TEST_SAME_PKG_SILENT_CRASH"
         case "$PWD" in *-pristine)
-            groups="$STUB_TEST_GROUPS_PRISTINE"; fail="$STUB_TEST_FAIL_PRISTINE"
+            timing="6500.00ms"; groups="$STUB_TEST_GROUPS_PRISTINE"; fail="$STUB_TEST_FAIL_PRISTINE"
             fail_group="${STUB_TEST_FAIL_GROUP_PRISTINE:-$groups}"
             hidden="$STUB_TEST_HIDDEN_FAIL_PRISTINE"
             hidden_group="${STUB_TEST_HIDDEN_FAIL_GROUP_PRISTINE:-$groups}"
-            crash="$STUB_TEST_CRASH_PRISTINE"; silent="$STUB_TEST_SILENT_CRASH_PRISTINE" ;;
+            crash="$STUB_TEST_CRASH_PRISTINE"; silent="$STUB_TEST_SILENT_CRASH_PRISTINE"
+            same_pkg_silent="$STUB_TEST_SAME_PKG_SILENT_CRASH_PRISTINE" ;;
         esac
         print_to="$groups"
         if [ "$forced" = 0 ] && [ -n "$fail" ] && [ "$fail_group" -lt "$print_to" ]; then print_to="$fail_group"; fi
@@ -128,10 +142,10 @@ case "$*" in
         done
         nfail=0
         if [ -n "$fail" ] && [ "$fail_group" -le "$print_to" ]; then
-            echo "@archon/cli test: (fail) $fail [5000.00ms]"; nfail=$((nfail+1))
+            echo "@archon/cli test: (fail) $fail [$timing]"; nfail=$((nfail+1))
         fi
         if [ -n "$hidden" ] && [ "$forced" = 1 ] && [ "$hidden_group" -le "$print_to" ]; then
-            echo "@archon/cli test: (fail) $hidden [5000.00ms]"; nfail=$((nfail+1))
+            echo "@archon/cli test: (fail) $hidden [$timing]"; nfail=$((nfail+1))
         fi
         if [ -n "$crash" ]; then
             echo "@archon/cli test: "
@@ -145,19 +159,40 @@ case "$*" in
         else
             echo "@archon/cli test:  2 pass"; echo "@archon/cli test:  0 fail"
         fi
+        # package-tests.ts's/bun's own per-process completion line — printed here
+        # for @archon/cli's own run regardless of pass/fail, same as real bun. A
+        # sibling group of the SAME package silently crashing (same_pkg_silent,
+        # below) must still be caught even though this line exists for the prefix.
+        echo "@archon/cli test: Ran $print_to tests across $print_to files. [12.00ms]"
         if [ -n "$silent" ]; then
             echo "@archon/providers test: Exited with code 7"
             rc=1
         fi
+        if [ -n "$same_pkg_silent" ]; then
+            echo "@archon/cli test: Exited with code 9"
+            rc=1
+        fi
         exit "$rc" ;;
     "test --timeout 30000 ./scripts/")
-        fail="$STUB_SCRIPTS_FAIL"
-        case "$PWD" in *-pristine) fail="$STUB_SCRIPTS_FAIL_PRISTINE" ;; esac
-        if [ -n "$fail" ]; then
-            echo "(fail) $fail [5000.00ms]"
-            echo " 146 pass"; echo " 1 fail"; exit 1
+        fail="$STUB_SCRIPTS_FAIL"; crash="$STUB_SCRIPTS_CRASH"; timing="5000.00ms"
+        case "$PWD" in *-pristine) fail="$STUB_SCRIPTS_FAIL_PRISTINE"; crash="$STUB_SCRIPTS_CRASH_PRISTINE"; timing="6500.00ms" ;; esac
+        nfail=0; rc=0
+        if [ -n "$fail" ]; then echo "(fail) $fail [$timing]"; nfail=$((nfail+1)); fi
+        # An import-time throw is invisible to bun's own pass/fail tally (no
+        # "(fail)" line and no bump to the count either) — only the process exit
+        # code and the "# Unhandled error between tests" marker show it happened.
+        if [ -n "$crash" ]; then
+            echo
+            echo "# Unhandled error between tests"
+            echo "error: $crash"
+            rc=1
         fi
-        echo " 147 pass"; echo " 0 fail"; exit 0 ;;
+        if [ "$nfail" -gt 0 ]; then
+            echo " $((147 - nfail)) pass"; echo " $nfail fail"; rc=1
+        else
+            echo " 147 pass"; echo " 0 fail"
+        fi
+        exit "$rc" ;;
     "run generate:bundled")
         [ "$STUB_GENERATE_CHANGE" = 1 ] && echo "// regenerated for $(cat VERSION)" >> packages/workflows/src/defaults/bundled-defaults.generated.ts
         echo "Wrote bundled-defaults.generated.ts"; exit 0 ;;
@@ -552,6 +587,24 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
     [ ! -d "$T/wt/archon-update-v0.11.0-pristine" ]
 }
 
+@test "a scripts/ crash with no --filter package prefix is caught as an unnamed failure, not hidden by a pristine-matched named failure" {
+    publish_release 0.11.0
+    export STUB_TEST_FAIL="trigger CLI durable execution > replays on both hosts"
+    export STUB_TEST_FAIL_PRISTINE="$STUB_TEST_FAIL"
+    export STUB_SCRIPTS_FAIL="scripts/some-script.test.ts > does the thing"
+    export STUB_SCRIPTS_FAIL_PRISTINE="$STUB_SCRIPTS_FAIL"
+    # test-scripts runs plain `bun test`, with no --filter wrapper and so no
+    # package prefix at all — a crash there must still be caught even though it
+    # cannot carry a package prefix the way the --filter 'test' step's crashes do.
+    export STUB_SCRIPTS_CRASH="scripts/crash.test.ts throws at import time"
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "test-scripts" ]
+    [[ "$output" == *"test-scripts: 1 named + 1 unnamed failure(s) under the merge, 1 named + 0 unnamed on pristine v0.11.0, 1 new"* ]]
+    grep -q 'unnamed failure(s) under the merge not on pristine v0.11.0 in scripts' "$GH_ARGV"
+    [ "$(live_branch)" = "upstream-sync-0.10" ]
+}
+
 @test "an unnamed failure sharing its step with a pristine-matched named failure is still a regression" {
     publish_release 0.11.0
     export STUB_TEST_FAIL="trigger CLI durable execution > replays on both hosts"
@@ -587,6 +640,23 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
     [ "$(status_field last_run_failed)" = "test" ]
     [[ "$output" == *"test: 1 named + 1 unnamed failure(s) under the merge, 1 named + 0 unnamed on pristine v0.11.0, 1 new"* ]]
     grep -q 'unnamed failure(s) under the merge not on pristine v0.11.0' "$GH_ARGV"
+    [ "$(live_branch)" = "upstream-sync-0.10" ]
+}
+
+@test "a silent crash in one group is caught even though a sibling group of the same package completed and printed its own summary" {
+    publish_release 0.11.0
+    export STUB_TEST_FAIL="trigger CLI durable execution > replays on both hosts"
+    export STUB_TEST_FAIL_PRISTINE="$STUB_TEST_FAIL"
+    # @archon/cli's own group prints its usual completion line; a second group of
+    # the SAME package (@archon/cli) exits non-zero with no summary of its own.
+    # The completion line belongs to the first group, not the second, and must
+    # not be read as covering it.
+    export STUB_TEST_SAME_PKG_SILENT_CRASH="a sibling group crashed silently"
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "test" ]
+    [[ "$output" == *"test: 1 named + 1 unnamed failure(s) under the merge, 1 named + 0 unnamed on pristine v0.11.0, 1 new"* ]]
+    grep -q 'unnamed failure(s) under the merge not on pristine v0.11.0 in @archon/cli' "$GH_ARGV"
     [ "$(live_branch)" = "upstream-sync-0.10" ]
 }
 
@@ -629,6 +699,24 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
     [ "$status" -eq 1 ]
     [ "$(status_field last_run_failed)" = "test" ]
     grep -q 'unnamed failure(s) under the merge not on pristine v0.11.0 in @archon/providers' "$GH_ARGV"
+    [ "$(live_branch)" = "upstream-sync-0.10" ]
+}
+
+@test "a new crash in a package is not cancelled by a different, non-reproducing crash already known in that same package" {
+    publish_release 0.11.0
+    export STUB_TEST_FAIL="trigger CLI durable execution > replays on both hosts"
+    export STUB_TEST_FAIL_PRISTINE="$STUB_TEST_FAIL"
+    # Both sides crash in the SAME package (@archon/cli, the only package the
+    # stub can crash via STUB_TEST_CRASH), but for two unrelated reasons. A
+    # package-name-only comparison would see "@archon/cli crashed on both
+    # sides" and wrongly cancel this; the crash text itself must disagree.
+    export STUB_TEST_CRASH="new regression in the parser"
+    export STUB_TEST_CRASH_PRISTINE="flaky OpenCode timeout, does not reproduce"
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "test" ]
+    grep -q 'unnamed failure(s) under the merge not on pristine v0.11.0 in @archon/cli' "$GH_ARGV"
+    grep -q 'new regression in the parser' "$GH_ARGV"
     [ "$(live_branch)" = "upstream-sync-0.10" ]
 }
 
