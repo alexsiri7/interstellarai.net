@@ -40,7 +40,19 @@ setup() {
     [[ "$output" == *"ENV=CLAUDECODE=0"* ]]
     [[ "$output" == *"ENV=ENABLE_CLAUDEAI_MCP_SERVERS=false"* ]]
     [[ "$output" == *"ENV=TMPDIR=$T/home/tmp"* ]]
-    [[ "$output" == *"ENV=PATH=$T/home/.bun/bin:"* ]]
+    [[ "$output" == *"ENV=PATH=/usr/local/lib/archon-user/gh-shim:$T/home/.bun/bin:"* ]]
+}
+
+@test "archon-serve.service's PATH is the one archon_env builds, gh-shim first" {
+    mkdir -p "$T/home/.local/opt/flutter/bin" "$T/home/.local/opt/jdk/bin"
+    cd "$T/owner/reli"
+    run "$W" workflow run archon-ship "fix #12"
+    [ "$status" -eq 0 ]
+    env_path=$(grep '^ENV=PATH=' <<<"$output")
+    env_path="${env_path#ENV=PATH=}"
+    unit_path=$(grep '^Environment=PATH=' "$(dirname "$W")/archon-serve.service")
+    unit_path="${unit_path#Environment=PATH=}"
+    [ "${env_path//"$T/home"//mnt/ext-fast/archon-home}" = "$unit_path" ]
 }
 
 @test "--cwd pointing at the owner's clone is mapped and stripped" {
@@ -294,6 +306,57 @@ STUB
     rm -f "$T/config"
     run "$W" gh-probe
     [ "$status" -eq 1 ]
+}
+
+@test "selftest's PATH-check line passes when the gh-shim wrapper is first on PATH, fails otherwise" {
+    mkdir -p "$T/ghshim"
+    cat > "$T/ghshim/gh" <<'STUB'
+#!/usr/bin/env bash
+STUB
+    chmod +x "$T/ghshim/gh"
+    export ARCHON_AS_GH_SHIM_DIR="$T/ghshim"
+    run "$W" selftest
+    [[ "$output" == *"PASS gh: the comment-marking wrapper is first on PATH (#298)"* ]]
+
+    rm "$T/ghshim/gh"
+    mkdir -p "$T/home/.local/bin"
+    stub_gh github_pat_abc 404
+    run "$W" selftest
+    [[ "$output" == *"FAIL gh resolves to $T/home/.local/bin/gh, not $T/ghshim/gh — factory comments would lack <!-- lachesis:automated --> (re-run install.sh)"* ]]
+}
+
+@test "selftest survives no gh resolving anywhere and still reaches the PATH-check line and the summary" {
+    # archon_env's PATH is gh-shim, then the factory's own toolchains, then a
+    # fixed system tail; emptying all three (ARCHON_AS_SYSTEM_PATH_TAIL is the
+    # test-only override for the tail, which install.sh's real PATH cannot
+    # otherwise avoid putting a real gh on) makes `command -v gh` itself find
+    # nothing, the one shape that reaches the bare `out=$(...)` assignment's
+    # failure under `set -e`.
+    export ARCHON_AS_GH_SHIM_DIR="$T/no-such-shim"
+    export ARCHON_AS_SYSTEM_PATH_TAIL="$T/no-such-system-bin"
+    run "$W" selftest
+    [[ "$output" == *"FAIL gh resolves to nothing, not $T/no-such-shim/gh — factory comments would lack <!-- lachesis:automated --> (re-run install.sh)"* ]]
+    [[ "$output" == *"selftest: "*" failure(s)"* ]]
+}
+
+@test "selftest survives a getent that fails for a missing asiri account and still reaches the PATH-check line" {
+    mkdir -p "$T/bin"
+    cat > "$T/bin/getent" <<'STUB'
+#!/usr/bin/env bash
+[ "$1" = passwd ] && [ "$2" = asiri ] && exit 2
+exec /usr/bin/getent "$@"
+STUB
+    chmod +x "$T/bin/getent"
+    export PATH="$T/bin:$PATH"
+    mkdir -p "$T/ghshim"
+    cat > "$T/ghshim/gh" <<'STUB'
+#!/usr/bin/env bash
+STUB
+    chmod +x "$T/ghshim/gh"
+    export ARCHON_AS_GH_SHIM_DIR="$T/ghshim"
+    run "$W" selftest
+    [[ "$output" == *"PASS gh: the comment-marking wrapper is first on PATH (#298)"* ]]
+    [[ "$output" == *"selftest: "*" failure(s)"* ]]
 }
 
 @test "selftest sweep skips exactly Debian's dpkg/apt/alternatives backups in /var/backups" {

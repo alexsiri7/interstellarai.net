@@ -77,8 +77,15 @@ OWNER_BASE=/mnt/ext-fast
 TMP_ROOT=/tmp
 ARCHON_BIN=/usr/local/lib/archon-user/bin/archon     # symlink -> <archon checkout>/packages/cli/src/cli.ts
 FUEL_PROBE=/usr/local/lib/archon-user/fuel_probe.py
+# First on every session's PATH: stamps <!-- lachesis:automated --> on the issue/PR comments agents post (#298)
+GH_SHIM_DIR=/usr/local/lib/archon-user/gh-shim
 GH_OWNER=alexsiri7
 DRY_EXEC=0
+# The archon_env PATH's fixed tail, after gh-shim and the factory's own
+# toolchains: real system binaries, including a real gh if one is installed.
+# Overridable so selftest's "gh resolves to nothing" branch is reachable in
+# tests without touching /usr/local/bin, /usr/bin or /bin themselves.
+SYSTEM_PATH_TAIL=/usr/local/bin:/usr/bin:/bin
 
 if [ "${ARCHON_AS_TEST:-}" = 1 ] && [ -z "${SUDO_USER:-}" ]; then
     ARCHON_USER="${ARCHON_AS_USER:-$(id -un)}"
@@ -89,6 +96,8 @@ if [ "${ARCHON_AS_TEST:-}" = 1 ] && [ -z "${SUDO_USER:-}" ]; then
     TMP_ROOT="${ARCHON_AS_TMP_ROOT:-$TMP_ROOT}"
     ARCHON_BIN="${ARCHON_AS_ARCHON_BIN:-$ARCHON_BIN}"
     FUEL_PROBE="${ARCHON_AS_FUEL_PROBE:-$FUEL_PROBE}"
+    GH_SHIM_DIR="${ARCHON_AS_GH_SHIM_DIR:-$GH_SHIM_DIR}"
+    SYSTEM_PATH_TAIL="${ARCHON_AS_SYSTEM_PATH_TAIL:-$SYSTEM_PATH_TAIL}"
     DRY_EXEC="${ARCHON_AS_DRY_EXEC:-0}"
 fi
 
@@ -161,10 +170,10 @@ normalize_path() {
 
 # ------------------------------------------------------------- env ---------
 archon_env() {
-    local path="$ARCHON_HOME_DIR/.bun/bin:$ARCHON_HOME_DIR/.local/bin:$ARCHON_HOME_DIR/.cargo/bin"
+    local path="$GH_SHIM_DIR:$ARCHON_HOME_DIR/.bun/bin:$ARCHON_HOME_DIR/.local/bin:$ARCHON_HOME_DIR/.cargo/bin"
     [ -d "$ARCHON_HOME_DIR/.local/opt/flutter/bin" ] && path="$path:$ARCHON_HOME_DIR/.local/opt/flutter/bin"
     [ -d "$ARCHON_HOME_DIR/.local/opt/jdk/bin" ] && path="$path:$ARCHON_HOME_DIR/.local/opt/jdk/bin"
-    path="$path:/usr/local/bin:/usr/bin:/bin"
+    path="$path:$SYSTEM_PATH_TAIL"
     ENV=(
         "HOME=$ARCHON_HOME_DIR" "USER=$ARCHON_USER" "LOGNAME=$ARCHON_USER" "SHELL=/bin/bash"
         "LANG=C.UTF-8" "PATH=$path" "TMPDIR=$ARCHON_HOME_DIR/tmp"
@@ -594,7 +603,7 @@ verb_selftest() {
     else pass "no sudo (${out%%$'\n'*})"; fi
 
     # named secrets: must be neither readable nor listable
-    local owner_home; owner_home=$(getent passwd asiri | cut -d: -f6); owner_home=${owner_home:-/home/asiri}
+    local owner_home; owner_home=$(getent passwd asiri | cut -d: -f6) || true; owner_home=${owner_home:-/home/asiri}
     for p in "$owner_home" "$owner_home/.config/archon-cron/secrets.env" "$owner_home/.config/archon-cron/consolidated-db.env" \
              "$owner_home/.config/archon-cron/doppler.token" "$owner_home/.config/archon-cron/doppler-push.token" \
              "$owner_home/.config/personal-ops" "$owner_home/.railway" "$owner_home/.config/gh" "$owner_home/.ssh" \
@@ -675,6 +684,9 @@ verb_selftest() {
                          *) fail "tool missing: $t" ;; esac
         fi
     done
+    out=$(env -i "${ENV[@]}" bash -c 'command -v gh' 2>/dev/null) || true
+    if [ "$out" = "$GH_SHIM_DIR/gh" ]; then pass "gh: the comment-marking wrapper is first on PATH (#298)"
+    else fail "gh resolves to ${out:-nothing}, not $GH_SHIM_DIR/gh — factory comments would lack <!-- lachesis:automated --> (re-run install.sh)"; fi
     # cargo intermediates off / wherever an agent builds, /tmp included (#133)
     if grep -q '^build-dir = "'"$ARCHON_HOME_DIR"'/' "$ARCHON_HOME_DIR/.cargo/config.toml" 2>/dev/null; then
         pass "cargo build-dir: $(grep -m1 '^build-dir' "$ARCHON_HOME_DIR/.cargo/config.toml")"
