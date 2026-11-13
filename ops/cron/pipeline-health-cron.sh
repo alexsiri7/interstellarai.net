@@ -62,7 +62,9 @@
 #  9g. Factory GitHub identity cannot open PRs (graphql.limit 0 or nearly
 #      used up, REST core limit at the unauthenticated 60, public profile 404 =
 #      flagged account; lib/gh-factory.sh, probed as the archon user in archon
-#      mode) → ntfy once per episode; issue-pickup holds launches meanwhile
+#      mode) → switch to the owner account when its stored token works
+#      (#272, one ntfy); otherwise ntfy once per episode, issue-pickup holds
+#      launches meanwhile
 #  9h. Doppler token (lib/secrets.sh) missing, loose-moded or rejected → ntfy
 #      once per episode
 #  10. Parked work gets a clock (lib/deadlines.sh): pr-maintenance marks
@@ -3182,25 +3184,42 @@ check_cron_heartbeats() {
 #   `gh api rate_limit` and the public profile, as the archon user in archon
 #   mode); ntfy once per episode when it is blocked, log when it recovers. A
 #   probe that fails (sudo, network) is logged, not alerted: it proves nothing.
-#   The alert is marked sent only once ntfy took it.
+#   The alert is marked sent only once ntfy took it. A blocked account that a
+#   switch to the owner account fixes (gh_factory_try_switch, #272) is not an
+#   episode: that switch sends its own ntfy, retried here (gh_factory_log_check)
+#   until delivery is confirmed. gh_factory_log_check also logs the active
+#   account and hosts.yml mtime every tick: this is the one caller that probes
+#   on a fixed schedule independent of launch demand.
 # ----------------------------------------------------------------------------
 check_gh_factory() {
-  local marker="$STATE_DIR/gh-factory-alerted" rc
+  local marker="$STATE_DIR/gh-factory-alerted" held="$STATE_DIR/gh-factory-held" rc
   gh_factory_probe; rc=$?
+  gh_factory_log_check "pipeline-health"
+  if [ "$rc" -eq 1 ]; then
+    gh_factory_try_switch "pipeline-health"; rc=$?
+  fi
   if [ "$rc" -eq 2 ]; then
     log "gh-factory: probe failed — $GH_FACTORY_DETAIL"
     return 0
   fi
   if [ "$rc" -eq 0 ]; then
-    if [ -f "$marker" ]; then
-      rm -f "$marker"
+    if [ -f "$marker" ] || [ -f "$held" ]; then
+      rm -f "$marker" "$held"
       log "gh-factory: recovered — $(gh_factory_who): $GH_FACTORY_DETAIL"
     fi
     return 0
   fi
   log "gh-factory: BLOCKED $(gh_factory_who): $GH_FACTORY_DETAIL"
   [ -f "$marker" ] && return 0   # alert once per episode
-  if notify_checked "Factory GitHub identity blocked" \
+  if [ ! -f "$held" ]; then
+    # One tick of confirmation before alerting: filters a single noisy tick
+    # (e.g. a GraphQL `remaining` dip that resets within the hour) from a
+    # real, persistent block.
+    touch "$held"
+    log "gh-factory: held — confirming next tick before alerting"
+    return 0
+  fi
+  if notify_checked "factory launches held: GitHub identity blocked" \
     "$(gh_factory_who): $GH_FACTORY_DETAIL. Factory runs cannot open PRs; issue-pickup holds launches until this clears. Check: sudo -n -u archon env HOME=$GH_FACTORY_HOME gh api rate_limit; https://github.com/${GH_FACTORY_LOGIN:-} (404 = flagged: contact GitHub support). To stop the other crons too: ARCHON_RUN_AS=drain in ~/.config/archon-cron/run-as." \
     urgent rotating_light; then
     touch "$marker"

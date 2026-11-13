@@ -45,9 +45,9 @@ What you find here goes into the message's "Anomalies" part (section "Finish"): 
 
 Log each one, as it happens, as one line appended to the run's `actions.log` (path at the top): what you did, on what, and why, e.g. `rerun alexsiri7/reli run 123456 (main CI, "ETIMEDOUT" fetching node)`. Also name each one in the message's "fixed" line. Skip all of them in report-only mode.
 
-1. **Factory gh account.** When the archon user's active gh account is not `alexsiri7`, switch it back and check it took:
+1. **Factory gh account.** When the archon user's active gh account is not `alexsiri7`, switch it back and check it took. Switch under the lock the factory crons take for their own switch to `alexsiri7` (`ops/cron/lib/gh-factory.sh`), so two writers never rewrite archon's `hosts.yml` at once; holding that lock file is not one of your file writes:
    ```
-   sudo -n -u archon env HOME=/mnt/ext-fast/archon-home gh auth switch -h github.com -u alexsiri7
+   flock -w 120 ~/.archon/state/gh-factory-switch.lock sudo -n -u archon env HOME=/mnt/ext-fast/archon-home gh auth switch -h github.com -u alexsiri7
    sudo -n -u archon env HOME=/mnt/ext-fast/archon-home gh auth status
    ```
    If `alexsiri7` is not logged in there at all, do not log anything in; say so in the message.

@@ -15,13 +15,32 @@ setup() {
     : > "$ARGV"
 
     # gh: `api rate_limit` prints $T/rate_limit.json (exit $STUB_GH_RC),
-    # `api user --jq .login` prints $STUB_LOGIN.
+    # `api user --jq .login` prints $STUB_LOGIN. The owner account (alexsiri7):
+    # `auth token -u alexsiri7` prints $STUB_OWNER_TOKEN, `api rate_limit` with
+    # that GH_TOKEN, or after `auth switch -u alexsiri7`, prints
+    # $T/owner_rate_limit.json — after the switch, $STUB_SWITCHED_FAIL instead
+    # makes it fail with that message.
     cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 printf 'gh %s HOME=%s\n' "$*" "$HOME" >> "$ARGV"
+owner=0
+{ [ -n "${GH_TOKEN:-}" ] && [ "$GH_TOKEN" = "${STUB_OWNER_TOKEN-tok-owner}" ]; } && owner=1
+[ "$(cat "$T/active" 2>/dev/null)" = alexsiri7 ] && owner=1
 case "$*" in
-  "api rate_limit") cat "$T/rate_limit.json"; exit "${STUB_GH_RC:-0}" ;;
-  "api user --jq .login") echo "${STUB_LOGIN-alexsiri7-factory}" ;;
+  "api rate_limit")
+    if [ "$owner" = 1 ] && [ -z "${GH_TOKEN:-}" ] && [ -n "${STUB_SWITCHED_FAIL:-}" ]; then
+      echo "$STUB_SWITCHED_FAIL" >&2; exit 1
+    fi
+    if [ "$owner" = 1 ]; then cat "$T/owner_rate_limit.json"; exit 0; fi
+    cat "$T/rate_limit.json"; exit "${STUB_GH_RC:-0}" ;;
+  "api user --jq .login")
+    if [ "$owner" = 1 ]; then echo alexsiri7; else echo "${STUB_LOGIN-alexsiri7-factory}"; fi ;;
+  "auth token -u alexsiri7")
+    [ -n "${STUB_OWNER_TOKEN-tok-owner}" ] || { echo "no oauth token found for alexsiri7" >&2; exit 1; }
+    echo "${STUB_OWNER_TOKEN-tok-owner}" ;;
+  "auth switch -u alexsiri7")
+    [ "${STUB_SWITCH_RC:-0}" = 0 ] || { echo "switch refused" >&2; exit 1; }
+    echo alexsiri7 > "$T/active" ;;
 esac
 STUB
     # sudo -n -u <user> env HOME=<home> gh ...: record, then run the rest.
@@ -32,14 +51,26 @@ printf 'sudo %s\n' "$*" >> "$ARGV"
 shift 3
 exec "$@"
 STUB
-    # curl -s -o /dev/null --max-time 15 -w %{http_code} <url> → $STUB_PROFILE_CODE
+    # curl -s -o /dev/null --max-time 15 -w %{http_code} <url> → $STUB_PROFILE_CODE;
+    # an ntfy.sh post (its -d body) goes to $T/ntfy-curl, and fails (--fail,
+    # exit 22) when STUB_NTFY_FAIL is set, to simulate an undelivered ntfy.
     cat > "$T/bin/curl" <<'STUB'
 #!/usr/bin/env bash
 printf 'curl %s\n' "$*" >> "$ARGV"
+if [[ "$*" == *ntfy.sh/* ]]; then
+  while [ $# -gt 0 ]; do [ "$1" = -d ] && printf '%s\n' "$2" >> "$T/ntfy-curl"; shift; done
+  [ -n "${STUB_NTFY_FAIL:-}" ] && exit 22
+  exit 0
+fi
 printf '%s' "${STUB_PROFILE_CODE:-200}"
 STUB
     chmod +x "$T/bin/gh" "$T/bin/sudo" "$T/bin/curl"
     rate_limit 5000 4800 5000
+    owner_rate_limit 5000 5000 5000
+    mkdir -p "$T/gh"
+    touch -d '2026-11-07 10:29:00 UTC' "$T/gh/hosts.yml"
+    export GH_CONFIG_DIR="$T/gh" NTFY_TOPIC=test-topic
+    export GH_FACTORY_SWITCH_LOCK="$T/state/gh-factory-switch.lock"
 
     export ARCHON_RUN_AS=asiri
     unset _GH_FACTORY_SH
@@ -49,10 +80,12 @@ STUB
 
 teardown() { rm -rf "$T"; }
 
-rate_limit() {  # rate_limit <graphql limit> <graphql remaining> <core limit>
+rate_limit() {  # rate_limit <graphql limit> <graphql remaining> <core limit> [file]
     printf '{"resources":{"core":{"limit":%s,"remaining":%s,"reset":1792183905},"graphql":{"limit":%s,"remaining":%s,"reset":1792183905}}}\n' \
-        "$3" "$3" "$1" "$2" > "$T/rate_limit.json"
+        "$3" "$3" "$1" "$2" > "$T/${4:-rate_limit.json}"
 }
+
+owner_rate_limit() { rate_limit "$@" owner_rate_limit.json; }  # the owner account's token
 
 @test "a healthy identity is ok" {
     gh_factory_probe
@@ -131,7 +164,156 @@ rate_limit() {  # rate_limit <graphql limit> <graphql remaining> <core limit>
     rate_limit 5000 5000 5000
     run gh_factory_may_launch issue-pickup
     [ "$status" -eq 0 ]
-    [ -z "$output" ]
+    [[ "$output" != *"no launches"* ]]
+}
+
+@test "every gate check logs the active account and when hosts.yml last changed" {
+    run gh_factory_may_launch issue-pickup
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[gh-factory] issue-pickup: active account alexsiri7-factory, as asiri, ok; hosts.yml modified 2026-11-07T"* ]]
+    rm "$T/gh/hosts.yml"
+    run gh_factory_may_launch issue-pickup
+    [[ "$output" == *"hosts.yml modified ?"* ]]
+}
+
+# ── switching to the owner account (#272) ────────────────────────────────────
+
+@test "blocked in archon mode with a working owner token: switch to the owner, ntfy once, launch" {
+    export ARCHON_RUN_AS=archon
+    rate_limit 0 0 60
+    run gh_factory_may_launch issue-pickup
+    [ "$status" -eq 0 ]
+    [ "$(cat "$T/active")" = alexsiri7 ]
+    grep -q '^gh auth switch -u alexsiri7 HOME=/mnt/ext-fast/archon-home$' "$ARGV"
+    [[ "$output" == *"Switched the factory GitHub account from alexsiri7-factory (GraphQL limit 0"*") to alexsiri7, now ok"* ]]
+    [[ "$output" != *"no launches"* ]]
+    [ "$(wc -l < "$T/ntfy-curl")" -eq 1 ]
+    grep -q 'from alexsiri7-factory .* to alexsiri7, now ok: .* hosts.yml was last changed 2026-11-07T' "$T/ntfy-curl"
+    ! grep -q 'tok-owner' "$ARGV"            # the token never reaches an argv
+
+    : > "$ARGV"
+    run gh_factory_may_launch issue-pickup   # the owner is active now: nothing to do
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"active account alexsiri7, as archon, ok"* ]]
+    ! grep -q '^gh auth' "$ARGV"
+    [ "$(wc -l < "$T/ntfy-curl")" -eq 1 ]
+}
+
+@test "blocked with no working owner token: hold, never switch, no ntfy from the gate" {
+    export ARCHON_RUN_AS=archon
+    rate_limit 0 0 60
+    # throttled and low: the probe's own bars (core limit 1000, GraphQL 200 left), not just a flag
+    for owner in missing flagged throttled low; do
+        : > "$ARGV"
+        unset STUB_OWNER_TOKEN
+        case $owner in
+          missing)   export STUB_OWNER_TOKEN="" ;;
+          flagged)   owner_rate_limit 0 0 60 ;;
+          throttled) owner_rate_limit 5000 5000 100 ;;
+          low)       owner_rate_limit 5000 150 5000 ;;
+        esac
+        run gh_factory_may_launch issue-pickup
+        [ "$status" -eq 1 ]
+        [[ "$output" == *"no working alexsiri7 token"*"no launches this tick"* ]]
+        grep -q '^gh auth token -u alexsiri7' "$ARGV"
+        ! grep -q '^gh auth switch' "$ARGV"
+        [ ! -e "$T/ntfy-curl" ]
+    done
+}
+
+@test "a switch whose re-probe cannot tell does not hold the launch" {
+    export ARCHON_RUN_AS=archon STUB_SWITCHED_FAIL="HTTP 502: Bad Gateway"
+    rate_limit 0 0 60
+    run gh_factory_may_launch issue-pickup
+    [ "$status" -eq 0 ]
+    [ "$(cat "$T/active")" = alexsiri7 ]
+    [[ "$output" == *"to alexsiri7, now unknown: gh api rate_limit failed: HTTP 502: Bad Gateway"* ]]
+    [[ "$output" == *"could not probe"*"not holding launches"* ]]
+    [ "$(wc -l < "$T/ntfy-curl")" -eq 1 ]
+}
+
+@test "a successful switch does not swallow the caller's later stderr (R2)" {
+    export ARCHON_RUN_AS=archon
+    rate_limit 0 0 60
+    run bash -c "source '$CRON_DIR/lib/gh-factory.sh'; gh_factory_try_switch issue-pickup >/dev/null; echo caller-stderr-after-switch >&2"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"caller-stderr-after-switch"* ]]
+}
+
+@test "a switch whose ntfy fails to deliver is retried on the next gate check, not lost (R3)" {
+    export ARCHON_RUN_AS=archon STUB_NTFY_FAIL=1
+    rate_limit 0 0 60
+    run gh_factory_may_launch issue-pickup
+    [ "$status" -eq 0 ]
+    [ "$(cat "$T/active")" = alexsiri7 ]
+    [[ "$output" == *"ntfy not delivered"* ]]
+    [[ "$output" == *"will retry the switch ntfy next gate check"* ]]
+    [ -f "$T/state/gh-factory-switch-announce" ]
+
+    unset STUB_NTFY_FAIL
+    : > "$ARGV"; : > "$T/ntfy-curl"
+    run gh_factory_may_launch issue-pickup   # already the owner: no new switch, but the pending ntfy still goes out
+    [ "$status" -eq 0 ]
+    ! grep -q '^gh auth' "$ARGV"
+    [ "$(wc -l < "$T/ntfy-curl")" -eq 1 ]
+    grep -q 'Switched the factory GitHub account from alexsiri7-factory' "$T/ntfy-curl"
+    [ ! -f "$T/state/gh-factory-switch-announce" ]
+}
+
+@test "a switch waits for another writer's lock and does not switch or announce again" {
+    export ARCHON_RUN_AS=archon
+    rate_limit 0 0 60
+    gh_factory_probe || true                 # the caller saw the factory account blocked
+    mkdir -p "$(dirname "$GH_FACTORY_SWITCH_LOCK")"
+    ( exec 8>"$GH_FACTORY_SWITCH_LOCK"; flock 8; touch "$T/locked"; sleep 1; echo alexsiri7 > "$T/active" ) &
+    until [ -e "$T/locked" ]; do sleep 0.1; done
+    run gh_factory_try_switch issue-pickup
+    wait
+    [ "$status" -eq 0 ]
+    ! grep -q '^gh auth' "$ARGV"
+    [ ! -e "$T/ntfy-curl" ]
+}
+
+@test "an unopenable switch lock is held and logged, not a fatal unbound-variable crash (R1)" {
+    export ARCHON_RUN_AS=archon
+    rate_limit 0 0 60
+    mkdir -p "$(dirname "$GH_FACTORY_SWITCH_LOCK")"
+    : > "$GH_FACTORY_SWITCH_LOCK"
+    chmod 000 "$GH_FACTORY_SWITCH_LOCK"
+    # the real callers (issue-pickup-cron.sh, pipeline-health-cron.sh) run
+    # with set -uo pipefail; reproduce that here, in a fresh shell, since
+    # setup()'s own sourcing does not set -u.
+    run bash -c "set -uo pipefail; source '$CRON_DIR/lib/gh-factory.sh'; gh_factory_try_switch issue-pickup"
+    chmod 600 "$GH_FACTORY_SWITCH_LOCK"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"cannot open $GH_FACTORY_SWITCH_LOCK — not switching"* ]]
+    [[ "$output" != *"unbound variable"* ]]
+    ! grep -q '^gh auth switch' "$ARGV"
+}
+
+@test "a refused gh auth switch holds and says why" {
+    export ARCHON_RUN_AS=archon STUB_SWITCH_RC=1
+    rate_limit 0 0 60
+    run gh_factory_may_launch issue-pickup
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"gh auth switch -u alexsiri7 failed: switch refused"*"no launches this tick"* ]]
+    [ ! -e "$T/ntfy-curl" ]
+}
+
+@test "no switch when the active account is healthy, already the owner, unreadable, or in asiri mode" {
+    export ARCHON_RUN_AS=archon
+    run gh_factory_may_launch issue-pickup               # healthy
+    [ "$status" -eq 0 ]
+    rate_limit 0 0 60
+    STUB_LOGIN=alexsiri7 run gh_factory_may_launch issue-pickup   # the owner itself is blocked
+    [ "$status" -eq 1 ]
+    STUB_LOGIN="" run gh_factory_may_launch issue-pickup          # who is active is unknown
+    [ "$status" -eq 1 ]
+    ARCHON_RUN_AS=asiri run gh_factory_may_launch issue-pickup    # the owner's own gh
+    [ "$status" -eq 1 ]
+    ! grep -q '^gh auth' "$ARGV"
+    [ ! -e "$T/active" ]
+    [ ! -e "$T/ntfy-curl" ]
 }
 
 # ── check_gh_factory (pipeline-health-cron.sh) ───────────────────────────────
@@ -145,14 +327,31 @@ load_check() {
     source <(awk '/^check_gh_factory\(\)/{p=1} p{print} p && /^}$/{p=0}' "$CRON_DIR/pipeline-health-cron.sh")
 }
 
-@test "check_gh_factory: blocked alerts once per episode, recovery clears it" {
+@test "check_gh_factory logs the active account and hosts.yml mtime every tick, healthy or not (R1)" {
+    load_check
+    run check_gh_factory
+    [[ "$output" == *"[gh-factory] pipeline-health: active account alexsiri7-factory, as asiri, ok; hosts.yml modified 2026-11-07T"* ]]
+
+    rate_limit 0 0 60
+    run check_gh_factory
+    [[ "$output" == *"[gh-factory] pipeline-health: active account alexsiri7-factory, as asiri, blocked; hosts.yml modified 2026-11-07T"* ]]
+}
+
+@test "check_gh_factory: blocked alerts after 2 consecutive ticks, recovery clears it" {
     load_check
     rate_limit 0 0 60
     run check_gh_factory
-    [ "$(wc -l < "$NTFY_SENT")" -eq 1 ]
-    grep -q 'Factory GitHub identity blocked | alexsiri7-factory, as asiri: GraphQL limit 0' "$NTFY_SENT"
+    [ ! -e "$NTFY_SENT" ]                     # first held tick: no alert yet
+    [[ "$output" == *"gh-factory: held"* ]]
+    [ -f "$T/state/gh-factory-held" ]
+    [ ! -f "$T/state/gh-factory-alerted" ]
+
+    run check_gh_factory
+    [ "$(wc -l < "$NTFY_SENT")" -eq 1 ]        # second consecutive tick: alerts
+    grep -q 'factory launches held: GitHub identity blocked | alexsiri7-factory, as asiri: GraphQL limit 0' "$NTFY_SENT"
     grep -q '| urgent$' "$NTFY_SENT"
     [ -f "$T/state/gh-factory-alerted" ]
+
     run check_gh_factory
     [[ "$output" == *"gh-factory: BLOCKED"* ]]
     [ "$(wc -l < "$NTFY_SENT")" -eq 1 ]       # the marker holds the repeat
@@ -161,17 +360,22 @@ load_check() {
     run check_gh_factory
     [[ "$output" == *"gh-factory: recovered"* ]]
     [ ! -f "$T/state/gh-factory-alerted" ]
+    [ ! -f "$T/state/gh-factory-held" ]
 
     rate_limit 0 0 60
     run check_gh_factory
-    [ "$(wc -l < "$NTFY_SENT")" -eq 2 ]       # a new episode alerts again
+    [ "$(wc -l < "$NTFY_SENT")" -eq 1 ]       # a new episode's first tick holds, not alerts
+    run check_gh_factory
+    [ "$(wc -l < "$NTFY_SENT")" -eq 2 ]       # its second tick alerts again
 }
 
 @test "check_gh_factory: an undelivered ntfy is retried next tick" {
     load_check
     rate_limit 0 0 60
     export STUB_NTFY_RC=1
-    run check_gh_factory
+    run check_gh_factory                      # first held tick: no ntfy attempt yet
+    [ ! -e "$NTFY_SENT" ]
+    run check_gh_factory                      # second tick: attempts, fails
     [ ! -f "$T/state/gh-factory-alerted" ]
     [[ "$output" == *"ntfy not delivered"* ]]
 }
@@ -184,6 +388,44 @@ load_check() {
     [[ "$output" == *"gh-factory: probe failed"* ]]
     [ ! -e "$NTFY_SENT" ]
     [ -f "$T/state/gh-factory-alerted" ]
+}
+
+@test "check_gh_factory: a blocked account the owner switch fixes is no episode" {
+    load_check
+    export ARCHON_RUN_AS=archon
+    touch "$T/state/gh-factory-alerted"
+    rate_limit 0 0 60
+    run check_gh_factory
+    [ "$status" -eq 0 ]
+    [ "$(cat "$T/active")" = alexsiri7 ]
+    [ ! -e "$NTFY_SENT" ]                      # no "blocked" alert
+    [ "$(wc -l < "$T/ntfy-curl")" -eq 1 ]      # the switch's own ntfy
+    [[ "$output" == *"gh-factory: recovered — alexsiri7, as archon"* ]]
+    [ ! -f "$T/state/gh-factory-alerted" ]
+}
+
+@test "check_gh_factory: a switch whose re-probe cannot tell is logged, not alerted as blocked" {
+    load_check
+    export ARCHON_RUN_AS=archon STUB_SWITCHED_FAIL="HTTP 502: Bad Gateway"
+    rate_limit 0 0 60
+    run check_gh_factory
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"gh-factory: probe failed — gh api rate_limit failed: HTTP 502: Bad Gateway"* ]]
+    [[ "$output" != *"BLOCKED"* ]]
+    [ ! -e "$NTFY_SENT" ]
+    [ "$(wc -l < "$T/ntfy-curl")" -eq 1 ]      # the switch's own ntfy
+}
+
+@test "check_gh_factory: blocked with no owner token to switch to alerts after 2 consecutive ticks" {
+    load_check
+    export ARCHON_RUN_AS=archon STUB_OWNER_TOKEN=""
+    rate_limit 0 0 60
+    run check_gh_factory
+    [ ! -e "$NTFY_SENT" ]                     # first held tick: no alert yet
+    run check_gh_factory
+    [ "$(wc -l < "$NTFY_SENT")" -eq 1 ]        # second consecutive tick: alerts
+    grep -q 'factory launches held: GitHub identity blocked | alexsiri7-factory, as archon: GraphQL limit 0' "$NTFY_SENT"
+    ! grep -q '^gh auth switch' "$ARGV"
 }
 
 @test "pipeline-health runs check_gh_factory every tick" {
