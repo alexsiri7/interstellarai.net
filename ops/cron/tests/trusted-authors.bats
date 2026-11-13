@@ -391,6 +391,7 @@ load_trust() {
     SCRIPT_FILE="$CRON_DIR/pipeline-health-cron.sh"
     # shellcheck disable=SC1090
     source <(awk '/^(check_pr_ci_retry|sha_attempt_decide)\(\)/{p=1} p{print} p && /^}$/{p=0}' "$SCRIPT_FILE")
+    health_launch_gate() { :; }; build_drift_request() { :; }
     load_trust
     STATE_DIR="$T/state"; mkdir -p "$STATE_DIR/prciretry" "$STATE_DIR/escalated"
     MAX_ATTEMPTS=3
@@ -417,6 +418,7 @@ load_trust() {
     SCRIPT_FILE="$CRON_DIR/pipeline-health-cron.sh"
     # shellcheck disable=SC1090
     source <(awk '/^(check_pr_ci_retry|sha_attempt_decide)\(\)/{p=1} p{print} p && /^}$/{p=0}' "$SCRIPT_FILE")
+    health_launch_gate() { :; }; build_drift_request() { :; }
     load_trust
     STATE_DIR="$T/state"; mkdir -p "$STATE_DIR/prciretry" "$STATE_DIR/escalated"
     MAX_ATTEMPTS=3
@@ -635,6 +637,7 @@ STUB
     SCRIPT_FILE="$CRON_DIR/pipeline-health-cron.sh"
     # shellcheck disable=SC1090
     source <(awk '/^(check_pr_ci_retry|sha_attempt_decide)\(\)/{p=1} p{print} p && /^}$/{p=0}' "$SCRIPT_FILE")
+    health_launch_gate() { :; }; build_drift_request() { :; }
     load_trust
     STATE_DIR="$T/state"; mkdir -p "$STATE_DIR/prciretry" "$STATE_DIR/escalated"
     MAX_ATTEMPTS=3

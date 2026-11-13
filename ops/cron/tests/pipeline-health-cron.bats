@@ -152,6 +152,7 @@ setup_main_ci_env() {
     load_tracked_labels
     load_fn find_tracked_issue
     load_fn sha_attempt_decide
+    health_launch_gate() { :; }  # launches allowed; the gate has its own tests
     load_fn fire_ship_and_settle
     load_fn open_escalations
     load_fn close_escalation
@@ -928,6 +929,7 @@ setup_stuck_prs_env() {
     nohup() { printf '%s\n' "$@" >> "$STATE_DIR/nohup-argv"; }
     disown() { :; }
     load_fn sha_attempt_decide
+    health_launch_gate() { :; }  # launches allowed; the gate has its own tests
     load_fn check_stuck_prs
     load_trust
     local old="2026-01-01T00:00:00Z" new

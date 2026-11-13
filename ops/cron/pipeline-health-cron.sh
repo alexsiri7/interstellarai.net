@@ -238,6 +238,8 @@ mkdir -p "$STATE_DIR/prciretry" "$STATE_DIR/escalated" \
 # Max archon-remediation attempts against a single head SHA before we stop
 # re-firing and ntfy the operator that the factory is stuck.
 MAX_ATTEMPTS=3
+# An escalated SHA gets one more attempt this long after it escalated.
+ESCALATION_RETRY_SECONDS="${ESCALATION_RETRY_SECONDS:-86400}"
 
 # Floor of every repo's deploy-lag threshold (see deploy_lag_threshold), and
 # so the age below which check_prod_deploy never asks for the threshold.
@@ -485,6 +487,12 @@ Added by \`pipeline-health-cron.sh\`, which keeps one escalation per PR rather t
 #                                       ntfy.
 #   SKIP_NTFY                         — same as SKIP but caller must ntfy now.
 #
+# An escalation is not a dead end: once its marker is ESCALATION_RETRY_SECONDS
+# old (24h), the same SHA gets one more FIRE (marked "<key>-<sha>.retried"), since
+# the cause is often gone by then — a quota pause, a flaky runner, an upstream
+# fix. The escalation issue stays open; it closes when the PR merges or CI
+# recovers, as before.
+#
 # The marker is always (re)written to "<current_sha>:<attempts>" so that a
 # SHA change resets the counter to 1 on the next FIRE and newer state wins.
 # ----------------------------------------------------------------------------
@@ -522,7 +530,42 @@ sha_attempt_decide() {
     echo "SKIP_NTFY"
     return
   fi
+  # One late retry per escalated SHA (see the header).
+  local escalated_at
+  escalated_at=$(stat -c %Y "$escalated_marker" 2>/dev/null || echo "")
+  if [ -n "$escalated_at" ] && [ ! -f "$escalated_marker.retried" ] \
+     && [ $(( $(date +%s) - escalated_at )) -ge "$ESCALATION_RETRY_SECONDS" ] \
+     && touch "$escalated_marker.retried" 2>/dev/null; then
+    attempts=$((recorded_attempts + 1))
+    echo "${current_sha}:${attempts}" > "$marker_file"
+    echo "FIRE $attempts"
+    return
+  fi
   echo "SKIP"
+}
+
+# ----------------------------------------------------------------------------
+# health_launch_gate — 0 when an archon launch from this tick can actually run:
+# the Claude quota is not paused (or the main account may take it) and the
+# factory GitHub identity can open PRs. Otherwise 1, with the reason in
+# HEALTH_LAUNCH_HELD. Callers check it BEFORE sha_attempt_decide: archon refuses
+# every launch during a quota pause, and a refused launch that still spent an
+# attempt is how Annie PR 1483 used all three in a pause on 2026-11-13, got
+# escalated and was never retried. Decided once per tick, like deadline_escalate.
+# ----------------------------------------------------------------------------
+HEALTH_LAUNCH_HELD=""
+HEALTH_LAUNCH_CHECKED=0
+health_launch_gate() {
+  if [ "$HEALTH_LAUNCH_CHECKED" = 0 ]; then
+    HEALTH_LAUNCH_CHECKED=1
+    HEALTH_LAUNCH_HELD=""
+    if ! quota_may_launch "pipeline-health"; then
+      HEALTH_LAUNCH_HELD="Claude rate limit in effect"
+    elif ! gh_factory_may_launch "pipeline-health"; then
+      HEALTH_LAUNCH_HELD="factory GitHub identity blocked"
+    fi
+  fi
+  [ -z "$HEALTH_LAUNCH_HELD" ]
 }
 
 # Labels that mean "this issue already has an owner" — any archon:* pipeline
@@ -765,6 +808,12 @@ https://github.com/alexsiri7/$project/issues/$tracked_num" \
       log "$project: main CI red at ${sha:0:10} — cooldown active (${elapsed}s < 2h since last issue filed), skipping"
       return
     fi
+  fi
+
+  # A launch archon would refuse must not spend an attempt or file an issue.
+  if ! health_launch_gate; then
+    log "$project: main CI red at ${sha:0:10} — held: $HEALTH_LAUNCH_HELD, retrying next tick"
+    return
   fi
 
   # SHA-scoped attempt tracking: new SHA resets counter, same SHA retries up
@@ -2344,7 +2393,12 @@ check_pr_ci_retry() {
         | select((.labels // []) | map(.name) | (index("hold") or index($held)) | not)
         | select(.statusCheckRollup | length > 0)
         | select(.statusCheckRollup | map(select((.name // .context) | IN("unsafe-change", "safe-change") | not) | .conclusion // "PENDING") | any(. == "FAILURE"))
-        | [(.number|tostring), .headRefOid, .headRefName, .title] | @tsv' \
+        | [(.number|tostring), .headRefOid, .headRefName,
+           ([.statusCheckRollup[]
+             | select(.conclusion == "FAILURE" and (.workflowName // "") != "" and (.completedAt // "") != "")
+             | select((.name // .context) | IN("unsafe-change", "safe-change") | not)
+             | "\(.workflowName)=\(.completedAt)"] | unique | join(";") | if . == "" then "-" else . end),
+           .title] | @tsv' \
     2>/dev/null || echo "")
 
   # Clear markers for PRs no longer failing (merged, closed, or recovered).
@@ -2379,9 +2433,25 @@ check_pr_ci_retry() {
 
   [ -n "$failed_prs" ] || return
 
-  while IFS=$'\t' read -r pr_num pr_sha pr_head pr_title; do
+  while IFS=$'\t' read -r pr_num pr_sha pr_head pr_fails pr_title; do
     [ -n "$pr_num" ] || continue
     [ -n "$pr_sha" ] || continue
+
+    # The failure may not be the PR's: a new advisory, a tool release or a
+    # runner change breaks every PR while main still shows its last green run
+    # (Annie's hono audit gate, 2026-11-13). Ask build drift to re-run main's
+    # copy of each failing workflow now rather than at its daily pass; if main
+    # goes red, check_main_ci fixes it once at the source. No Claude cost, so
+    # before every gate.
+    if [ "$pr_fails" != "-" ]; then
+      local fail wf_name failed_at
+      while IFS= read -r fail; do
+        [ -n "$fail" ] || continue
+        wf_name="${fail%=*}"
+        failed_at=$(date -d "${fail##*=}" +%s 2>/dev/null) || continue
+        build_drift_request "$project" "$wf_name" "$failed_at"
+      done < <(tr ';' '\n' <<< "$pr_fails")
+    fi
 
     # A running archon run owns the PR's worktree: its own rounds judge and fix
     # CI. archon-assist cannot check out a branch another worktree holds, so it
@@ -2402,6 +2472,10 @@ check_pr_ci_retry() {
     # Before sha_attempt_decide, so a PR held back here spends no attempt.
     if ! trust_comments_ok "$project" pr "$pr_num"; then
       log "$project: PR #$pr_num CI red but has untrusted comments or reviews — not firing archon-assist"
+      continue
+    fi
+    if ! health_launch_gate; then
+      log "$project: PR #$pr_num CI red at ${pr_sha:0:10} — held: $HEALTH_LAUNCH_HELD, no attempt spent"
       continue
     fi
     local marker="$STATE_DIR/prciretry/$project-pr$pr_num"
@@ -2508,6 +2582,10 @@ check_stuck_prs() {
     fi
     if ! trust_comments_ok "$project" pr "$pr_num"; then
       log "$project: PR #$pr_num stuck but has untrusted comments or reviews — not firing archon-pr-maintenance"
+      continue
+    fi
+    if ! health_launch_gate; then
+      log "$project: PR #$pr_num stuck ($merge_state) at ${pr_sha:0:10} — held: $HEALTH_LAUNCH_HELD, no attempt spent"
       continue
     fi
     local marker="$STATE_DIR/stuck-pr/$project-pr$pr_num"

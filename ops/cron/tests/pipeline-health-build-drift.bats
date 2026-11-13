@@ -381,6 +381,7 @@ EOF
 
 @test "an unreadable workflow file holds the whole pass back" {
     workflow 10 CI ci.yml "$PLAIN_CI"
+    early_recheck_setup
     workflow 11 Deploy deploy.yml $'on:\n  workflow_run:\n    workflows: [CI]'
     rm "$FIX/files/deploy.yml"
     push_runs 10 "$(run_json 500 "$HEAD_SHA" completed success 90000 90000)"
@@ -518,4 +519,92 @@ pending_rerun() {
     check_build_drift proj
 
     [ ! -f "$STATE_DIR/closed" ]
+}
+
+# ── Early recheck: a red PR asks for main's copy of the workflow to re-run ────
+# Annie 2026-11-13: new hono advisories failed the audit gate on every PR while
+# main's last green run predated them, so nothing re-ran main for ~20h.
+# Each case starts as if today's daily pass had already run.
+early_recheck_setup() { mkdir -p "$STATE_DIR/build-drift/pending" "$STATE_DIR/build-drift/request"; }
+
+@test "a red PR's request re-runs main's fresh run that predates the failure, even after today's pass" {
+    early_recheck_setup
+    workflow 10 CI ci.yml "$PLAIN_CI"
+    # Main ran 2h ago (inside the 20h window); the PR failed 1h ago.
+    push_runs 10 "$(run_json 500 "$HEAD_SHA" completed success 7200 7200)"
+    touch "$STATE_DIR/build-drift/proj-$(today)" "$STATE_DIR/build-drift/proj-10-$(today)"
+    build_drift_request proj CI "$(( $(date +%s) - 3600 ))"
+
+    check_build_drift proj
+
+    grep -qx "run rerun 500 --repo alexsiri7/proj" "$GH_LOG"
+    [ ! -f "$STATE_DIR/build-drift/request/proj--CI" ]
+    [ -f "$STATE_DIR/build-drift/recheck-proj-10" ]
+}
+
+@test "no request: a fresh run is left alone and today's pass is not repeated" {
+    early_recheck_setup
+    workflow 10 CI ci.yml "$PLAIN_CI"
+    push_runs 10 "$(run_json 500 "$HEAD_SHA" completed success 7200 7200)"
+    touch "$STATE_DIR/build-drift/proj-$(today)"
+
+    check_build_drift proj
+
+    ! grep -q "run rerun" "$GH_LOG"
+    ! grep -q "actions/workflows" "$GH_LOG"
+}
+
+@test "a request is not acted on when main ran the workflow after the PR failed" {
+    workflow 10 CI ci.yml "$PLAIN_CI"
+    early_recheck_setup
+    push_runs 10 "$(run_json 500 "$HEAD_SHA" completed success 600 600)"
+    touch "$STATE_DIR/build-drift/proj-$(today)" "$STATE_DIR/build-drift/proj-10-$(today)"
+    build_drift_request proj CI "$(( $(date +%s) - 3600 ))"
+
+    check_build_drift proj
+
+    ! grep -q "run rerun" "$GH_LOG"
+    [ ! -f "$STATE_DIR/build-drift/request/proj--CI" ]
+}
+
+@test "a handled failure is not requested again; a later failure inside the cooldown is dropped" {
+    early_recheck_setup
+    workflow 10 CI ci.yml "$PLAIN_CI"
+    push_runs 10 "$(run_json 500 "$HEAD_SHA" completed success 7200 7200)"
+    touch "$STATE_DIR/build-drift/proj-$(today)" "$STATE_DIR/build-drift/proj-10-$(today)"
+    local failed=$(( $(date +%s) - 3600 ))
+    build_drift_request proj CI "$failed"
+    check_build_drift proj
+    [ "$(grep -c "run rerun" "$GH_LOG")" -eq 1 ]
+
+    # The PR is still red at the same failure: the next tick asks again.
+    build_drift_request proj CI "$failed"
+    [ ! -f "$STATE_DIR/build-drift/request/proj--CI" ]
+
+    # A newer failure within the 6h cooldown: requested, then dropped unrun.
+    build_drift_request proj CI "$(( failed + 60 ))"
+    [ -f "$STATE_DIR/build-drift/request/proj--CI" ]
+    check_build_drift proj
+    [ "$(grep -c "run rerun" "$GH_LOG")" -eq 1 ]
+    [ ! -f "$STATE_DIR/build-drift/request/proj--CI" ]
+}
+
+@test "a request keeps the newest failure time" {
+    build_drift_request proj "Lint & Typecheck" 200
+    build_drift_request proj "Lint & Typecheck" 100
+    [ "$(cut -f2 "$STATE_DIR/build-drift/request/proj--Lint___Typecheck")" = 200 ]
+    [ "$(cut -f1 "$STATE_DIR/build-drift/request/proj--Lint___Typecheck")" = "Lint & Typecheck" ]
+}
+
+@test "a recheck still obeys the policy: a deploy workflow is never re-run" {
+    early_recheck_setup
+    workflow 11 Deploy deploy.yml "$PLAIN_CI"
+    push_runs 11 "$(run_json 501 "$HEAD_SHA" completed success 7200 7200)"
+    touch "$STATE_DIR/build-drift/proj-$(today)"
+    build_drift_request proj Deploy "$(( $(date +%s) - 3600 ))"
+
+    check_build_drift proj
+
+    ! grep -q "run rerun" "$GH_LOG"
+    ! grep -q "workflow run" "$GH_LOG"
 }

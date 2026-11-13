@@ -193,6 +193,7 @@ JSON
     # shellcheck source=../lib/trust.sh
     source "$(dirname "$SCRIPT_FILE")/lib/trust.sh"
     load_fn sha_attempt_decide
+    health_launch_gate() { :; }  # launches allowed; the gate has its own tests
     load_fn check_stuck_prs
 
     local sha tick
@@ -219,6 +220,7 @@ JSON
     trust_filter_prs() { cat; }
     trust_comments_ok() { return 0; }
     load_fn sha_attempt_decide
+    health_launch_gate() { :; }  # launches allowed; the gate has its own tests
     load_fn check_stuck_prs
     PR_LIST_FIXTURE='[{"number":1,"title":"stuck","headRefName":"archon/a","headRefOid":"s1","isDraft":false,"updatedAt":"2026-01-01T00:00:00Z","mergeStateStatus":"UNSTABLE"}]'
     echo "s1:3" > "$STATE_DIR/stuck-pr/test-project-pr1"
