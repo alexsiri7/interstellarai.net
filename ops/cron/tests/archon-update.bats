@@ -148,9 +148,20 @@ case "$*" in
             echo "@archon/cli test: (fail) $hidden [$timing]"; nfail=$((nfail+1))
         fi
         if [ -n "$crash" ]; then
+            # Mirrors real bun 1.4.3: the line right after the marker is always
+            # the "---" separator, then source context, THEN the "error: " line
+            # — never the error text itself immediately after the marker. A
+            # fixture that put "error: $crash" right after the marker (as this
+            # one used to) would pass even against code that paired the marker
+            # with the literal next line instead of the actual error line.
             echo "@archon/cli test: "
             echo "@archon/cli test: # Unhandled error between tests"
+            echo "@archon/cli test: -------------------------------"
+            echo "@archon/cli test: 1 | throw new Error(\"...\");"
+            echo "@archon/cli test:               ^"
             echo "@archon/cli test: error: $crash"
+            echo "@archon/cli test:       at /scratch/crash.test.ts:1:11"
+            echo "@archon/cli test: -------------------------------"
             nfail=$((nfail+1))
         fi
         rc=0
@@ -178,13 +189,21 @@ case "$*" in
         case "$PWD" in *-pristine) fail="$STUB_SCRIPTS_FAIL_PRISTINE"; crash="$STUB_SCRIPTS_CRASH_PRISTINE"; timing="6500.00ms" ;; esac
         nfail=0; rc=0
         if [ -n "$fail" ]; then echo "(fail) $fail [$timing]"; nfail=$((nfail+1)); fi
-        # An import-time throw is invisible to bun's own pass/fail tally (no
-        # "(fail)" line and no bump to the count either) — only the process exit
-        # code and the "# Unhandled error between tests" marker show it happened.
+        # An import-time throw gets no "(fail) <name>" line of its own, but real
+        # bun still bumps the final "N fail" tally for it (confirmed against bun
+        # 1.4.3: a package with only a crashing file still prints "1 fail"); the
+        # marker's next line is always the "---" separator and source context,
+        # not the error text, so the error line is emitted a few lines down.
         if [ -n "$crash" ]; then
             echo
             echo "# Unhandled error between tests"
+            echo "-------------------------------"
+            echo "1 | throw new Error(\"...\");"
+            echo "              ^"
             echo "error: $crash"
+            echo "      at /scratch/crash.test.ts:1:11"
+            echo "-------------------------------"
+            nfail=$((nfail+1))
             rc=1
         fi
         if [ "$nfail" -gt 0 ]; then

@@ -287,26 +287,38 @@ test_failures() {
 
 # unnamed_failure_count <log>: failures bun counted in its own per-package "N
 # fail" summary line(s) that have no matching "(fail) <name>" line — a crashed
-# import, a top-level throw, anything bun reports as "# Unhandled error between
-# tests" instead of a named test. Summed across every package summary in a
-# `--filter '*'` run, since each package gets its own "<prefix> N fail" line.
-# Also counts every "<pkg>: Exited with code N" line — bun's `--filter`
-# orchestrator's fallback when a package produced no summary at all — and
-# every unprefixed "# Unhandled error between tests" (the test-scripts step
-# runs plain `bun test`, with no --filter wrapper and so no package prefix on
-# any line). Both are one-crash-per-line signals that never also appear in a
-# package's own "N fail" tally, so counting every occurrence can't double-count
-# a crash that is already named or already tallied some other way — unlike
-# checking whether the package ever printed a completion line ANYWHERE in the
-# log, which an unrelated, successfully-finishing group of the same package
-# can satisfy, hiding a sibling group's silent crash.
+# import, a top-level throw, anything bun reports via a "# Unhandled error
+# between tests" marker instead of a named test, is already added into that
+# package's own "N fail" tally by bun itself (confirmed against real bun
+# 1.4.3), so summing "N fail" across every package summary and subtracting
+# the named count already accounts for every MARKED crash — no
+# "# Unhandled error between tests" marker is added on top of that, which
+# would double-count the same crash.
+# The gap that sum alone misses is a crash with no marker at all: bun's
+# `--filter` orchestrator prints "<pkg>: Exited with code N" for every
+# package that exits non-zero, marked crash or not, so on its own it can't
+# tell a redundant trailer (same crash the "N fail" sum already has, via its
+# marker) from a genuinely uncounted one (no marker for that package at all —
+# a missing script, a config error, or a sibling test group within the
+# package's own runner that crashed without reaching that package's final
+# tally). Only the latter is additional: an "Exited with code" line is counted
+# iff its package printed no "# Unhandled error between tests" marker at all.
 # Never negative: an unrelated named failure must not offset a crash.
 unnamed_failure_count() {
-    local named total
+    local named total unmarked_exits
     named=$(test_failures "$1" | grep -c .)
     total=$(grep -oE '[0-9]+ fail$' "$1" 2>/dev/null | awk '{s+=$1} END{print s+0}')
-    total=$(( total + $(grep -cE '^[^:]+: Exited with code [1-9][0-9]*$' "$1" 2>/dev/null) ))
-    total=$(( total + $(grep -cE '^# Unhandled error between tests$' "$1" 2>/dev/null) ))
+    unmarked_exits=$(awk '
+        NR == FNR {
+            if ($0 ~ /: # Unhandled error between tests$/) { split($0, a, ":"); marker[a[1]] = 1 }
+            next
+        }
+        /^[^:]+: Exited with code [1-9][0-9]*$/ {
+            split($0, a, ":"); if (!(a[1] in marker)) n++
+        }
+        END { print n+0 }
+    ' "$1" "$1" 2>/dev/null)
+    total=$(( total + ${unmarked_exits:-0} ))
     [ "$total" -ge "$named" ] || total=$named
     echo $(( total - named ))
 }
@@ -315,18 +327,43 @@ unnamed_failure_count() {
 # than a bare package name, so the merge-vs-pristine regression decision
 # (comm -13, in baseline_tests) does not cancel a new crash in a package
 # against an unrelated, already-known, non-reproducing crash in that SAME
-# package. A "# Unhandled error between tests" crash is paired with its
-# following "error: ..." line (the marker line alone is identical for every
-# crash in the package); the test-scripts step's unprefixed form of the same
-# marker is paired the same way, under the implicit identity "scripts" (no
-# --filter wrapper there, so no package prefix at all); a package that exited
-# non-zero with no summary line at all is kept whole ("<pkg> test: Exited with
-# code N"), so two different exit codes in the same package are not conflated
-# either. One identity per line, sorted unique.
+# package. A "# Unhandled error between tests" crash is paired with the
+# "error: ..." line that names it — NOT the literal next line: real bun always
+# prints a "---" separator (then source context) right after the marker, so
+# the search scans forward for the first "error: " line, crossing into a later
+# crash's own marker (re-pairing from there) if one never appears. The
+# test-scripts step's unprefixed form of the same marker is paired the same
+# way, under the implicit identity "scripts" (no --filter wrapper there, so no
+# package prefix at all); a package that exited non-zero with no summary line
+# at all is kept whole ("<pkg> test: Exited with code N"), so two different
+# exit codes in the same package are not conflated either. One identity per
+# line, sorted unique.
 unnamed_failure_packages() {
     {
-        awk '/: # Unhandled error between tests$/ { line = $0; if ((getline nxt) > 0) { print line " :: " nxt } else { print line } }' "$1" 2>/dev/null
-        awk '/^# Unhandled error between tests$/ { line = $0; if ((getline nxt) > 0) { print "scripts: " line " :: " nxt } else { print "scripts: " line } }' "$1" 2>/dev/null
+        awk '
+            /: # Unhandled error between tests$/ {
+                line = $0; n = 0
+                while (n < 30) {
+                    if ((getline nxt) <= 0) { print line; next }
+                    n++
+                    if (nxt ~ /error: /) { print line " :: " nxt; next }
+                    if (nxt ~ /: # Unhandled error between tests$/) { print line; line = nxt; n = 0; continue }
+                }
+                print line
+            }
+        ' "$1" 2>/dev/null
+        awk '
+            /^# Unhandled error between tests$/ {
+                line = $0; n = 0
+                while (n < 30) {
+                    if ((getline nxt) <= 0) { print "scripts: " line; next }
+                    n++
+                    if (nxt ~ /^error: /) { print "scripts: " line " :: " nxt; next }
+                    if (nxt ~ /^# Unhandled error between tests$/) { print "scripts: " line; line = nxt; n = 0; continue }
+                }
+                print "scripts: " line
+            }
+        ' "$1" 2>/dev/null
         grep -E '^[^:]+: Exited with code [1-9][0-9]*$' "$1" 2>/dev/null
     } | sort -u
 }
