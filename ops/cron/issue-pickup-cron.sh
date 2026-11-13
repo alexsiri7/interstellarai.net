@@ -49,6 +49,9 @@ gh_factory_may_launch "issue-pickup" || GH_FACTORY_HELD=1
 # re-queued. Archon workflows usually finish in under an hour; 2h gives
 # plenty of margin for slow CI and rate-limit backoff.
 STUCK_AGE_SECONDS=7200
+# After a blocked verdict an issue is not relaunched for an hour, unless someone
+# comments after it (blocked_verdict_recent, #306).
+LAUNCH_BLOCKED_COOLDOWN_SECONDS=3600
 BASE_DIR="/mnt/ext-fast"
 LOG_PREFIX="[issue-pickup]"
 
@@ -148,6 +151,83 @@ has_open_blockers() {
   children=$(gh api "repos/alexsiri7/$project/issues/$issue_num/sub_issues" \
     --jq '[.[] | select(.state == "open")] | length' 2>/dev/null || echo 0)
   [ "${children:-0}" -gt 0 ]
+}
+
+# launch_blockers <project> <issue> [body] — the open issues blocking <issue>,
+# checked right before a launch (#306): its native blocked_by dependencies and
+# its sub-issues, in any repository, and the open issues its body names on a
+# "depends on / blocked by / waits on" line or in the list right under one.
+# Loose mentions ("Related: #9") never count, and a named ref that is a PR, is
+# closed or does not exist is ignored, so a typo cannot hold an issue forever.
+# Prints `owner/repo<TAB>number<TAB>source` (dependency, sub-issue or body), one
+# per blocker. Exit 0 with blockers, 1 with none, 2 when a lookup failed: unlike
+# has_open_blockers this one gates a launch, so the caller fails closed.
+launch_blockers() {
+  local project="$1" issue="$2" body="${3:-}" this="alexsiri7/$1" found named ref r n out
+  local open='.[] | select(.state == "open") | [(.repository_url | sub("^.*/repos/"; "")), .number'
+  found=$(gh api "repos/$this/issues/$issue/dependencies/blocked_by?per_page=100" \
+    --jq "$open, \"dependency\"] | @tsv" 2>/dev/null) || return 2
+  found+=$'\n'$(gh api "repos/$this/issues/$issue/sub_issues?per_page=100" \
+    --jq "$open, \"sub-issue\"] | @tsv" 2>/dev/null) || return 2
+
+  # mawk: no IGNORECASE, hence tolower().
+  named=$(awk '
+    /^[[:space:]]*```/ { fence = !fence; next }
+    fence { next }
+    list && /^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]/ { print; next }
+    { list = 0 }
+    tolower($0) ~ /(^|[^a-z])(depends? on|blocked (by|on)|waits? (on|for))([^a-z]|$)/ {
+      print; list = /:[[:space:]]*$/
+    }' <<<"$body" \
+    | grep -oE 'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/[0-9]+|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+|(^|[^A-Za-z0-9/_.-])#[0-9]+' \
+    | while IFS= read -r ref; do
+        case "$ref" in
+          https://*) r="${ref#https://github.com/}"; r="${r%/issues/*}" ;;
+          */*) r="${ref%#*}" ;;
+          *) r="$this" ;;
+        esac
+        n="${ref##*[#/]}"
+        [ "${r,,}" = "${this,,}" ] && r="$this"
+        [ "$r" = "$this" ] && [ "$n" = "$issue" ] && continue
+        printf '%s\t%s\n' "$r" "$n"
+      done | awk '!seen[tolower($0)]++' | head -n 10)
+
+  while IFS=$'\t' read -r r n; do
+    [ -n "$r" ] || continue
+    if ! out=$(gh api "repos/$r/issues/$n" \
+        --jq '[(if .pull_request then "pr" else "issue" end), .state] | @tsv' 2>&1); then
+      [[ "$out" == *"HTTP 404"* ]] && continue
+      return 2
+    fi
+    [ "$out" = $'issue\topen' ] && found+=$'\n'"$r"$'\t'"$n"$'\tbody'
+  done <<<"$named"
+
+  found=$(awk -F'\t' 'NF == 3 && !seen[tolower($1) "#" $2]++' <<<"$found")
+  [ -n "$found" ] || return 1
+  printf '%s\n' "$found"
+}
+
+# blocker_refs <project> — launch_blockers' lines on stdin as one phrase,
+# "#50 (sub-issue), owner/other#7 (dependency)".
+blocker_refs() {
+  awk -F'\t' -v this="alexsiri7/$1" '
+    { printf "%s%s#%s (%s)", (NR > 1 ? ", " : ""), (tolower($1) == tolower(this) ? "" : $1), $2, $3 }'
+}
+
+# blocked_verdict_recent <project> <issue> — true when the issue's newest
+# comment is the settle comment for a blocked verdict (lib/settle-ship-outcome.sh)
+# and is under LAUNCH_BLOCKED_COOLDOWN_SECONDS old: a run on it now would only
+# reach the same verdict (#306; #304 was relaunched 27 minutes after one). Any
+# later comment is a person speaking, or Lachesis taking a default, and lifts
+# the hold. Exit 1 when it is not, 2 when the comments could not be read.
+blocked_verdict_recent() {
+  local newest at verdict
+  newest=$(gh api --paginate "repos/alexsiri7/$1/issues/$2/comments" \
+    --jq '.[-1] // empty | [.created_at, ((.body // "") | startswith("archon-ship finished without a PR: Not done: blocked on "))] | @tsv' \
+    2>/dev/null) || return 2
+  IFS=$'\t' read -r at verdict <<<"$(tail -n 1 <<<"$newest")"
+  [ "$verdict" = true ] || return 1
+  [ $(( $(date +%s) - $(date -d "$at" +%s) )) -lt "$LAUNCH_BLOCKED_COOLDOWN_SECONDS" ]
 }
 
 has_archon_label() {
@@ -783,10 +863,34 @@ pick_and_fire() {
   # wedging the rest of the queue behind it. The same for the ship circuit
   # breaker (lib/ship-breaker.sh): an issue whose recent runs keep failing is
   # parked for a human instead of relaunched, and the next candidate is tried.
-  local issue="" cand rc
+  # And for the blocker gate (#306): an issue under an hour past a blocked
+  # verdict, or with open blockers its labels missed (a sub-issue or a body
+  # naming one added after it was queued, a cross-repo dependency), stays
+  # queued and is checked again next tick. It is not relabelled archon:blocked:
+  # promote_unblocked reads native links only and would flip a body-named block
+  # straight back.
+  local issue="" cand rc blockers
   for cand in "${candidates[@]}"; do
     if ! trust_comments_ok "$project" issue "$cand"; then
       log "$project: #$cand has comments by untrusted authors (or they could not be read) — not starting archon on it"
+      continue
+    fi
+    rc=0; blocked_verdict_recent "$project" "$cand" || rc=$?
+    if [ "$rc" = 0 ]; then
+      log "$project: #$cand — blocked verdict less than an hour old, not relaunching yet"
+      continue
+    elif [ "$rc" = 2 ]; then
+      log "$project: #$cand — could not read its comments; not launching blind"
+      continue
+    fi
+    rc=0; blockers=$(launch_blockers "$project" "$cand" \
+      "$(jq -r --argjson n "$cand" '.[] | select(.number == $n) | .body // ""' <<<"$queued_json" 2>/dev/null)") || rc=$?
+    if [ "$rc" = 0 ]; then
+      log "$project: #$cand — open blockers ($(blocker_refs "$project" <<<"$blockers")), not launching"
+      SUMMARY_BLOCKED=$((SUMMARY_BLOCKED + 1))
+      continue
+    elif [ "$rc" = 2 ]; then
+      log "$project: #$cand — could not read its blockers; not launching blind"
       continue
     fi
     rc=0; ship_breaker_check "$project" "$cand" || rc=$?
@@ -813,8 +917,12 @@ pick_and_fire() {
 # LACHESIS_PICKUP switch is on (lib/lachesis.sh). next_issue is asked once per
 # tick, across every registered repo: it returns the issue to work first and,
 # under also_eligible, the best issue of each other repo, in backlog order
-# (interrupt, security, focus, active milestone, age), already filtered for
-# readiness, open blockers, in-progress, needs-author, sprint budget and pace.
+# (interrupt, security, focus, active milestone, age), filtered for readiness,
+# in-progress, needs-author, sprint budget and pace. Its blocker filter misses
+# sub-issues and blockers in other repositories, so the offered issue's blockers
+# are checked again before launch and, when open, recorded so next_issue stops
+# offering it (lachesis_hold_blocked); an issue under an hour past a blocked
+# verdict is not relaunched either (#306).
 # Each repo whose slot is free launches its own entry; a repo with a live or
 # parked run keeps the no-stacking guards. Labels gate nothing here. Every wait
 # for the author is a Lachesis question, which labels the issue needs-author so
@@ -927,6 +1035,26 @@ lachesis_pick() {
 
   settle_defaulted "$project" "$issue" && return
 
+  rc=0; blocked_verdict_recent "$project" "$issue" || rc=$?
+  if [ "$rc" = 0 ]; then
+    log "$project: #$issue — blocked verdict less than an hour old, not relaunching yet"
+    SUMMARY_NOTE="#$issue waits an hour after its blocked verdict"
+    return
+  elif [ "$rc" = 2 ]; then
+    log "$project: #$issue — could not read its comments; not launching blind"
+    return
+  fi
+  local blockers
+  rc=0; blockers=$(launch_blockers "$project" "$issue" "$(jq -r '.body // ""' <<<"$view")") || rc=$?
+  if [ "$rc" = 0 ]; then
+    lachesis_hold_blocked "$project" "$issue" "$blockers"
+    SUMMARY_NOTE="#$issue blocked by $(blocker_refs "$project" <<<"$blockers")"
+    return
+  elif [ "$rc" = 2 ]; then
+    log "$project: #$issue — could not read its blockers; not launching blind"
+    return
+  fi
+
   rc=0; SHIP_BREAKER_ASK=lachesis_ask ship_breaker_check "$project" "$issue" || rc=$?
   if [ "$rc" = 1 ]; then
     log "$project: #$issue — parked by the ship circuit breaker, not relaunching"
@@ -937,6 +1065,40 @@ lachesis_pick() {
   fi
 
   fire_ship "$project" "$issue"
+}
+
+# lachesis_hold_blocked <project> <issue> <launch_blockers lines> — record
+# <issue>'s open blockers in Lachesis so next_issue stops offering it: one in
+# this repo as a dependency (add_dependency), those in other repositories as
+# one question waiting on them (ask_question waits_on), which Lachesis answers
+# itself once they close. A native dependency in this repo is already one.
+# They mirror links the owner made; nothing is asked of anyone.
+lachesis_hold_blocked() {
+  local project="$1" issue="$2" lines="$3" r n src failed="" recorded=0 refs
+  local -a cross=()
+  while IFS=$'\t' read -r r n src; do
+    if [ "${r,,}" != "alexsiri7/${project,,}" ]; then
+      cross+=("$r#$n")
+    elif [ "$src" != dependency ]; then
+      if lachesis_depend "$project" "$issue" "$n"; then recorded=1; else failed+=", add_dependency #$n"; fi
+    fi
+  done <<<"$lines"
+  if [ "${#cross[@]}" -gt 0 ]; then
+    if lachesis_wait_on "$project" "$issue" \
+        "The factory will not start archon on #$issue: it waits on ${cross[*]}, still open. Lachesis releases it when they close. To run it sooner, remove them as its blockers (its relationships, sub-issues, or the line in its body naming them)." \
+        "Checked before launch (#306): GitHub shows these open." "${cross[@]}"; then
+      recorded=1
+    else
+      failed+=", ask_question waits_on ${cross[*]}"
+    fi
+  fi
+  refs=$(blocker_refs "$project" <<<"$lines")
+  log "$project: #$issue — open blockers ($refs), not launching"
+  [ -n "$failed" ] \
+    && log "$project: #$issue — could not record its blockers in Lachesis (${failed#, }); not launching, tried again next tick"
+  [ "$recorded" = 1 ] || return 0
+  lachesis_note "$project" "$issue" "Not launched: open blockers $refs; recorded as dependencies or a waits_on question before launch (#306)." \
+    || log "$project: #$issue — could not record the note in Lachesis"
 }
 
 # settle_defaulted <project> <issue> — true when it took the default of a

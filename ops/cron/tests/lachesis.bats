@@ -106,6 +106,15 @@ STUB
     [ "$status" -ne 0 ]
 }
 
+@test "lachesis_wait_on asks a question waiting on other repos' issues, with no default (#306)" {
+    export LACHESIS_CALL_CMD="$T/bin/lachesis"
+    lachesis_wait_on testproj 12 'q' 'ctx' alexsiri7/other#5 alexsiri7/other#6
+    run jq -c . <<<"$(sed -E 's/^ask_question //' "$LACHESIS_ARGV")"
+    [ "$output" = '{"repo":"alexsiri7/testproj","question":"q","kind":"clarification","asker":"factory","blocks":[12],"issue":12,"context":"ctx","waits_on":[{"repo":"alexsiri7/other","issue":5},{"repo":"alexsiri7/other","issue":6}]}' ]
+    LACHESIS_RC=1 run lachesis_wait_on testproj 12 'q' 'ctx' alexsiri7/other#5
+    [ "$status" -ne 0 ]
+}
+
 @test "lachesis_ask_once asks once per issue and key, and again after a failure" {
     export LACHESIS_CALL_CMD="$T/bin/lachesis"
     LACHESIS_RC=1 run lachesis_ask_once testproj 12 k 'q?'

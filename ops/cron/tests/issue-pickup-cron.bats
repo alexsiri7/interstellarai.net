@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 # Tests for dedupe_sentry, settle_parked, unstick_stale, auto_queue, auto_triage,
-# promote_unblocked, pick_and_fire and lachesis_pick in ops/cron/issue-pickup-cron.sh.
+# promote_unblocked, pick_and_fire, lachesis_pick and their launch gate
+# (launch_blockers, blocked_verdict_recent) in ops/cron/issue-pickup-cron.sh.
 #
 # Run: bunx bats ops/cron/tests/issue-pickup-cron.bats
 
@@ -21,7 +22,13 @@ setup() {
     # trust gate itself fails closed on a missing author (see trust.bats).
     # Comment listings (trust_comments_ok) answer from comments-<N>, one login
     # per line; absent = no comments. The newest comment's body, as
-    # settle_defaulted reads it (a JSON string), comes from last-comment-<N>.
+    # settle_defaulted reads it (a JSON string), comes from last-comment-<N>;
+    # as blocked_verdict_recent reads it (created_at<TAB>is-a-blocked-verdict),
+    # from newest-comment-<N>.
+    # The launch gate's blockers (launch_blockers): the open native ones, as
+    # `owner/repo<TAB>N<TAB>source` lines, from blocker-list-<N> and
+    # child-list-<N> (GH_BLOCKERS_FAIL fails both); a ref the body names, from
+    # ref-<owner>-<repo>-<N> ("issue<TAB>open"), absent = HTTP 404.
     cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_ARGV"
@@ -34,6 +41,14 @@ case "$*" in
   *"issue list"*"--label archon:skipped"*)     owned "$GH_FIXTURES/skipped.json" ;;
   *"issue list"*"--state closed"*)             owned "$GH_FIXTURES/closed.json" ;;
   *"issue list"*)                              owned "$GH_FIXTURES/open.json" ;;
+  *dependencies/blocked_by*repository_url*)    [ -n "${GH_BLOCKERS_FAIL:-}" ] && exit 1
+                                               cat "$GH_FIXTURES/blocker-list-$(issue_of "$*")" 2>/dev/null || true ;;
+  *sub_issues*repository_url*)                 [ -n "${GH_BLOCKERS_FAIL:-}" ] && exit 1
+                                               cat "$GH_FIXTURES/child-list-$(issue_of "$*")" 2>/dev/null || true ;;
+  *"api repos/"*pull_request*)                 f="$GH_FIXTURES/ref-$(sed -E 's#^api repos/([^/]+)/([^/]+)/issues/([0-9]+) .*#\1-\2-\3#' <<<"$*")"
+                                               [ -e "$f" ] || { echo 'gh: Not Found (HTTP 404)' >&2; exit 1; }
+                                               cat "$f" ;;
+  *"api --paginate repos/"*/comments*startswith*) cat "$GH_FIXTURES/newest-comment-$(issue_of "$*")" 2>/dev/null || true ;;
   *"api --paginate repos/"*/comments*@json*)   cat "$GH_FIXTURES/last-comment-$(issue_of "$*")" 2>/dev/null || echo null ;;
   *"api --paginate repos/"*/comments*)         [ -n "${GH_COMMENTS_FAIL:-}" ] && exit 1
                                                cat "$GH_FIXTURES/comments-$(issue_of "$*")" 2>/dev/null || true ;;
@@ -94,10 +109,13 @@ STUB
     PROMOTED_ISSUES=()
 
     # shellcheck disable=SC1090
-    source <(grep -E '^(INGEST|ARCHON)_LABELS=\(|^STUCK_AGE_SECONDS=' "$SCRIPT_FILE")
+    source <(grep -E '^(INGEST|ARCHON)_LABELS=\(|^(STUCK_AGE|LAUNCH_BLOCKED_COOLDOWN)_SECONDS=' "$SCRIPT_FILE")
     # shellcheck source=../lib/human-labels.sh
     source "$(dirname "$SCRIPT_FILE")/lib/human-labels.sh"
     load_fn has_open_blockers
+    load_fn launch_blockers
+    load_fn blocker_refs
+    load_fn blocked_verdict_recent
     load_fn has_archon_label
     load_fn has_human_label
     load_fn ship_slot_busy
@@ -1086,6 +1104,7 @@ STUB
     load_fn lachesis_pick
     load_fn lachesis_may_triage
     load_fn settle_defaulted
+    load_fn lachesis_hold_blocked
 }
 
 # next_issue offering <repo>#<n> first and otherrepo#<m> under also_eligible.
@@ -1403,4 +1422,212 @@ default_taken() {
     lachesis_pick testproj
     [ "$SUMMARY_ACTION" = "settled #42 (default taken)" ]
     grep -q "#42 — recorded the dependency, but could not post its comment" "$LOGGED"
+}
+
+# ── the launch gate: open blockers and a fresh blocked verdict (#306) ────────
+
+# blocked_verdict_at <N> <date -d offset> <true|false> — #N's newest comment,
+# posted then, is (or is not) the settle comment for a blocked verdict.
+blocked_verdict_at() {
+    printf '%s\t%s\n' "$(date -u -d "$2" +%FT%TZ)" "$3" > "$T/fixtures/newest-comment-$1"
+}
+
+# issue_body <N> <body> — the issue view fixture for #N with that body.
+issue_body() {
+    jq -n --argjson n "$1" --arg b "$2" \
+        '{number: $n, author: {login: "alexsiri7"}, labels: [], title: "t", body: $b}' > "$T/fixtures/labels-$1"
+}
+
+@test "gate: a parent with open sub-issues is not launched; Lachesis records them as dependencies" {
+    lachesis_on
+    next_offers alexsiri7/testproj 42
+    issue_json 42
+    printf 'alexsiri7/testproj\t50\tsub-issue\nalexsiri7/testproj\t51\tsub-issue\n' > "$T/fixtures/child-list-42"
+
+    lachesis_pick testproj
+
+    [ "$SUMMARY_ACTION" = "none" ]
+    [ "$(gh_calls -- 'archon:in-progress')" -eq 0 ]
+    grep -qx 'add_dependency {"repo":"alexsiri7/testproj","issue_number":42,"blocked_by_issue_number":50}' "$LACHESIS_ARGV"
+    grep -qx 'add_dependency {"repo":"alexsiri7/testproj","issue_number":42,"blocked_by_issue_number":51}' "$LACHESIS_ARGV"
+    grep -q '^add_note .*Not launched: open blockers #50 (sub-issue), #51 (sub-issue)' "$LACHESIS_ARGV"
+    [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 0 ]
+    [ "$SUMMARY_NOTE" = "#42 blocked by #50 (sub-issue), #51 (sub-issue)" ]
+}
+
+@test "gate: a cross-repo blocker is one Lachesis waits_on question with no default" {
+    lachesis_on
+    next_offers alexsiri7/testproj 42
+    issue_json 42
+    printf 'alexsiri7/otherrepo\t1479\tdependency\nalexsiri7/otherrepo\t1486\tdependency\n' > "$T/fixtures/blocker-list-42"
+
+    lachesis_pick testproj
+
+    [ "$SUMMARY_ACTION" = "none" ]
+    [ "$(gh_calls -- 'archon:in-progress')" -eq 0 ]
+    [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 1 ]
+    run jq -c '{blocks, issue, waits_on, default}' <<<"$(sed -n 's/^ask_question //p' "$LACHESIS_ARGV")"
+    [ "$output" = '{"blocks":[42],"issue":42,"waits_on":[{"repo":"alexsiri7/otherrepo","issue":1479},{"repo":"alexsiri7/otherrepo","issue":1486}],"default":null}' ]
+    [ "$(grep -c '^add_dependency' "$LACHESIS_ARGV")" -eq 0 ]
+}
+
+@test "gate: a same-repo native dependency is skipped with nothing to record" {
+    lachesis_on
+    next_offers alexsiri7/testproj 42
+    issue_json 42
+    printf 'alexsiri7/TestProj\t7\tdependency\n' > "$T/fixtures/blocker-list-42"
+
+    lachesis_pick testproj
+
+    [ "$SUMMARY_ACTION" = "none" ]
+    ! grep -qE '^(add_dependency|ask_question|add_note)' "$LACHESIS_ARGV"
+}
+
+@test "gate: an open issue the body names on a dependency line blocks; a loose mention does not" {
+    lachesis_on
+    next_offers alexsiri7/testproj 42
+    issue_body 42 $'Depends on #8.\n\nRelated: #9, alexsiri7/otherrepo#3'
+    printf 'issue\topen\n' > "$T/fixtures/ref-alexsiri7-testproj-8"
+    printf 'issue\topen\n' > "$T/fixtures/ref-alexsiri7-testproj-9"
+    printf 'issue\topen\n' > "$T/fixtures/ref-alexsiri7-otherrepo-3"
+
+    lachesis_pick testproj
+
+    [ "$SUMMARY_ACTION" = "none" ]
+    grep -qx 'add_dependency {"repo":"alexsiri7/testproj","issue_number":42,"blocked_by_issue_number":8}' "$LACHESIS_ARGV"
+    [ "$(grep -c '^add_dependency' "$LACHESIS_ARGV")" -eq 1 ]
+    [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 0 ]
+    [ "$(gh_calls -- 'issues/9 ')" -eq 0 ]
+}
+
+@test "gate: body-named refs that are closed, PRs, missing or in code blocks launch as usual" {
+    lachesis_on
+    next_offers alexsiri7/testproj 42
+    issue_body 42 $'Depends on #8, #10 and #11.\n\n```\nblocked by #12\n```'
+    printf 'issue\tclosed\n' > "$T/fixtures/ref-alexsiri7-testproj-8"
+    printf 'pr\topen\n' > "$T/fixtures/ref-alexsiri7-testproj-10"
+    printf 'issue\topen\n' > "$T/fixtures/ref-alexsiri7-testproj-12"
+
+    lachesis_pick testproj
+
+    [ "$SUMMARY_ACTION" = "pickup #42" ]
+    [ "$(gh_calls -- 'issues/12 ')" -eq 0 ]
+}
+
+@test "gate: a list under a 'Blocked by:' line and cross-repo links in it are read" {
+    issue_body 42 $'## Plan\n\nBlocked by:\n- #8\n* https://github.com/alexsiri7/otherrepo/issues/5\n\n- #9 is unrelated'
+    printf 'issue\topen\n' > "$T/fixtures/ref-alexsiri7-testproj-8"
+    printf 'issue\topen\n' > "$T/fixtures/ref-alexsiri7-testproj-9"
+    printf 'issue\topen\n' > "$T/fixtures/ref-alexsiri7-otherrepo-5"
+
+    run launch_blockers testproj 42 "$(jq -r .body "$T/fixtures/labels-42")"
+
+    [ "$status" -eq 0 ]
+    [ "$output" = $'alexsiri7/testproj\t8\tbody\nalexsiri7/otherrepo\t5\tbody' ]
+}
+
+@test "gate: a blocker found natively and in the body is listed once, as the native one" {
+    printf 'alexsiri7/testproj\t8\tsub-issue\n' > "$T/fixtures/child-list-42"
+    printf 'issue\topen\n' > "$T/fixtures/ref-alexsiri7-testproj-8"
+
+    run launch_blockers testproj 42 'Waits on #8 and #42.'
+
+    [ "$status" -eq 0 ]
+    [ "$output" = $'alexsiri7/testproj\t8\tsub-issue' ]
+}
+
+@test "gate: an issue under an hour past its blocked verdict is not relaunched" {
+    lachesis_on
+    next_offers alexsiri7/testproj 42
+    issue_json 42
+    blocked_verdict_at 42 '-10 minutes' true
+
+    lachesis_pick testproj
+
+    [ "$SUMMARY_ACTION" = "none" ]
+    [ "$SUMMARY_NOTE" = "#42 waits an hour after its blocked verdict" ]
+    [ "$(gh_calls -- 'archon:in-progress')" -eq 0 ]
+}
+
+@test "gate: an older blocked verdict, or a comment after it, launches as usual" {
+    lachesis_on
+    next_offers alexsiri7/testproj 42
+    issue_json 42
+    for newest in '-2 hours:true' '-10 minutes:false'; do
+        SUMMARY_ACTION="none"
+        blocked_verdict_at 42 "${newest%:*}" "${newest##*:}"
+        lachesis_pick testproj
+        [ "$SUMMARY_ACTION" = "pickup #42" ] || { echo "not launched: $newest"; return 1; }
+    done
+}
+
+@test "gate: pick_and_fire passes over a fresh blocked verdict and a parent to the next queued issue" {
+    echo '[{"number":42},{"number":43},{"number":44}]' > "$T/fixtures/queued.json"
+    blocked_verdict_at 42 '-10 minutes' true
+    printf 'alexsiri7/testproj\t50\tsub-issue\n' > "$T/fixtures/child-list-43"
+    load_fn pick_and_fire
+
+    pick_and_fire testproj
+
+    [ "$SUMMARY_ACTION" = "pickup #44" ]
+    [ "$(gh_calls -- 'issue edit 42 ')" -eq 0 ]
+    [ "$(gh_calls -- 'issue edit 43 ')" -eq 0 ]
+    [ "$SUMMARY_BLOCKED" -eq 1 ]
+    grep -q "#42 — blocked verdict less than an hour old" "$LOGGED"
+    grep -q "#43 — open blockers (#50 (sub-issue)), not launching" "$LOGGED"
+}
+
+@test "gate: pick_and_fire reads the queued issue's body for named blockers" {
+    jq -n '[{number: 42, body: "Depends on #8"}, {number: 43, body: "b"}]' > "$T/fixtures/queued.json"
+    printf 'issue\topen\n' > "$T/fixtures/ref-alexsiri7-testproj-8"
+    load_fn pick_and_fire
+
+    pick_and_fire testproj
+
+    [ "$SUMMARY_ACTION" = "pickup #43" ]
+    grep -q "#42 — open blockers (#8 (body))" "$LOGGED"
+}
+
+@test "gate: blockers or comments that cannot be read launch nothing in either mode" {
+    echo '[{"number":42}]' > "$T/fixtures/queued.json"
+    load_fn pick_and_fire
+    export GH_BLOCKERS_FAIL=1
+    pick_and_fire testproj
+    [ "$SUMMARY_ACTION" = "none" ]
+    grep -q "#42 — could not read its blockers; not launching blind" "$LOGGED"
+
+    lachesis_on
+    next_offers alexsiri7/testproj 42
+    issue_json 42
+    lachesis_pick testproj
+    [ "$SUMMARY_ACTION" = "none" ]
+    [ "$(gh_calls -- 'archon:in-progress')" -eq 0 ]
+
+    unset GH_BLOCKERS_FAIL
+    issue_body 42 'Depends on #8'
+    gh() { if [[ "$*" == *pull_request* ]]; then echo 'HTTP 502' >&2; return 1; fi; command gh "$@"; }
+    : > "$LOGGED"
+    lachesis_pick testproj
+    [ "$SUMMARY_ACTION" = "none" ]
+    grep -q "#42 — could not read its blockers; not launching blind" "$LOGGED"
+
+    gh() { if [[ "$*" == *startswith* ]]; then return 1; fi; command gh "$@"; }
+    : > "$LOGGED"
+    lachesis_pick testproj
+    [ "$SUMMARY_ACTION" = "none" ]
+    grep -q "#42 — could not read its comments; not launching blind" "$LOGGED"
+}
+
+@test "gate: a blocker Lachesis cannot record launches nothing and says so" {
+    lachesis_on
+    next_offers alexsiri7/testproj 42
+    issue_json 42
+    printf 'alexsiri7/testproj\t50\tsub-issue\n' > "$T/fixtures/child-list-42"
+    export LACHESIS_DEPEND_RC=1
+
+    lachesis_pick testproj
+
+    [ "$SUMMARY_ACTION" = "none" ]
+    grep -q "#42 — could not record its blockers in Lachesis (add_dependency #50); not launching, tried again next tick" "$LOGGED"
+    [ "$(grep -c '^add_note' "$LACHESIS_ARGV")" -eq 0 ]
 }
