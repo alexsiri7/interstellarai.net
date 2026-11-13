@@ -217,6 +217,7 @@ tail -f ~/.local/state/archon-cron/logs/issue-pickup.log
   - archon can write its own tree but not the engine or the owner's clones.
   - The environment of every archon process is free of secret-looking variables.
   - All toolchains are present.
+  - `gh` resolves to the comment-marking wrapper first on `PATH` (#298).
   - There are no claude.ai connectors.
 - **Credentials.** A real Claude request as archon. The gh token is a fine-grained PAT (`github_pat_`). A write probe, creating a ref at the all-zero sha, which can never succeed, answers 422 on every factory repo and 403/404 on the Archon fork. That measures the token's grant; `.permissions.push` would only show the owner's role. A 422 on the fork is a FAIL, or a WARN after `install.sh --allow-all-repos-token` (see (a)).
 - **Factory path.** `archon doctor`. The cron's own `archon` (shim → wrapper) lists runs from archon's DB. A `--dry-run` of `archon-assist` through the wrapper works (no provider call). With `--live`, one real run.
@@ -435,6 +436,7 @@ These were grepped for `secrets.env|railway|psql|SUPABASE|CLOUDFLARE|wrangler|DA
 | `install.sh` | — | prepare / `--set-gh-token` / `--set-claude-token` / `--[no-]allow-all-repos-token` / `--drain` / `--cutover` / `--rollback` / `--status` / `--dry-run` |
 | `archon-as-archon` | `/usr/local/bin/archon-as-archon` (root 0755) | the wrapper |
 | `fuel_probe.py` | `/usr/local/lib/archon-user/fuel_probe.py` (root 0644) | the `fuel-probe` verb's rate-limit-header probe (#165) |
+| `gh-shim/gh` | `/usr/local/lib/archon-user/gh-shim/gh` (root 0755) | stamps `<!-- lachesis:automated -->` on every issue/PR comment an archon session posts; first on the PATH of `archon-as-archon` and `archon-serve.service` (#298) |
 | `sudoers-archon-user` | `/etc/sudoers.d/archon-user` (0440) | asiri → archon: the wrapper, and `NOPASSWD:NOSETENV: ALL`; asiri → root: `systemctl restart archon-serve.service` and the three entrypoints below |
 | `../archon-ops/archon-ops` | `/usr/local/sbin/archon-{user-install,host-install,ops-promote}` (root 0755, three copies) | run the snapshot's installers; promote the snapshot (`/usr/local/lib/archon-ops`) |
 | `archon-serve.service` | `/etc/systemd/system/archon-serve.service` | the server as archon |
@@ -455,7 +457,7 @@ Also written by `install.sh`:
 ## Tests
 
 ```bash
-bunx bats ops/cron/tests/archon-as-archon.bats ops/cron/tests/run-as.bats ops/cron/tests/archon-user-install.bats ops/cron/tests/archon-ops.bats
+bunx bats ops/cron/tests/archon-as-archon.bats ops/cron/tests/run-as.bats ops/cron/tests/archon-user-install.bats ops/cron/tests/archon-ops.bats ops/cron/tests/gh-shim.bats
 bunx bats ops/cron/tests/                   # whole suite: flag off must change nothing
 shellcheck -x -P SCRIPTDIR ops/host/archon-user/{install.sh,verify.sh,archon-as-archon} ops/host/archon-ops/archon-ops ops/cron/lib/run-as.sh ops/cron/ops-self-update.sh
 visudo -c -f ops/host/archon-user/sudoers-archon-user     # works without root

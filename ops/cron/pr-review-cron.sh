@@ -56,6 +56,8 @@ archon_runs_snapshot
 source "$SCRIPT_DIR/lib/merged-reviews.sh"
 # shellcheck source=lib/trust.sh
 source "$SCRIPT_DIR/lib/trust.sh"
+# shellcheck source=lib/held-review.sh
+source "$SCRIPT_DIR/lib/held-review.sh"
 
 BASE_DIR="${BASE_DIR:-/mnt/ext-fast}"
 STATE_DIR="$HOME/.archon/state/pr-review"
@@ -160,6 +162,15 @@ process_project() {
     if [ "${on_hold:-false}" = "true" ]; then
       held=$((held + 1))
       log "$project: PR #$pr_num is on hold — skipping"
+      continue
+    fi
+
+    # held-pr-review.sh handed it back at this head: its approval is what
+    # Phase 1 merges, its block report what Phase 2 corrects. A report fired
+    # now would land over it.
+    if held_review_at_head "$project" "$pr_num" "$sha"; then
+      held=$((held + 1))
+      log "$project: PR #$pr_num — reviewed by held-pr-review at this head, skipping"
       continue
     fi
 

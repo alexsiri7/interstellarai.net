@@ -16,13 +16,14 @@ setup() {
     export HOME="$T/home"
     STUB_BIN="$HOME/.local/bin"
     mkdir -p "$STUB_BIN" "$T/gh"
-    unset _ARCHON_TRUST_SH _ARCHON_DEADLINES_SH TRUSTED_AUTHORS TRUSTED_ISSUE_BOTS TRUSTED_MERGE_ONLY_AUTHORS TRUSTED_COMMENT_BOTS DEADLINE_FRESH_SECONDS DEADLINE_NOW
+    unset _ARCHON_TRUST_SH _ARCHON_DEADLINES_SH _OWNER_DIGEST_SH _OWNER_PATHS_SH TRUSTED_AUTHORS TRUSTED_ISSUE_BOTS TRUSTED_MERGE_ONLY_AUTHORS TRUSTED_COMMENT_BOTS DEADLINE_FRESH_SECONDS DEADLINE_NOW
     export ARCHON_RUN_AS=archon
     export ARCHON_CRON_TRUST_FILE="$T/no-trust.env"
     export NTFY_TOPIC=test-topic
     export TRUST_STATE_DIR="$T/trust"
     export DEADLINE_STATE_DIR="$T/deadlines"
     export OPS_REVIEW_STATE="$T/state"
+    export OWNER_DIGEST_STATE="$T/digest"
     export OPS_REPO=alexsiri7/interstellarai.net
     export OPS_SELF_UPDATE="$T/self-update"
     export LACHESIS_CALL_CMD="$T/lachesis"
@@ -83,7 +84,7 @@ pr() { # pr <number> <head sha> [mergeState] [files...] — a green, owner's PR
         title: "Fix the thing", body: "Fixes #30", author: {login: "alexsiri7"},
         isCrossRepository: false, labels: [], closingIssuesReferences: [{number: 30}],
         statusCheckRollup: [{name: "bats", conclusion: "SUCCESS"}]}' > "$GH/view-$n.json"
-    [ $# -gt 0 ] || set -- ops/cron/pr-maintenance-cron.sh
+    [ $# -gt 0 ] || set -- ops/cron/pr-review-cron.sh
     printf '%s\n' "$@" > "$GH/files-$n"
     printf 'diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n@@ -1 +1 @@\n-old\n+new\n' "$1" "$1" "$1" "$1" > "$GH/diff-$n"
 }
@@ -101,17 +102,20 @@ calls() { grep -c "^$1" "$T/argv" || true; }
 
 # ---------------------------------------------------------------- deny list
 @test "deny list: the sensitive set is a hit, ordinary ops code is not" {
+    source "$CRON/lib/owner-paths.sh"
     source <(awk '/^ops_review_sensitive\(\)/{p=1} p{print} p && /^}$/{p=0}' "$CRON/ops-pr-review.sh")
     for f in ops/host/archon-user/install.sh ops/host/sudoers-archon-cron \
              ops/cron/lib/trust.sh ops/cron/lib/screen.sh ops/cron/lib/claude-auth.sh ops/cron/lib/secrets.sh \
-             secrets.env ops/cron/doppler-push.sh ops/cron/crontab ops/cron/lib/run-as.sh \
+             secrets.env ops/cron/doppler-push.sh .env config/credentials.json ops/cron/crontab ops/cron/lib/run-as.sh \
              ops/cron/lib/archon-shim/archon ops/cron/archon-projects.txt \
-             ops/cron/ops-pr-review.sh ops/cron/ops-self-update.sh .github/unsafe-change.yml; do
+             ops/cron/ops-pr-review.sh ops/cron/ops-self-update.sh .github/unsafe-change.yml \
+             ops/cron/held-pr-review.sh ops/cron/pr-maintenance-cron.sh \
+             ops/cron/lib/held-review.sh ops/cron/lib/owner-digest.sh ops/cron/lib/owner-paths.sh; do
         run ops_review_sensitive <<<"$f"
         [ "$status" -eq 0 ] || { echo "not flagged: $f"; false; }
         [[ "$output" == "$f ("*")" ]]
     done
-    for f in ops/cron/pr-maintenance-cron.sh ops/cron/README.md .github/workflows/deploy.yml \
+    for f in ops/cron/pr-review-cron.sh ops/cron/README.md .github/workflows/deploy.yml \
              ops/cron/lib/archon-active-runs.sh ops/cron/tests/pr-hold-label.bats; do
         run ops_review_sensitive <<<"$f"
         [ "$status" -eq 1 ] || { echo "flagged: $f"; false; }
@@ -149,15 +153,30 @@ calls() { grep -c "^$1" "$T/argv" || true; }
 }
 
 # ---------------------------------------------------------------- decisions
-@test "a sensitive PR is never merged: one comment, one ntfy, no review" {
+@test "a sensitive PR is never merged: one comment, one entry in the owner's weekly question, no review" {
     mark 500 "$SHA1"; pr 500 "$SHA1" CLEAN ops/cron/lib/trust.sh
     review
     review
     [ "$(calls 'gh pr merge')" -eq 0 ]
     [ "$(calls claude)" -eq 0 ]
     [ "$(calls 'gh pr comment')" -eq 1 ]
-    [ "$(calls curl)" -eq 1 ]
+    [ "$(calls curl)" -eq 0 ]
     grep -q "ops/cron/lib/trust.sh (trust, screening or Claude auth)" "$T/comments"
+    jq -e --arg s "$SHA1" '.project == "interstellarai.net" and .pr == 500 and .sha == $s and (.verdict | startswith("it touches the sensitive set"))' \
+      "$OWNER_DIGEST_STATE/pending/interstellarai.net-500"
+}
+
+@test "a sensitive PR that cannot go into the weekly question gets no comment and is retried" {
+    mark 500 "$SHA1"; pr 500 "$SHA1" CLEAN ops/cron/lib/trust.sh
+    : > "$T/not-a-dir"
+    OWNER_DIGEST_STATE="$T/not-a-dir" review
+    [ "$(calls 'gh pr comment')" -eq 0 ]
+    [ ! -e "$OPS_REVIEW_STATE/reviewed-500" ]
+    [[ "$output" == *"could not comment or add it to the weekly question"* ]]
+    review
+    [ "$(calls 'gh pr comment')" -eq 1 ]
+    [ -e "$OPS_REVIEW_STATE/reviewed-500" ]
+    [ -e "$OWNER_DIGEST_STATE/pending/interstellarai.net-500" ]
 }
 
 @test "a PR closing an issue only screening vetted waits for the owner" {
