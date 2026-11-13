@@ -48,15 +48,19 @@ source "$SCRIPT_DIR/lib/trust.sh"
 # Parked items get a clock; pipeline-health escalates them (lib/deadlines.sh).
 # shellcheck source=lib/deadlines.sh
 source "$SCRIPT_DIR/lib/deadlines.sh"
+# shellcheck source=lib/held-review.sh
+source "$SCRIPT_DIR/lib/held-review.sh"
 BASE_DIR="${BASE_DIR:-/mnt/ext-fast}"
 LOG_PREFIX="[pr-maintenance]"
 # Same directory the crontab sends this script's own log to; survives a reboot
 # (/tmp does not). `gh pr ready` stderr is appended here across ticks.
 LOG_DIR="${ARCHON_CRON_LOG_DIR:-$HOME/.local/state/archon-cron/logs}"
 mkdir -p "$LOG_DIR"
-# A PR carrying this label is left alone by every phase below (and by
-# pr-review-cron.sh). It is how a human parks a PR that must stay open and
-# unmerged — e.g. an asset-upload PR whose head another workflow fetches from.
+# A PR carrying this label (or $TRUST_HELD_LABEL) is left alone by every phase
+# below and by pr-review-cron.sh. held-pr-review.sh reviews a fully trusted,
+# green one instead, and hands it back here only at a head it approved or
+# blocked; a PR that must stay open and unmerged says so in its body, and that
+# review leaves it to the owner.
 HOLD_LABEL="hold"
 # One marker per project and PR holding the "<headRefOid> <mergeStateStatus>"
 # Phase 2 last launched archon-pr-maintenance for, one
@@ -442,6 +446,38 @@ pr_scope_decision() {
   esac
 }
 
+# held_review_merge_gate <number> <headRefOid> — what held-pr-review.sh's
+# record (lib/held-review.sh) lets Phase 1 do with an unlabelled PR it lists.
+# Sets HELD_APPROVED=1 when the review approved this very head: the merge
+# skips the scope check and is pinned to that head. Exit 1, with a log line,
+# when the PR must not merge this tick: the review blocked this head (Phase 2
+# corrects it), or the head moved since the review, so the PR is held again for
+# the next one. No record, or the owner handed back a PR the review left to
+# them: exit 0, and Phase 1 goes on as for any PR.
+held_review_merge_gate() {
+  local rec sha verdict label
+  local -a edit
+  HELD_APPROVED=0
+  rec=$(held_review_get "$PROJECT" "$1") || return 0
+  read -r sha verdict label <<<"$rec"
+  if [ "$sha" != "$2" ]; then
+    log "$PROJECT: PR #$1 moved since held-pr-review's $verdict at ${sha:0:7} — holding it ($label) for another review"
+    edit=(--add-label "$label")
+    [ "$verdict" != approve ] || edit+=(--remove-label "$TRUST_APPROVED_LABEL")
+    gh pr edit "$1" "${edit[@]}" >/dev/null 2>&1 || log "$PROJECT: PR #$1 — could not add $label, retrying next tick"
+    return 1
+  fi
+  case "$verdict" in
+    approve) HELD_APPROVED=1 ;;
+    block)
+      log "$PROJECT: PR #$1 — held-pr-review returned it for correction at ${sha:0:7}, not merging"
+      return 1 ;;
+    owner)
+      log "$PROJECT: PR #$1 — the owner took it off $label after held-pr-review left it to them"
+      held_review_forget "$PROJECT" "$1" ;;
+  esac
+}
+
 # pr_checks_green <number> — exit 0 when the PR has at least one check and
 # every one concluded success, neutral or skipped: the rule the deliver tail's
 # check-ci applies, so a run resumed on it concludes instead of re-pausing.
@@ -601,10 +637,33 @@ for PROJECT in "${PROJECTS[@]}"; do
   done <<< "$GREEN_DRAFTS"
 
   # --- Phase 1: Merge CLEAN PRs directly (bash only, zero AI cost) ---
-  CLEAN_PRS=$(list_prs merge '.isDraft == false and .mergeStateStatus == "CLEAN"')
+  # Also an UNSTABLE or BLOCKED one held-pr-review handed back: GitHub never
+  # reports CLEAN for a PR whose unsafe-change check failed. Only a record at
+  # its very head merges it (held_review_merge_gate). One with no such record
+  # yet gets the scope check below instead, so it is labelled for
+  # held-pr-review.sh rather than silently never merged and never reviewed.
+  CLEAN_PRS=$(list_prs merge '.isDraft == false and (.mergeStateStatus | IN("CLEAN", "UNSTABLE", "BLOCKED"))')
 
-  while IFS=$'\t' read -r PR HEAD HOLD SHA _ _ BODY; do
+  while IFS=$'\t' read -r PR HEAD HOLD SHA STATE _ BODY; do
     [ -n "$PR" ] || continue
+    if [ "$STATE" != CLEAN ] && ! held_review_get "$PROJECT" "$PR" >/dev/null; then
+      # Not CLEAN with no held-review record: this got here only because a
+      # required check (usually unsafe-change) failed, so it will never reach
+      # the merge attempt below — but a PR closing a screened issue still
+      # needs the label that routes it to held-pr-review.sh, or it never gets
+      # reviewed at all (#267 R1).
+      pr_on_hold "$PR" "$HOLD" && continue
+      if SCOPE_JSON=$(gh pr view "$PR" --json title,body,closingIssuesReferences,statusCheckRollup 2>/dev/null) && [ -n "$SCOPE_JSON" ]; then
+        SCOPE=$(pr_scope_decision "$PR" "$SCOPE_JSON")
+        case "$SCOPE" in
+          ok|wait) ;;
+          *)
+            log "$PROJECT: PR #$PR is $STATE — not auto-merged: ${SCOPE#hold }"
+            gh pr edit "$PR" --add-label "$TRUST_HELD_LABEL" >/dev/null 2>&1 || true ;;
+        esac
+      fi
+      continue
+    fi
     pr_on_hold "$PR" "$HOLD" && continue
     if pr_owned_by_live_run "$PR" "$HEAD" "$BODY"; then
       log "$PROJECT: PR #$PR ($HEAD) is owned by a live archon run — merging after it exits"
@@ -616,7 +675,9 @@ for PROJECT in "${PROJECTS[@]}"; do
       deadline_mark ops-merge "$PROJECT" "$PR" "$SHA" "$HEAD" "$MERGE_HOLD"
       continue
     fi
-    log "$PROJECT: PR #$PR is CLEAN — merging directly"
+    held_review_merge_gate "$PR" "$SHA" || continue
+    [ "$STATE" = CLEAN ] || [ "$HELD_APPROVED" = 1 ] || continue
+    log "$PROJECT: PR #$PR is $STATE — merging directly"
     # Left to itself GitHub builds the squash message out of the branch's commit
     # subjects, so a CI-authored "update snapshots" commit carrying a skip-ci
     # token lands on main and GitHub then creates no workflow run at all for the
@@ -631,8 +692,15 @@ for PROJECT in "${PROJECTS[@]}"; do
       continue
     fi
     # A PR built from an issue only automated screening vetted merges only
-    # once the repo's unsafe-change scope check passed.
-    SCOPE=$(pr_scope_decision "$PR" "$MERGE_JSON")
+    # once the repo's unsafe-change scope check passed, or held-pr-review
+    # approved its head.
+    SCOPE=ok
+    PIN=()
+    if [ "$HELD_APPROVED" = 1 ]; then
+      PIN=(--match-head-commit "$SHA")
+    else
+      SCOPE=$(pr_scope_decision "$PR" "$MERGE_JSON")
+    fi
     case "$SCOPE" in
       ok) ;;
       wait)
@@ -641,8 +709,6 @@ for PROJECT in "${PROJECTS[@]}"; do
       *)
         log "$PROJECT: PR #$PR — not merging: ${SCOPE#hold }"
         gh pr edit "$PR" --add-label "$TRUST_HELD_LABEL" >/dev/null 2>&1 || true
-        trust_notify_once "$PROJECT" pr-scope "$PR" \
-          "PR #$PR on $PROJECT not auto-merged: ${SCOPE#hold }. Review it: https://github.com/alexsiri7/$PROJECT/pull/$PR"
         continue ;;
     esac
     MERGE_TITLE=$(ci_skip_clean_line "$(jq -r '.title // ""' <<<"$MERGE_JSON" || echo "")")
@@ -654,13 +720,19 @@ for PROJECT in "${PROJECTS[@]}"; do
     MERGE_BODY=$(strip_ci_skip_tokens "$(jq -r '.body // ""' <<<"$MERGE_JSON" || echo "")")
     # Surface stderr to the cron log so actual failures (permissions, branch
     # protection, etc.) are diagnosable on the next tick instead of vanishing.
-    if gh pr merge "$PR" --squash --auto --delete-branch \
-         --subject "$MERGE_SUBJECT" --body "$MERGE_BODY" 2>&1 \
-       || gh pr merge "$PR" --squash --delete-branch \
+    # Auto-merge would wait for ever on a failed required unsafe-change
+    # check, so a PR that is not CLEAN merges now or not at all.
+    if { [ "$STATE" = CLEAN ] && gh pr merge "$PR" --squash --auto --delete-branch "${PIN[@]}" \
+           --subject "$MERGE_SUBJECT" --body "$MERGE_BODY" 2>&1; } \
+       || gh pr merge "$PR" --squash --delete-branch "${PIN[@]}" \
             --subject "$MERGE_SUBJECT" --body "$MERGE_BODY" 2>&1; then
+      [ "$HELD_APPROVED" = 0 ] || held_review_forget "$PROJECT" "$PR"
       abandon_reviews "$REPO_DIR" "$PROJECT" "$PR" || :
     else
       log "$PROJECT: PR #$PR — could not merge, skipping"
+      [ "$HELD_APPROVED" = 0 ] || trust_notify_once "$PROJECT" held-merge-failed "$PR" \
+        "held-pr-review approved PR #$PR on $PROJECT at ${SHA:0:10}, but it could not be merged ($STATE; see pr-maintenance.log). https://github.com/alexsiri7/$PROJECT/pull/$PR" \
+        "Approved held PR not merging"
     fi
   done <<< "$CLEAN_PRS"
 
@@ -754,18 +826,26 @@ for PROJECT in "${PROJECTS[@]}"; do
   # bot's PR (dependabot: upstream release notes in the body) never gets here;
   # Phase 1b asks dependabot to rebase its own instead.
   # A CLEAN PR still open here is one Phase 1 would not merge (an ops/ PR
-  # waiting for the owner, a failed run's PR). It counts only when its review
-  # report on this very head says ready: false, action: correct (#173): it gets
-  # one archon-assist correction per head, and the push it makes is
-  # pr-review-cron's to review again. Until that review lands, the latest
-  # report is on the old head and nothing relaunches.
-  CANDIDATES=$(list_prs full '(.isDraft == false and (.mergeStateStatus == "BEHIND" or .mergeStateStatus == "DIRTY" or .mergeStateStatus == "UNSTABLE" or .mergeStateStatus == "UNKNOWN" or .mergeStateStatus == "CLEAN")) or (.isDraft == true and .mergeStateStatus == "DIRTY")')
+  # waiting for the owner, a failed run's PR, one held-pr-review blocked). It
+  # counts only when its review report on this very head says ready: false,
+  # action: correct (#173): it gets one archon-assist correction per head, and
+  # the push it makes is pr-review-cron's to review again. Until that review
+  # lands, the latest report is on the old head and nothing relaunches.
+  # A PR held-pr-review blocked at its head is corrected the same way in any
+  # state: its failed unsafe-change check leaves it UNSTABLE or BLOCKED.
+  CANDIDATES=$(list_prs full '(.isDraft == false and (.mergeStateStatus == "BEHIND" or .mergeStateStatus == "DIRTY" or .mergeStateStatus == "UNSTABLE" or .mergeStateStatus == "UNKNOWN" or .mergeStateStatus == "CLEAN" or .mergeStateStatus == "BLOCKED")) or (.isDraft == true and .mergeStateStatus == "DIRTY")')
 
   ACTIONABLE=""
   while IFS=$'\t' read -r PR HEAD HOLD SHA STATE _ BODY; do
     [ -n "$PR" ] || continue
     pr_on_hold "$PR" "$HOLD" && continue
-    if [ "$STATE" = CLEAN ]; then
+    CORRECT=0
+    if [ "$STATE" = CLEAN ] || [[ "$(held_review_get "$PROJECT" "$PR")" == "$SHA block "* ]]; then
+      CORRECT=1
+    elif [ "$STATE" = BLOCKED ]; then
+      continue
+    fi
+    if [ "$CORRECT" = 1 ]; then
       correction_launched_for "$PR" "$SHA" && continue
     else
       maintenance_launched_for "$PR" "$SHA" "$STATE" && continue
@@ -774,7 +854,7 @@ for PROJECT in "${PROJECTS[@]}"; do
       log "$PROJECT: PR #$PR ($HEAD) needs maintenance but is owned by a live archon run — leaving it to the run"
       continue
     fi
-    if [ "$STATE" = CLEAN ]; then
+    if [ "$CORRECT" = 1 ]; then
       # A failed run's PR is the review-retry phase's to resume.
       pr_left_by_failed_run "$PR" "$HEAD" && continue
       [ "$(review_not_ready_action "$PR" "$SHA")" = correct ] || continue
@@ -788,7 +868,7 @@ for PROJECT in "${PROJECTS[@]}"; do
       continue
     fi
     ACTIONABLE="$PR"
-    if [ "$STATE" = CLEAN ]; then
+    if [ "$CORRECT" = 1 ]; then
       ACTIONABLE_NEED="a review correction"
       ACTIONABLE_MARKER="corrected"
       ACTIONABLE_KEY="$SHA"

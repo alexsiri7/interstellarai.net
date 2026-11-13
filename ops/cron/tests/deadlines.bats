@@ -168,6 +168,21 @@ keep() {
     grep -q 'Issue #3 on alexsiri7/proj has waited over 24 hours for an answer from its author' "$ARCHON_ARGV"
 }
 
+@test "pipeline-health check_deadlines: the owner's weekly question is not a needs-author deadline" {
+    # shellcheck disable=SC1090
+    source <(awk '/^check_deadlines\(\)/{p=1} p{print} p && /^}$/{p=0}' "$CRON_DIR/pipeline-health-cron.sh")
+    trust_filter_issues() { cat; }
+    stall_check() { :; }
+    deadline_escalate() { :; }
+    REPOS=(proj)
+    at 0
+    echo '[{"number": 3, "title": "Fix it", "labels": [{"name": "needs-author"}]},
+           {"number": 4, "title": "Owner review: 1 PRs waiting", "labels": [{"name": "needs-author"}, {"name": "owner-digest"}]}]' > "$T/open.json"
+    check_deadlines
+    [ -f "$(item needs-author--proj--3)" ]
+    [ ! -e "$(item needs-author--proj--4)" ]
+}
+
 @test "untrusted items get the ntfy only, never a salvage or a comment" {
     keep untrusted proj 7 s1 b "untrusted comments or reviews" 30
     deadline_escalate
