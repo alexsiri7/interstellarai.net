@@ -36,11 +36,20 @@
 #      that no other workflow names its file (a watchdog that redeploys on any
 #      green ci.yml run, as Annie's does).
 #
+# Early recheck: check_pr_ci_retry calls build_drift_request for each workflow a
+# PR fails on. The next pass re-runs main's copy of that workflow, under the
+# same policy, when main's newest run of it finished before the PR failure
+# (rather than BUILD_DRIFT_STALE_SECONDS ago), at most once per workflow per
+# BUILD_DRIFT_RECHECK_COOLDOWN_SECONDS. A failure that is not the PR's then turns
+# main red and is fixed once, at the source, instead of once per PR.
+#
 # State in $STATE_DIR/build-drift/:
 #   <project>-<YYYYMMDD>            the project's daily pass completed
 #   <project>-<wfid>-<YYYYMMDD>     that workflow decided today (acted or skipped)
 #   pending/<project>-<wfid>        a drift run to judge on later ticks
 #   rerun-<run id>                  a HEAD rerun, so check_main_ci can say "drift"
+#   request/<project>--<workflow>   "<name>\t<epoch>": a PR failed it then
+#   recheck-<project>-<wfid>        an early recheck ran (cooldown)
 # A marker is written only once its gh call succeeded, so a failure retries on
 # the next tick. Costs GitHub Actions minutes, never Claude tokens, except when a
 # real failure is filed and archon is fired on it.
@@ -57,6 +66,30 @@ BUILD_DRIFT_RERUN_MAX_AGE_SECONDS="${BUILD_DRIFT_RERUN_MAX_AGE_SECONDS:-2505600}
 # A pending drift run nobody can find (dispatch never registered, rerun never
 # started) is dropped after this; the next daily pass tries again.
 BUILD_DRIFT_PENDING_MAX_SECONDS="${BUILD_DRIFT_PENDING_MAX_SECONDS:-21600}"
+# At most one early recheck per workflow per this long.
+BUILD_DRIFT_RECHECK_COOLDOWN_SECONDS="${BUILD_DRIFT_RECHECK_COOLDOWN_SECONDS:-21600}"
+# A request whose workflow never shows up (a third-party check) is dropped after this.
+BUILD_DRIFT_REQUEST_MAX_SECONDS="${BUILD_DRIFT_REQUEST_MAX_SECONDS:-86400}"
+
+# build_drift_key <workflow name>: a file-name-safe form of it.
+build_drift_key() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'; }
+
+# build_drift_request <project> <workflow name> <epoch>: a PR failed that
+# workflow at <epoch>; keep the newest such time.
+build_drift_request() {
+  local dir="$STATE_DIR/build-drift/request" f old done_at
+  mkdir -p "$dir" 2>/dev/null || return 0
+  f="$dir/$1--$(build_drift_key "$2")"
+  # Already handled for this failure (or a later one): the PR stays red tick
+  # after tick, and each request costs a pass over the repo's workflow files.
+  done_at=$(cat "$dir/.done-$1--$(build_drift_key "$2")" 2>/dev/null) || done_at=""
+  case "$done_at" in ''|*[!0-9]*) ;; *) if [ "$done_at" -ge "$3" ]; then return 0; fi ;; esac
+  if [ -f "$f" ]; then
+    old=$(cut -f2 "$f" 2>/dev/null) || old=""
+    case "$old" in ''|*[!0-9]*) ;; *) if [ "$old" -ge "$3" ]; then return 0; fi ;; esac
+  fi
+  printf '%s\t%s\n' "$2" "$3" > "$f"
+}
 
 BUILD_DRIFT_DENY_RE='release|deploy|publish|pages|migrat|production|staging|deliver|promot|rollout|rollback|store|listing|screenshot|dns|cname|one-shot|watchdog|monitor|uptime|backup|sync|stale|dependabot|dependency graph|update-graph|unsafe-change|label|triage'
 BUILD_DRIFT_ALLOW_RE='(^|[^a-z])(ci|tests?|lint|checks?|validate|validation|openspec|integration|scan|verify|build)([^a-z]|$)'
@@ -203,7 +236,7 @@ build_drift_dispatch() {
 # workflow. 0 when decided for today (acted or deliberately skipped), 1 when a
 # gh call failed and the next tick should try again.
 build_drift_workflow() {
-  local project="$1" head="$2" dir="$3" wf="$4"
+  local project="$1" head="$2" dir="$3" wf="$4" since="${5:-}"
   local id name path policy file now
   id=$(echo "$wf" | jq -r '.id')
   name=$(echo "$wf" | jq -r '.name')
@@ -260,7 +293,12 @@ build_drift_workflow() {
     log "$project: drift: skip \"$name\" — run $run_id is in flight"
     return 0
   fi
-  if [ $(( now - last )) -lt "$BUILD_DRIFT_STALE_SECONDS" ]; then
+  if [ -n "$since" ]; then
+    if [ "$last" -ge "$since" ]; then
+      log "$project: drift: recheck \"$name\" not needed — main ran it after the PR failure"
+      return 0
+    fi
+  elif [ $(( now - last )) -lt "$BUILD_DRIFT_STALE_SECONDS" ]; then
     log "$project: drift: skip \"$name\" — ran $(( (now - last) / 3600 ))h ago"
     return 0
   fi
@@ -516,7 +554,12 @@ check_build_drift() {
 
   build_drift_judge "$project"
 
-  [ -f "$dir/$project-$today" ] && return 0
+  mkdir -p "$dir/request"
+  local requested=0 rf
+  for rf in "$dir/request/$project--"*; do
+    if [ -f "$rf" ]; then requested=1; break; fi
+  done
+  if [ -f "$dir/$project-$today" ] && [ "$requested" = 0 ]; then return 0; fi
 
   local head workflows
   head=$(gh api "repos/alexsiri7/$project/commits/main" --jq '.sha' 2>/dev/null || echo "")
@@ -552,6 +595,31 @@ check_build_drift() {
     while IFS= read -r wf; do
       [ -n "$wf" ] || continue
       id=$(echo "$wf" | jq -r '.id')
+      # An early recheck a red PR asked for (see the header).
+      local req since now_s key
+      key="$project--$(build_drift_key "$(echo "$wf" | jq -r '.name')")"
+      req="$dir/request/$key"
+      if [ -f "$req" ]; then
+        since=$(cut -f2 "$req" 2>/dev/null) || since=""
+        now_s=$(date +%s)
+        case "$since" in ''|*[!0-9]*) rm -f "$req"; since="" ;; esac
+        if [ -n "$since" ] && [ -f "$dir/recheck-$project-$id" ] \
+           && [ $(( now_s - $(stat -c %Y "$dir/recheck-$project-$id" 2>/dev/null || echo 0) )) -lt "$BUILD_DRIFT_RECHECK_COOLDOWN_SECONDS" ]; then
+          log "$project: drift: recheck of $(echo "$wf" | jq -r '.name') asked for, but one ran within $((BUILD_DRIFT_RECHECK_COOLDOWN_SECONDS / 3600))h"
+          echo "$since" > "$dir/request/.done-$key"
+          rm -f "$req"; since=""
+        fi
+        if [ -n "$since" ]; then
+          if build_drift_workflow "$project" "$head" "$content_dir" "$wf" "$since"; then
+            echo "$since" > "$dir/request/.done-$key"
+            rm -f "$req"
+            touch "$dir/recheck-$project-$id" "$dir/$project-$id-$today"
+          else
+            ok=0
+          fi
+          continue
+        fi
+      fi
       [ -f "$dir/$project-$id-$today" ] && continue
       if build_drift_workflow "$project" "$head" "$content_dir" "$wf"; then
         touch "$dir/$project-$id-$today"
@@ -569,4 +637,8 @@ check_build_drift() {
     find "$dir" -maxdepth 1 -type f -name "$project-*" ! -name "*-$today" -delete 2>/dev/null || true
     find "$dir" -maxdepth 1 -type f -name "rerun-*" -mtime +7 -delete 2>/dev/null || true
   fi
+  # Cooldown markers past their use, and requests no workflow here answers to.
+  find "$dir" -maxdepth 1 -type f -name "recheck-$project-*" -mmin +$((BUILD_DRIFT_RECHECK_COOLDOWN_SECONDS / 60)) -delete 2>/dev/null || true
+  find "$dir/request" -maxdepth 1 -type f \( -name "$project--*" -o -name ".done-$project--*" \) \
+    -mmin +$((BUILD_DRIFT_REQUEST_MAX_SECONDS / 60)) -delete 2>/dev/null || true
 }
