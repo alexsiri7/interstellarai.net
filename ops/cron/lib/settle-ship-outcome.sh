@@ -19,7 +19,9 @@
 # Beyond those, any decided verdict closes when it gives a reason GitHub backs
 # (#259, lib/factory-close.sh): a self-resolved pipeline-health alert, the
 # owner's decision in the thread, a closed precedent for a false positive or
-# duplicate, a spec that already decides it, or feedback with no defect. A
+# duplicate (never a ref itself closed as a duplicate, nor when the verdict
+# says the error still recurs, #305), a spec that already decides it, or
+# feedback with no defect. A
 # named closed issue the verdict gives no such reason for parks, as a
 # maintainer's call (with pickup on, a question whose default is to close it;
 # see the tiers below). Every close here gets the factory-closed label.
@@ -278,7 +280,9 @@ all_refs_known=1
 declare -A kind=()
 kinds_looked_up=0
 # lookup_ref_kinds — what each ref is on GitHub (merged-pr, pr, open-issue,
-# closed-issue; empty when the lookup failed), once per settle.
+# closed-issue, closed-duplicate; empty when the lookup failed), once per
+# settle. A closed-duplicate is no precedent: its original carries the verdict
+# on the merits, and may be the issue being settled (un-reminder #490/#491).
 lookup_ref_kinds() {
   [ "$kinds_looked_up" = 1 ] && return
   kinds_looked_up=1
@@ -287,6 +291,7 @@ lookup_ref_kinds() {
     kind[$ref]=$(gh api "repos/$repo/issues/$ref" --jq '
       if .pull_request then (if .pull_request.merged_at then "merged-pr" else "pr" end)
       elif .state == "open" then "open-issue"
+      elif .state_reason == "duplicate" then "closed-duplicate"
       else "closed-issue" end' 2>/dev/null)
     [ -n "${kind[$ref]}" ] || all_refs_known=0
     [ "${kind[$ref]}" = "closed-issue" ] && closed_refs+="${closed_refs:+, }#$ref"
@@ -393,8 +398,10 @@ if [ "$fc_decided" = 1 ] && [ "$view_ok" = 1 ]; then
 
   if [ "$health_filed" = 0 ] && [ "$fc_judge" = 1 ]; then
     # precedent: a false positive, duplicate or superseded item whose
-    # precedent is a closed same-repo issue the verdict names.
-    if [ "$fc_cue_precedent" = 1 ] && [ "$fc_refs_settled" = 1 ] && [ -n "$closed_refs" ]; then
+    # precedent is a closed same-repo issue the verdict names, unless the
+    # verdict says the error still recurs.
+    if [ "$fc_cue_precedent" = 1 ] && [ "$fc_refs_settled" = 1 ] && [ -n "$closed_refs" ] \
+        && ! grep -qiE "$FC_RECURRING_RE" <<<"$verdict_block"; then
       close_detail="Reason: it matches closed precedent ${closed_refs} (a false positive, duplicate or superseded report). Evidence: GitHub shows ${closed_refs} closed; the verdict above says how this issue matches it."
       close_as_done "matches closed precedent ${closed_refs}" --reason "not planned"
       close_detail=""
@@ -439,7 +446,9 @@ SETTLE_DEFAULT_WAIT_DAYS=2
 # verdict as direction (#268): only a run can carry out a recommendation that
 # lives in its prose. Every action but proceed must match
 # SETTLE_DEFAULT_ACTION_RE (lib/severity.sh), or pickup launches a run when
-# its default is taken instead of carrying it out.
+# its default is taken instead of carrying it out. A close is never suggested
+# where the precedent close above is vetoed (#305): a taken default would close
+# the issue on that precedent anyway.
 suggested_action() {
   local ref
   case "$verdict" in
@@ -450,8 +459,9 @@ suggested_action() {
       for ref in "${refs[@]}"; do
         [ "${kind[$ref]:-}" = pr ] && { echo proceed; return; }
       done
-      echo close-completed ;;
-    "No work owed in this repository: "*) echo close-not-planned ;;
+      if no_precedent_close; then echo proceed; else echo close-completed; fi ;;
+    "No work owed in this repository: "*)
+      if no_precedent_close; then echo proceed; else echo close-not-planned; fi ;;
     "Not done: blocked on "*)
       if [ "${#refs[@]}" -eq 1 ] && [ "$all_refs_known" = 1 ] \
           && [ "$(gh api "repos/$repo/issues/${refs[0]}" \
@@ -462,6 +472,18 @@ suggested_action() {
       fi ;;
     *) echo proceed ;;
   esac
+}
+
+# no_precedent_close — true when the verdict says the error still recurs, or
+# names a ref closed as a duplicate (its original may be this issue).
+no_precedent_close() {
+  local ref
+  grep -qiE "$FC_RECURRING_RE" <<<"$verdict_block" && return 0
+  lookup_ref_kinds
+  for ref in "${refs[@]}"; do
+    [ "${kind[$ref]:-}" = closed-duplicate ] && return 0
+  done
+  return 1
 }
 
 # settle_marked <action> — true when <action> was already taken or offered on
@@ -589,6 +611,15 @@ rerun_note="Remove the label and add archon:queued to run it again."
 question="archon-ship finished on #$issue without a PR, and GitHub does not confirm that nothing is needed. Close the issue, or answer this question to let the factory run it again."
 [ -n "$closed_refs" ] \
   && question="archon-ship finished on #$issue without a PR. Its verdict names closed issue ${closed_refs}: if #$issue duplicates it, close #$issue as a duplicate; otherwise answer this question to let the factory run it again."
+# A blocker on an owner-held secret (#305) names the variables the verdict
+# gives in the sentences that name the secret, when it gives any.
+if [[ "$verdict" == "Not done: blocked on "* ]] \
+    && grep -qiwE "$SEVERITY_SECRET_RE" <<<"$verdict_block"$'\n'"$title"; then
+  secret_names=$(sed -E 's/([.;!?])( |$)/\1\n/g' <<<"$verdict_block" \
+    | grep -iwE "$SEVERITY_SECRET_RE" | grep -owE '[A-Z][A-Z0-9]*(_[A-Z0-9]+)+' \
+    | awk '!seen[$0]++' | head -3 | paste -sd, - | sed 's/,/, /g')
+  question="archon-ship finished on #$issue without a PR: its verdict says it waits on a secret or credential only the owner can set${secret_names:+ (${secret_names})}. Set or rotate it, then answer this question to let the factory run it again, or close the issue."
+fi
 if lachesis_pickup_enabled; then
   if ! lachesis_ask "$project" "$issue" "$question" \
       "The run's verdict: ${verdict:0:600}" "${ask_defaults[@]}"; then
