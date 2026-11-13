@@ -289,11 +289,36 @@ test_failures() {
 # import, a top-level throw, anything bun reports as "# Unhandled error between
 # tests" instead of a named test. Summed across every package summary in a
 # `--filter '*'` run, since each package gets its own "<prefix> N fail" line.
+# Also counts a package that exited non-zero with no "N fail" summary at all —
+# bun's `--filter` orchestrator reports those only as "<pkg>: Exited with code
+# N", with nothing to add to `total`, so a crash sharing the step with an
+# unrelated named failure would otherwise vanish from the count entirely.
+# Never negative: an unrelated named failure must not offset a crash.
 unnamed_failure_count() {
-    local named total
+    local named total silent prefix
     named=$(test_failures "$1" | grep -c .)
     total=$(grep -oE '[0-9]+ fail$' "$1" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+    silent=0
+    while IFS= read -r prefix; do
+        [ -n "$prefix" ] || continue
+        grep -qF "${prefix}Ran " "$1" 2>/dev/null || silent=$(( silent + 1 ))
+    done < <(grep -oE '^[^:]+: Exited with code [1-9][0-9]*$' "$1" 2>/dev/null | sed -E 's/:.*$/: /' | sort -u)
+    total=$(( total + silent ))
+    [ "$total" -ge "$named" ] || total=$named
     echo $(( total - named ))
+}
+
+# group_counts <log>: how many test groups each package in a `--filter '*'
+# test` log ran to completion, one "<count> <package>" line per package,
+# sorted by package. Upstream's own per-package runner (package-tests.ts)
+# prints one "◀ <pkg> <file> <secs>s" line per completed group and, on a full
+# run (no explicit file/group selectors — exactly how `--filter '*' test`
+# invokes it), stops admitting any later group once one has failed. A group
+# neither run ever reaches is invisible to the named/unnamed failure counts
+# above, so this is compared merge-vs-pristine separately.
+group_counts() {
+    grep -E ': ◀ ' "$1" 2>/dev/null | sed -E 's/^([^:]+):.*$/\1/' | sort | uniq -c \
+        | awk '{print $2, $1}' | sort
 }
 
 # baseline_tests <step> <cmd...>: called after test step <step> failed under the
@@ -303,16 +328,19 @@ unnamed_failure_count() {
 # (v0.14.0: 4 CLI integration and 6 OpenCode runtime tests) — and the merge
 # introduces no new unnamed failure (a crash sharing the step with a named
 # failure that happens to match pristine must not hide the crash). A step that
-# failed with no named failure at all (a crash, a timeout) is never excused.
-# Leaves the merge's log in STEP_LOG and the failures new under the merge in
-# TEST_REGRESSIONS; PRISTINE_BUILD_FAILED is set if pristine itself could not be
-# built, in which case TEST_REGRESSIONS stays empty since nothing was compared.
+# failed with no named failure at all (a crash, a timeout) is never excused,
+# and neither is one where the two sides ran a different number of test groups
+# for the same package: some group ran on only one side, so a regression in a
+# group the other side never reached would go uncompared. Leaves the merge's
+# log in STEP_LOG and the failures new under the merge in TEST_REGRESSIONS;
+# PRISTINE_BUILD_FAILED is set if pristine itself could not be built, in which
+# case TEST_REGRESSIONS stays empty since nothing was compared.
 PRISTINE=""
 TEST_REGRESSIONS=""
 PRISTINE_BUILD_FAILED=""
 baseline_tests() {
     local step="$1"; shift
-    local merged_log="$STEP_LOG" after before after_unnamed before_unnamed
+    local merged_log="$STEP_LOG" pristine_log after before after_unnamed before_unnamed
     TEST_REGRESSIONS=""
     PRISTINE_BUILD_FAILED=""
     after=$(test_failures "$merged_log")
@@ -327,13 +355,17 @@ baseline_tests() {
         fi
     fi
     run_step "$step-pristine" "$PRISTINE" "$@"
-    before=$(test_failures "$STEP_LOG")
+    pristine_log="$STEP_LOG"
+    before=$(test_failures "$pristine_log")
     after_unnamed=$(unnamed_failure_count "$merged_log")
-    before_unnamed=$(unnamed_failure_count "$STEP_LOG")
+    before_unnamed=$(unnamed_failure_count "$pristine_log")
     STEP_LOG="$merged_log"
     TEST_REGRESSIONS=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | grep -v '^$' || true)
     if [ "$after_unnamed" -gt "$before_unnamed" ]; then
         TEST_REGRESSIONS="${TEST_REGRESSIONS:+$TEST_REGRESSIONS$'\n'}<$(( after_unnamed - before_unnamed )) unnamed failure(s) under the merge not on pristine $TAG — see $merged_log>"
+    fi
+    if [ "$(group_counts "$merged_log")" != "$(group_counts "$pristine_log")" ]; then
+        TEST_REGRESSIONS="${TEST_REGRESSIONS:+$TEST_REGRESSIONS$'\n'}<not every test group ran on both sides — merge $merged_log vs pristine $pristine_log>"
     fi
     log "$step: $(printf '%s\n' "$after" | grep -c .) named + $after_unnamed unnamed failure(s) under the merge, $(printf '%s\n' "$before" | grep -c .) named + $before_unnamed unnamed on pristine $TAG, $(printf '%s\n' "$TEST_REGRESSIONS" | grep -c .) new"
     [ -z "$TEST_REGRESSIONS" ] && { log "$step: every failure also fails on pristine $TAG — not a regression"; return 0; }

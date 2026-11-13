@@ -40,6 +40,10 @@ setup() {
     export STUB_TEST_FAIL_PRISTINE=""    # name of a test that fails on the pristine release tag
     export STUB_TEST_CRASH=""            # non-empty: an unnamed failure (crash) under the new tree
     export STUB_TEST_CRASH_PRISTINE=""   # non-empty: an unnamed failure (crash) on the pristine release tag
+    export STUB_TEST_SILENT_CRASH=""          # non-empty: an unrelated package exits non-zero with no summary at all, under the new tree
+    export STUB_TEST_SILENT_CRASH_PRISTINE="" # same, on the pristine release tag
+    export STUB_TEST_GROUPS=2            # number of "◀" package-test-runner group lines to print, under the new tree
+    export STUB_TEST_GROUPS_PRISTINE=2   # same, on the pristine release tag
     export STUB_SCRIPTS_FAIL=""          # name of a scripts/ test that fails under the new tree
     export STUB_SCRIPTS_FAIL_PRISTINE="" # name of a scripts/ test that fails on the pristine release tag
     export STUB_VALIDATE_NEW_ERROR=""    # workflow that errors only under the new CLI
@@ -51,6 +55,7 @@ setup() {
     export STUB_ARCHON_RUNS_FAIL=0       # 1: the run listing is unreadable
     export STUB_PGREP_HIT=0
     export STUB_GH_CLOSE_FAIL=""         # issue URL whose `gh issue close` fails
+    export STUB_PRISTINE_INSTALL_FAIL=0  # 1: `bun install` fails in the pristine worktree only
 
     write_stubs
     build_repos
@@ -81,15 +86,26 @@ STUB
 echo "$PWD :: $*" >> "$BUN_ARGV"
 case "$*" in
     "install"|"install --frozen-lockfile")
+        case "$PWD" in
+            *-pristine) [ "$STUB_PRISTINE_INSTALL_FAIL" = 1 ] && { echo "stub: bun install failed in pristine worktree" >&2; exit 1; } ;;
+        esac
         mkdir -p node_modules
         if [ "$STUB_BUN_LOCK_CHANGE" = 1 ] && [ "$*" = "install" ]; then echo "# resolved by stub" >> bun.lock; fi
         exit 0 ;;
     "run type-check")
         echo "@archon/cli type-check: Exited with code $STUB_TYPECHECK_RC"; exit "$STUB_TYPECHECK_RC" ;;
     "--filter * test")
+        groups="$STUB_TEST_GROUPS"; fail="$STUB_TEST_FAIL"; crash="$STUB_TEST_CRASH"; silent="$STUB_TEST_SILENT_CRASH"
+        case "$PWD" in *-pristine)
+            groups="$STUB_TEST_GROUPS_PRISTINE"; fail="$STUB_TEST_FAIL_PRISTINE"; crash="$STUB_TEST_CRASH_PRISTINE"
+            silent="$STUB_TEST_SILENT_CRASH_PRISTINE" ;;
+        esac
         echo "@archon/cli test: (pass) something [1.00ms]"
-        fail="$STUB_TEST_FAIL"; crash="$STUB_TEST_CRASH"
-        case "$PWD" in *-pristine) fail="$STUB_TEST_FAIL_PRISTINE"; crash="$STUB_TEST_CRASH_PRISTINE" ;; esac
+        i=1
+        while [ "$i" -le "$groups" ]; do
+            echo "@archon/cli test: ◀ @archon/cli group-$i.test.ts 0.1s"
+            i=$((i+1))
+        done
         nfail=0
         if [ -n "$fail" ]; then echo "@archon/cli test: (fail) $fail [5000.00ms]"; nfail=$((nfail+1)); fi
         if [ -n "$crash" ]; then
@@ -98,10 +114,17 @@ case "$*" in
             echo "@archon/cli test: error: $crash"
             nfail=$((nfail+1))
         fi
+        rc=0
         if [ "$nfail" -gt 0 ]; then
-            echo "@archon/cli test:  1 pass"; echo "@archon/cli test:  $nfail fail"; exit 1
+            echo "@archon/cli test:  1 pass"; echo "@archon/cli test:  $nfail fail"; rc=1
+        else
+            echo "@archon/cli test:  2 pass"; echo "@archon/cli test:  0 fail"
         fi
-        echo "@archon/cli test:  2 pass"; echo "@archon/cli test:  0 fail"; exit 0 ;;
+        if [ -n "$silent" ]; then
+            echo "@archon/providers test: Exited with code 7"
+            rc=1
+        fi
+        exit "$rc" ;;
     "test --timeout 30000 ./scripts/")
         fail="$STUB_SCRIPTS_FAIL"
         case "$PWD" in *-pristine) fail="$STUB_SCRIPTS_FAIL_PRISTINE" ;; esac
@@ -526,6 +549,46 @@ issues_filed() { grep -c '^issue create' "$GH_ARGV" 2>/dev/null || echo 0; }
     [ ! -d "$T/wt/archon-update-v0.11.0-pristine" ]
     ! grep -q -- '-pristine ::' "$BUN_ARGV"
     [ "$(live_branch)" = "upstream-sync-0.10" ]
+}
+
+@test "a silent crash in an unrelated package is not hidden by a pristine-matched named failure" {
+    publish_release 0.11.0
+    export STUB_TEST_FAIL="trigger CLI durable execution > replays on both hosts"
+    export STUB_TEST_FAIL_PRISTINE="$STUB_TEST_FAIL"
+    export STUB_TEST_SILENT_CRASH="boom, no summary printed at all"
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "test" ]
+    [[ "$output" == *"test: 1 named + 1 unnamed failure(s) under the merge, 1 named + 0 unnamed on pristine v0.11.0, 1 new"* ]]
+    grep -q 'unnamed failure(s) under the merge not on pristine v0.11.0' "$GH_ARGV"
+    [ "$(live_branch)" = "upstream-sync-0.10" ]
+}
+
+@test "a different number of test groups run on the merge and pristine sides is never excused" {
+    publish_release 0.11.0
+    export STUB_TEST_FAIL="trigger CLI durable execution > replays on both hosts"
+    export STUB_TEST_FAIL_PRISTINE="$STUB_TEST_FAIL"
+    export STUB_TEST_GROUPS=2
+    export STUB_TEST_GROUPS_PRISTINE=5
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "test" ]
+    grep -q 'not every test group ran on both sides' "$GH_ARGV"
+    [ "$(live_branch)" = "upstream-sync-0.10" ]
+}
+
+@test "pristine could not be built: every current failure shown, not excused, worktree is gone" {
+    publish_release 0.11.0
+    export STUB_TEST_FAIL="workflowRunCommand > applies the config"
+    export STUB_PRISTINE_INSTALL_FAIL=1
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [ "$(status_field last_run_failed)" = "test" ]
+    grep -q 'Could not build pristine v0.11.0 to compare against' "$GH_ARGV"
+    grep -q 'workflowRunCommand > applies the config' "$GH_ARGV"
+    [ "$(live_branch)" = "upstream-sync-0.10" ]
+    [ ! -d "$T/wt/archon-update-v0.11.0-pristine" ]
+    ! git -C "$T/live" worktree list | grep -q pristine
 }
 
 @test "health check fails after the swap: rolled back to the previous sha, ntfy, branch left on the fork" {
