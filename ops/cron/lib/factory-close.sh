@@ -23,7 +23,9 @@
 #                  factory posted under the owner's token) says to close it.
 #   precedent      the verdict calls the issue a false positive, duplicate or
 #                  superseded and names closed same-repo issues (checked by
-#                  settle) as the precedent.
+#                  settle) as the precedent: not a ref itself closed as a
+#                  duplicate (its original is the precedent), and not when the
+#                  verdict says the error still recurs (#305).
 #   spec           the verdict says the spec already decides it, citing a
 #                  spec file that exists on the default branch.
 #   feedback       in-app feedback whose text describes no defect, which the
@@ -43,6 +45,10 @@ FACTORY_CLOSED_LABEL="${FACTORY_CLOSED_LABEL:-factory-closed}"
 FC_PRECEDENT_RE='false[- ]positive|false premise|premise (is|was) false|not a (real )?bug|duplicat|same (as|issue|report|claim|false positive)|precedent|supersed|supersession'
 # shellcheck disable=SC2034
 FC_PRECEDENT_NEG_RE='not (a |an )?(false[- ]positive|duplicate)|is ?n.t (a |an )?(false[- ]positive|duplicate)'
+# A verdict saying the error is still live: a closed precedent did not end it.
+# Narrow on purpose, "a recurring false-positive pattern" is a precedent.
+# shellcheck disable=SC2034
+FC_RECURRING_RE='still (recurring|firing|occurring|happening|failing|broken)|keeps? (recurring|firing|happening|failing)|recurring since'
 # shellcheck disable=SC2034
 FC_OWNER_CUE_RE='(owner|maintainer|author)[^.]{0,120}(decided|said|asked|answered|confirmed|agreed|wrote|stated|instructed|directed|ruled)'
 # shellcheck disable=SC2034

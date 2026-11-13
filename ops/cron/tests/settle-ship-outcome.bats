@@ -86,13 +86,14 @@ gh_calls() {
 
 fixture() { printf '%s\n' "$2" > "$T/fixtures/$1"; }
 
-# ref <N> open-issue|closed-issue|merged-pr|pr: what GitHub's issues API
-# returns for #N.
+# ref <N> open-issue|closed-issue|closed-duplicate|merged-pr|pr: what
+# GitHub's issues API returns for #N.
 ref() {
     local json
     case "$2" in
         open-issue)   json='{"state":"open"}' ;;
         closed-issue) json='{"state":"closed","state_reason":"completed"}' ;;
+        closed-duplicate) json='{"state":"closed","state_reason":"duplicate"}' ;;
         merged-pr)    json='{"state":"closed","pull_request":{"merged_at":"2026-09-16T10:00:00Z"}}' ;;
         pr)           json='{"state":"open","pull_request":{"merged_at":null}}' ;;
     esac
@@ -1567,6 +1568,60 @@ LOG
     [ "$status" -eq 0 ]
     [ "$(gh_calls 'issue close')" -eq 0 ]
     [ "$(gh_calls 'factory-closed')" -eq 0 ]
+}
+
+# un-reminder #491 (2026-11-12): blocked on a Worker secret only the owner can
+# rotate, and closed on "precedent" #490, itself closed as a duplicate of #491.
+@test "reason: the real un-reminder #491 verdict (an owner-held secret, a circular duplicate precedent) asks with no default, naming the secret" {
+    lachesis_on
+    cat > "$RUN_LOG" <<'LOG'
+Not done: blocked on Fixing this requires rotating/repairing the Cloudflare Worker secret UR_REQUESTY_KEY (and/or the underlying Requesty.ai API key), which only the owner can do via their Requesty.ai account and wrangler secret access; no code change in this repository can repair an upstream credential that Requesty's router is rejecting.. BLOCKED. The restated 403 "Invalid authorization token" comes from Requesty.ai's own router rejecting the Cloudflare secret UR_REQUESTY_KEY forwarded verbatim by worker/src/lib/requesty.ts:28 — the request-building and retry/Sentry-reporting code there is correct and unchanged by any likely fix. #490, closed as a duplicate of #491, confirms this is the same persistent Sentry issue (159900521) recurring since 2026-11-09, not a transient blip a code retry would absorb. No file in this repo sets or formats that secret; only the owner, via their Requesty.ai account and wrangler secret access, can rotate or repair it. Full evidence in triage.md.
+Report: /x/triage.md
+LOG
+    ref 490 closed-duplicate
+
+    run "$SCRIPT" testproj 491 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    [ "$(gh_calls 'issue close')" -eq 0 ]
+    [ "$(gh_calls 'factory-closed')" -eq 0 ]
+    assert_parked 491
+    [ "$(asked_default)" = "" ]
+    grep -q '^ask_question .*only the owner can set (UR_REQUESTY_KEY)' "$LACHESIS_ARGV"
+    [[ "$output" == *"tier 3, default none"* ]]
+}
+
+@test "reason: a precedent closed as a duplicate of this issue is no precedent (#305 duplicate pair)" {
+    printf 'Not done: blocked on a maintainer: this is a duplicate of #490, closed as a duplicate of #491.\nReport: /x\n' > "$RUN_LOG"
+    ref 490 closed-duplicate
+    run "$SCRIPT" testproj 491 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 491
+    [ "$(gh_calls 'factory-closed')" -eq 0 ]
+
+    : > "$GH_ARGV"
+    lachesis_on
+    run "$SCRIPT" testproj 491 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 491
+    grep -q '^ask_question ' "$LACHESIS_ARGV"
+    ! grep -q 'names closed issue #490' "$LACHESIS_ARGV"
+}
+
+@test "reason: a verdict saying the error is still recurring does not close on its closed precedent" {
+    printf 'No delivery needed: duplicate of #8; the crash keeps firing in Sentry.\nReport: /x\n' > "$RUN_LOG"
+    ref 8 closed-issue
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 9
+    [ "$(gh_calls 'factory-closed')" -eq 0 ]
+
+    # musenmingle #449: a recurring false-positive pattern is a precedent.
+    : > "$GH_ARGV"
+    printf 'No delivery needed: false positive, a recurring false-positive pattern, as in #8.\nReport: /x\n' > "$RUN_LOG"
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_factory_closed 9 "--reason not planned"
 }
 
 # lachesis #407 (2026-10-27): the owner said close in the thread; the factory
