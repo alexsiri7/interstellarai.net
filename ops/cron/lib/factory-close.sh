@@ -46,9 +46,11 @@ FC_PRECEDENT_RE='false[- ]positive|false premise|premise (is|was) false|not a (r
 # shellcheck disable=SC2034
 FC_PRECEDENT_NEG_RE='not (a |an )?(false[- ]positive|duplicate)|is ?n.t (a |an )?(false[- ]positive|duplicate)'
 # A verdict saying the error is still live: a closed precedent did not end it.
-# Narrow on purpose, "a recurring false-positive pattern" is a precedent.
+# A veto, so a phrasing it misses lets the close through: it lists the ways a
+# verdict says an error came back, but not a bare "recur", since "a recurring
+# false-positive pattern" (musenmingle #449) is a precedent.
 # shellcheck disable=SC2034
-FC_RECURRING_RE='still (recurring|firing|occurring|happening|failing|broken)|keeps? (recurring|firing|happening|failing)|recurring since'
+FC_RECURRING_RE='still (recurring|recurs|firing|fires|occurring|occurs|happening|happens|failing|fails|crashing|crashes|broken|live|active|ongoing|reproduces)|(keeps?|kept) (recurring|firing|happening|failing|crashing|coming back)|recurring since|recurred (again|since|twice|daily|every|on)|recurs (daily|hourly|every|on)|(it|error|crash|failure|exception|alert|bug|problem) (has )?recur(s|red)|(happened|happening|fired|firing|failed|failing|crashed|crashing|occurred|occurring|broke) again|(came|comes|coming) back|resurfac(e|es|ed|ing)|reappear(s|ed|ing)?'
 # shellcheck disable=SC2034
 FC_OWNER_CUE_RE='(owner|maintainer|author)[^.]{0,120}(decided|said|asked|answered|confirmed|agreed|wrote|stated|instructed|directed|ruled)'
 # shellcheck disable=SC2034

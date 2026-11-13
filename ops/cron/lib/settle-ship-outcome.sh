@@ -446,7 +446,9 @@ SETTLE_DEFAULT_WAIT_DAYS=2
 # verdict as direction (#268): only a run can carry out a recommendation that
 # lives in its prose. Every action but proceed must match
 # SETTLE_DEFAULT_ACTION_RE (lib/severity.sh), or pickup launches a run when
-# its default is taken instead of carrying it out.
+# its default is taken instead of carrying it out. A close is never suggested
+# where the precedent close above is vetoed (#305): a taken default would close
+# the issue on that precedent anyway.
 suggested_action() {
   local ref
   case "$verdict" in
@@ -457,8 +459,9 @@ suggested_action() {
       for ref in "${refs[@]}"; do
         [ "${kind[$ref]:-}" = pr ] && { echo proceed; return; }
       done
-      echo close-completed ;;
-    "No work owed in this repository: "*) echo close-not-planned ;;
+      if no_precedent_close; then echo proceed; else echo close-completed; fi ;;
+    "No work owed in this repository: "*)
+      if no_precedent_close; then echo proceed; else echo close-not-planned; fi ;;
     "Not done: blocked on "*)
       if [ "${#refs[@]}" -eq 1 ] && [ "$all_refs_known" = 1 ] \
           && [ "$(gh api "repos/$repo/issues/${refs[0]}" \
@@ -469,6 +472,18 @@ suggested_action() {
       fi ;;
     *) echo proceed ;;
   esac
+}
+
+# no_precedent_close — true when the verdict says the error still recurs, or
+# names a ref closed as a duplicate (its original may be this issue).
+no_precedent_close() {
+  local ref
+  grep -qiE "$FC_RECURRING_RE" <<<"$verdict_block" && return 0
+  lookup_ref_kinds
+  for ref in "${refs[@]}"; do
+    [ "${kind[$ref]:-}" = closed-duplicate ] && return 0
+  done
+  return 1
 }
 
 # settle_marked <action> — true when <action> was already taken or offered on
@@ -596,8 +611,12 @@ rerun_note="Remove the label and add archon:queued to run it again."
 question="archon-ship finished on #$issue without a PR, and GitHub does not confirm that nothing is needed. Close the issue, or answer this question to let the factory run it again."
 [ -n "$closed_refs" ] \
   && question="archon-ship finished on #$issue without a PR. Its verdict names closed issue ${closed_refs}: if #$issue duplicates it, close #$issue as a duplicate; otherwise answer this question to let the factory run it again."
-if grep -qiwE "$SEVERITY_SECRET_RE" <<<"$verdict_block"$'\n'"$title"; then
-  secret_names=$(grep -owE '[A-Z][A-Z0-9]*(_[A-Z0-9]+)+' <<<"$verdict_block" \
+# A blocker on an owner-held secret (#305) names the variables the verdict
+# gives in the sentences that name the secret, when it gives any.
+if [[ "$verdict" == "Not done: blocked on "* ]] \
+    && grep -qiwE "$SEVERITY_SECRET_RE" <<<"$verdict_block"$'\n'"$title"; then
+  secret_names=$(sed -E 's/([.;!?])( |$)/\1\n/g' <<<"$verdict_block" \
+    | grep -iwE "$SEVERITY_SECRET_RE" | grep -owE '[A-Z][A-Z0-9]*(_[A-Z0-9]+)+' \
     | awk '!seen[$0]++' | head -3 | paste -sd, - | sed 's/,/, /g')
   question="archon-ship finished on #$issue without a PR: its verdict says it waits on a secret or credential only the owner can set${secret_names:+ (${secret_names})}. Set or rotate it, then answer this question to let the factory run it again, or close the issue."
 fi

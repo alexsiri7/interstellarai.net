@@ -1616,12 +1616,69 @@ LOG
     assert_parked 9
     [ "$(gh_calls 'factory-closed')" -eq 0 ]
 
+    local recurs
+    for recurs in 'this happened again, the third time this week' 'it recurred twice since the last close' \
+            'it resurfaced on 2026-11-12' 'it came back after the fix'; do
+        : > "$GH_ARGV"
+        printf 'No delivery needed: duplicate of #8; %s.\nReport: /x\n' "$recurs" > "$RUN_LOG"
+        run "$SCRIPT" testproj 9 "$RUN_LOG"
+        [ "$status" -eq 0 ]
+        assert_parked 9
+        [ "$(gh_calls 'factory-closed')" -eq 0 ]
+    done
+
     # musenmingle #449: a recurring false-positive pattern is a precedent.
     : > "$GH_ARGV"
     printf 'No delivery needed: false positive, a recurring false-positive pattern, as in #8.\nReport: /x\n' > "$RUN_LOG"
     run "$SCRIPT" testproj 9 "$RUN_LOG"
     [ "$status" -eq 0 ]
     assert_factory_closed 9 "--reason not planned"
+}
+
+# A close default taken after two days, or a tier-1 close, would close on the
+# precedent the reason closes above refuse.
+@test "tiers: a still-recurring error or a duplicate-closed ref is offered no close default (#305)" {
+    lachesis_on
+    ref 8 closed-issue
+    ref 490 closed-duplicate
+    local verdict
+    for verdict in 'No delivery needed: duplicate of #8; the crash keeps firing in Sentry.' \
+            'No delivery needed: duplicate of #490.' \
+            'No work owed in this repository: the crash in the upstream SDK keeps firing, as in #8.'; do
+        : > "$GH_ARGV"; : > "$LACHESIS_ARGV"
+        printf '%s\nReport: /x\n' "$verdict" > "$RUN_LOG"
+        run "$SCRIPT" testproj 491 "$RUN_LOG"
+        [ "$status" -eq 0 ]
+        assert_parked 491
+        [[ "$(asked_default)" == *"<!-- archon-settle-default: proceed -->" ]]
+    done
+
+    : > "$GH_ARGV"; : > "$LACHESIS_ARGV"
+    tier_outcome 1 'No delivery needed: duplicate of #490.'
+    run "$SCRIPT" testproj 491 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    [ "$(gh_calls 'issue close')" -eq 0 ]
+    [[ "$output" == *"#491 settled by tier-1 action proceed"* ]]
+}
+
+@test "reason: the owner-secret question names only a variable from the sentence naming the secret" {
+    lachesis_on
+    printf 'Not done: blocked on the Worker secret only the owner can set. Logs show HTTP_403 on every call.\nReport: /x\n' > "$RUN_LOG"
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 9
+    grep -q '^ask_question .*only the owner can set\. Set or rotate it' "$LACHESIS_ARGV"
+    ! grep -q 'HTTP_403)' "$LACHESIS_ARGV"
+
+    # A verdict that is not blocked on the secret keeps the question it would ask.
+    : > "$GH_ARGV"; : > "$LACHESIS_ARGV"
+    printf 'No delivery needed: false positive; the Worker secret was already set (HTTP_403 in logs). Same as #8.\nReport: /x\n' > "$RUN_LOG"
+    ref 8 closed-issue
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 9
+    grep -q '^ask_question .*names closed issue #8' "$LACHESIS_ARGV"
+    ! grep -q 'only the owner can set' "$LACHESIS_ARGV"
 }
 
 # lachesis #407 (2026-10-27): the owner said close in the thread; the factory
