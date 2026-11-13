@@ -28,6 +28,8 @@ source "$SCRIPT_DIR/lib/archon-active-runs.sh"
 archon_runs_snapshot
 # shellcheck source=lib/ship-breaker.sh
 source "$SCRIPT_DIR/lib/ship-breaker.sh"
+# shellcheck source=lib/ship-verdict.sh
+source "$SCRIPT_DIR/lib/ship-verdict.sh"
 # shellcheck source=lib/ship-workflow.sh
 source "$SCRIPT_DIR/lib/ship-workflow.sh"
 # shellcheck source=lib/quota-pause.sh
@@ -158,7 +160,8 @@ has_open_blockers() {
 # its sub-issues, in any repository, and the open issues its body names on a
 # "depends on / blocked by / waits on" line or in the list right under one.
 # Loose mentions ("Related: #9") never count, and a named ref that is a PR, is
-# closed or does not exist is ignored, so a typo cannot hold an issue forever.
+# closed or does not resolve (404, or 410 for a repo with issues disabled) is
+# ignored, so a typo cannot hold an issue forever.
 # Prints `owner/repo<TAB>number<TAB>source` (dependency, sub-issue or body), one
 # per blocker. Exit 0 with blockers, 1 with none, 2 when a lookup failed: unlike
 # has_open_blockers this one gates a launch, so the caller fails closed.
@@ -196,7 +199,7 @@ launch_blockers() {
     [ -n "$r" ] || continue
     if ! out=$(gh api "repos/$r/issues/$n" \
         --jq '[(if .pull_request then "pr" else "issue" end), .state] | @tsv' 2>&1); then
-      [[ "$out" == *"HTTP 404"* ]] && continue
+      [[ "$out" == *"HTTP 404"* || "$out" == *"HTTP 410"* ]] && continue
       return 2
     fi
     [ "$out" = $'issue\topen' ] && found+=$'\n'"$r"$'\t'"$n"$'\tbody'
@@ -223,7 +226,7 @@ blocker_refs() {
 blocked_verdict_recent() {
   local newest at verdict
   newest=$(gh api --paginate "repos/alexsiri7/$1/issues/$2/comments" \
-    --jq '.[-1] // empty | [.created_at, ((.body // "") | startswith("archon-ship finished without a PR: Not done: blocked on "))] | @tsv' \
+    --jq '.[-1] // empty | [.created_at, ((.body // "") | startswith("archon-ship finished without a PR: '"$VERDICT_BLOCKED"'"))] | @tsv' \
     2>/dev/null) || return 2
   IFS=$'\t' read -r at verdict <<<"$(tail -n 1 <<<"$newest")"
   [ "$verdict" = true ] || return 1
@@ -869,7 +872,7 @@ pick_and_fire() {
   # queued and is checked again next tick. It is not relabelled archon:blocked:
   # promote_unblocked reads native links only and would flip a body-named block
   # straight back.
-  local issue="" cand rc blockers
+  local issue="" cand rc blockers body
   for cand in "${candidates[@]}"; do
     if ! trust_comments_ok "$project" issue "$cand"; then
       log "$project: #$cand has comments by untrusted authors (or they could not be read) — not starting archon on it"
@@ -883,8 +886,13 @@ pick_and_fire() {
       log "$project: #$cand — could not read its comments; not launching blind"
       continue
     fi
-    rc=0; blockers=$(launch_blockers "$project" "$cand" \
-      "$(jq -r --argjson n "$cand" '.[] | select(.number == $n) | .body // ""' <<<"$queued_json" 2>/dev/null)") || rc=$?
+    # A candidate unioned in above is missing from queued_json: read its body.
+    if ! body=$(jq -er --argjson n "$cand" 'first(.[] | select(.number == $n) | .body // "")' <<<"$queued_json" 2>/dev/null) \
+        && ! body=$(gh issue view "$cand" --repo "alexsiri7/$project" --json body 2>/dev/null | jq -er '.body // ""'); then
+      log "$project: #$cand — could not read its body; not launching blind"
+      continue
+    fi
+    rc=0; blockers=$(launch_blockers "$project" "$cand" "$body") || rc=$?
     if [ "$rc" = 0 ]; then
       log "$project: #$cand — open blockers ($(blocker_refs "$project" <<<"$blockers")), not launching"
       SUMMARY_BLOCKED=$((SUMMARY_BLOCKED + 1))
@@ -1097,7 +1105,9 @@ lachesis_hold_blocked() {
   [ -n "$failed" ] \
     && log "$project: #$issue — could not record its blockers in Lachesis (${failed#, }); not launching, tried again next tick"
   [ "$recorded" = 1 ] || return 0
-  lachesis_note "$project" "$issue" "Not launched: open blockers $refs; recorded as dependencies or a waits_on question before launch (#306)." \
+  local note="Not launched: open blockers $refs; recorded as dependencies or a waits_on question before launch (#306)."
+  [ -n "$failed" ] && note+=" Not recorded, tried again next tick: ${failed#, }."
+  lachesis_note "$project" "$issue" "$note" \
     || log "$project: #$issue — could not record the note in Lachesis"
 }
 

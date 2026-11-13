@@ -25,6 +25,10 @@ _SHIP_VERDICT_SH=1
 # as "No delivery started" did (only "No delivery needed" can close) instead of
 # matching nothing and being re-queued by unstick_stale.
 VERDICT_RE='^(No delivery (needed|started)|Not done|No work owed in this repository): '
+# The stop for a run that found its issue blocked: settle defers it to the
+# blocker, and pickup holds the issue an hour after one (#306).
+# shellcheck disable=SC2034  # consumed by the sourcing scripts
+VERDICT_BLOCKED='Not done: blocked on '
 
 SHIP_VERDICT_STOCK_WORDS='test|tests|testing|todo|tbd|fixme|placeholder|dummy|lorem|ipsum|xxx|foo|bar|baz|null|none|undefined|n|a|na'
 
