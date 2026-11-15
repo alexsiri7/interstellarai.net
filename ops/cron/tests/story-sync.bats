@@ -30,6 +30,7 @@ STUB
     cat > "$bin/archon" <<'STUB'
 #!/usr/bin/env bash
 echo "$PWD $*" >> "$HOME/archon-calls"
+env | grep '^ANNIE_' >> "$HOME/archon-env"
 cat "$4/README.md" > /dev/null || exit 9
 cp -r "$4" "$HOME/last-export"
 echo "STORY_SYNC_PR: https://github.com/alexsiri7/game/pull/1"
@@ -94,4 +95,21 @@ teardown() { rm -rf "$TEST_TMP"; }
     grep -qx '> The cat sits.' "$f"
     grep -qx 'CAT: A song!' "$f"
     ! grep -q -- '-->' "$f"
+}
+
+@test "the storage key reaches the export only, never the archon run" {
+    printf 'ANNIE_SUPABASE_URL=https://annie.supabase.co\nANNIE_SUPABASE_SERVICE_ROLE_KEY=sekrit\n' >> "$ARCHON_CRON_SECRETS"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ -f "$HOME/archon-calls" ]
+    [ ! -s "$HOME/archon-env" ]
+}
+
+@test "a location map and its review notes reach the export" {
+    echo '{"objects":[{"id":"h","type":"LOCATION","name":"The Hall","description":"","notes":"","role":null,"tags":""}],"relationships":[],"nodes":[],"images":[],"maps":[{"storyObjectId":"h","widthM":10,"heightM":5,"backgroundImageId":null,"items":[]}],"annotations":[{"id":"a","locationId":"h","kind":"note","thingKey":null,"thingName":null,"region":{"type":"point","x":1,"y":2},"text":"Too dark.","storyObjectId":null,"build":"b7","snapshotSha256":"ff","createdAt":"2026-11-14T00:00:00"}]}' > "$STORY_JSON"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    grep -q '"widthM": 10' "$HOME/last-export/location/the-hall.map.json"
+    grep -qx 'Too dark.' "$HOME/last-export/location/the-hall.review.md"
+    grep -q 'location/<slug>.map.json' "$HOME/last-export/README.md"
 }
