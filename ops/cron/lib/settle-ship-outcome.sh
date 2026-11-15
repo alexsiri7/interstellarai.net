@@ -50,7 +50,8 @@
 # a question's default taken after two days on tier 2, and dropped on tier 3,
 # where the question waits. A tier comes from the outcome JSON's "tier" (none
 # today, so tier 2) raised by a keyword floor; a pipeline-health issue is tier
-# 3. Each action is taken or offered once per issue (a comment marker). With
+# 3. A "Not done: blocked on" verdict whose blocker only the owner can clear
+# (owner_only_blocker, lib/severity.sh) gets no default either (#320). Each action is taken or offered once per issue (a comment marker). With
 # pickup off nothing here changes.
 #
 # Exit 0 when a verdict was found and recorded, 1 when the log carries none
@@ -426,7 +427,9 @@ stale_note=""
 # Reached only once the confirmed closes above and release_if_stale have
 # passed, and never under --recheck. The verdict's suggested action is taken
 # at once on tier 1, offered as the question's default on tier 2 and dropped on
-# tier 3. Each action is taken or offered once per issue: its marker on any
+# tier 3, and dropped for a blocked verdict whose blocker only the owner can
+# clear (owner_only_blocker, #320). Each action is taken or offered once per
+# issue: its marker on any
 # comment (the act's own, or the question Lachesis posts with the default)
 # turns a later run's suggestion into a plain question, so "run it again" runs
 # at most once and an ignored default is not offered again.
@@ -555,16 +558,18 @@ settle_resume_act() {
   settle_release "$action"
 }
 
-action=wait tier_log=""
+action=wait tier_log="" owner_blocked=0
 ask_defaults=()
 if lachesis_pickup_enabled; then
   settle_resume_act
   tier=$(severity_tier "$declared_tier" "$verdict_block"$'\n'"$title")
   [ "$health_filed" = 1 ] && tier=3
-  [ "$tier" = 3 ] || action=$(suggested_action)
+  [[ "$verdict" == "Not done: blocked on "* ]] && owner_only_blocker "$verdict_block" && owner_blocked=1
+  [ "$tier" = 3 ] || [ "$owner_blocked" = 1 ] || action=$(suggested_action)
   [ "$action" != wait ] && settle_marked "$action" && action="wait"
   [ "$action" != wait ] && [ "$tier" = 1 ] && ! settle_act "$action" && action="wait"
   tier_log=", tier $tier, default none"
+  [ "$owner_blocked" = 1 ] && tier_log+=" (owner-only blocker)"
   if [ "$action" != wait ]; then
     tier_log=", tier $tier, default $action"
     # Any answer releases the issue to run again: pickup carries out only a

@@ -49,6 +49,27 @@ setup() {
     done
 }
 
+@test "owner_only_blocker matches a step only the owner can take" {
+    local text
+    for text in \
+            'a Railway-console and GitHub-repo-settings action with no git-tracked representation, which the issue itself calls a human step' \
+            'the owner creating a Sentry auth token' 'a hand merge of ops/cron/lib/trust.sh' \
+            'an owner-gated merge path' 'a step only the owner can take' \
+            'the owner storing the key in Doppler' 'turning on branch protection'; do
+        owner_only_blocker "$text" || { echo "missed: $text"; return 1; }
+    done
+}
+
+@test "owner_only_blocker leaves dependency and code blockers alone" {
+    local text
+    for text in '#8 landing first' 'PR #8' 'Owner-level product decision: keep the documented tradeoff' \
+            'the console logging refactor in #14' 'the settings screen redesign (#31)' \
+            'the dashboard page component from #44' '#122 (owner sign-in) and the Owner-only scene editor' \
+            'PR #8, which the owner should review'; do
+        ! owner_only_blocker "$text" || { echo "matched: $text"; return 1; }
+    done
+}
+
 @test "matching ignores case" {
     [ "$(severity_tier 1 'Force-Pushed to main')" = 3 ]
 }

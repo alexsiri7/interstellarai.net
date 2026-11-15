@@ -13,6 +13,8 @@
 #   3 wait     prod data deletion or migration, history rewrites, repo
 #              visibility, legal/GDPR, money or accounts, secret rotation, store
 #              publishing: ask with no default.
+# A "Not done: blocked on" verdict whose blocker only the owner can clear
+# (owner_only_blocker) is asked with no default whatever its tier (#320).
 # An outcome that declares no tier is tier 2. The keyword floor below reads the
 # verdict and the issue title, never the body, and only ever raises a tier: a
 # false positive costs a question with no default (the factory's behaviour
@@ -57,6 +59,37 @@ SEVERITY_TIER3_RE=$(IFS='|'; echo "${SEVERITY_TIER3_WORDS[*]}")
 # proceed default needs only the launch that follows.
 # shellcheck disable=SC2034  # read by issue-pickup-cron.sh settle_defaulted
 SETTLE_DEFAULT_ACTION_RE='close-completed|close-not-planned|depend-[0-9]+'
+
+# A blocked verdict naming a step only the owner can take is asked with no
+# default (#320, the owner's decision of 2026-11-15): running it again stops in
+# the same place. Matched over the verdict only, whole words, case-insensitive;
+# no run declares its blocker's kind. A false positive costs a question with no
+# default, a false negative is the ordinary default.
+SETTLE_OWNER_BLOCKER_WORDS=(
+  # a step only a person can take
+  'human[- ]only' '(human|manual) (steps?|actions?)' 'by hand'
+  'owner[- ](only|gated) ([a-z-]+ )?(steps?|actions?|changes?|tasks?|paths?|merges?|merge paths?)'
+  'only (a human|a person|a maintainer|the owner|the maintainer|you) (can|could|may)'
+  'the (owner|human|maintainer)(.s)? (has |needs |must |is )?(to )?(creat|add|set|stor|rotat|enabl|configur|grant|merg|approv)[a-z]*'
+  'outside ((the )?(agent|factory|automation)(.s)? )?reach' 'not authori[sz]ed to' 'no git-tracked representation'
+  # a console or settings change
+  '[a-z]+-(console|dashboard)'
+  '(railway|aws|gcp|google cloud|firebase|play|cloudflare|vercel|netlify|supabase|sentry|doppler|github|apple developer|app store connect) (console|dashboard)'
+  '(repo|repository|github|org|organi[sz]ation|environment)[- ](settings?|secrets?|environments?)'
+  'branch protection' 'required reviewers'
+  # a secret or token only the owner can get
+  'doppler'
+  # an account action (billing and payments are already tier 3)
+  '(two-factor|2fa)' 'admin (access|rights|permissions?)'
+  # a hand merge of a sensitive path
+  '(hand|manual)[- ]merge'
+)
+SETTLE_OWNER_BLOCKER_RE=$(IFS='|'; echo "${SETTLE_OWNER_BLOCKER_WORDS[*]}")
+
+# owner_only_blocker <text> — 0 when <text> names a blocker only the owner can clear.
+owner_only_blocker() {
+  grep -qiwE "$SETTLE_OWNER_BLOCKER_RE" <<<"$1"
+}
 
 # severity_tier <declared> <text> — <declared> when it is 1, 2 or 3, else 2;
 # 3 whenever <text> matches the tier-3 floor.
