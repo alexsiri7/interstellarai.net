@@ -19,8 +19,8 @@
 # retried the next day.
 #
 # Exported annotations are not marked `sent` in Annie: no Annie token scope may
-# set an annotation's status yet, and this script never writes to Annie's
-# database. A sent annotation keeps being exported until it is done.
+# set an annotation's status yet (word-coach-annie#1497), and this script never
+# writes to Annie's database. An annotation is exported until it is done.
 #
 # Crontab:
 #   30 6 * * * <repo>/ops/cron/story-sync.sh >> ~/.local/state/archon-cron/logs/story-sync.log 2>&1
