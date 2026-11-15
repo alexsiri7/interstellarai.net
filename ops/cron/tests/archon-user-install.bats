@@ -120,8 +120,20 @@ sudoers_rules() { sed -e 's/#.*//' "$D/sudoers-archon-user" | sed -e ':a' -e '/\
 
 @test "the wrapper and every script here pass shellcheck" {
     command -v shellcheck >/dev/null || skip "shellcheck not installed"
-    run shellcheck -x -P SCRIPTDIR "$D/archon-as-archon" "$D/install.sh" "$D/verify.sh" "$D/gh-shim/gh"
+    run shellcheck -x -P SCRIPTDIR "$D/archon-as-archon" "$D/install.sh" "$D/verify.sh" "$D/gh-shim/gh" "$D/no-self-match"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "the no-self-match shim stops a pgrep -f/pidwait -f wait loop matching its own shell" {
+    /usr/bin/pgrep --help 2>&1 | grep -q -- --ignore-ancestors || skip "procps without --ignore-ancestors"
+    for n in pgrep pidwait ls; do cp "$D/no-self-match" "$T/bin/$n"; done
+
+    run env PATH="$T/bin:$PATH" bash -c 'pgrep -f "zz-293-no-such-proc"'
+    [ "$status" -eq 1 ]
+    run env PATH="$T/bin:$PATH" timeout 5 bash -c 'pidwait -f "zz-293-no-such-proc"'
+    [ "$status" -ne 124 ]
+    run "$T/bin/ls"
+    [ "$status" -eq 64 ]
 }
 
 @test "--allow-all-repos-token writes the opt-in (0644), idempotently; --no-allow-all-repos-token removes it" {

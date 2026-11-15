@@ -441,6 +441,7 @@ These were grepped for `secrets.env|railway|psql|SUPABASE|CLOUDFLARE|wrangler|DA
 | `../archon-ops/archon-ops` | `/usr/local/sbin/archon-{user-install,host-install,ops-promote}` (root 0755, three copies) | run the snapshot's installers; promote the snapshot (`/usr/local/lib/archon-ops`) |
 | `archon-serve.service` | `/etc/systemd/system/archon-serve.service` | the server as archon |
 | `verify.sh` | — | the checks above |
+| `no-self-match` | `~archon/.local/bin/pgrep`, `~archon/.local/bin/pidwait` (archon 0755, step 5) | runs `/usr/bin/pgrep`/`pidwait` with `--ignore-ancestors`, so a `pgrep -f` wait loop cannot match its own shell (#243, #293) |
 | `../../cron/lib/run-as.sh`, `../../cron/lib/archon-shim/archon` | — | the flag and the owner-side `archon` |
 | `../../cron/ops-self-update.sh` | crontab `*/10` | ops self-update with the approval gate |
 
@@ -459,6 +460,6 @@ Also written by `install.sh`:
 ```bash
 bunx bats ops/cron/tests/archon-as-archon.bats ops/cron/tests/run-as.bats ops/cron/tests/archon-user-install.bats ops/cron/tests/archon-ops.bats ops/cron/tests/gh-shim.bats
 bunx bats ops/cron/tests/                   # whole suite: flag off must change nothing
-shellcheck -x -P SCRIPTDIR ops/host/archon-user/{install.sh,verify.sh,archon-as-archon} ops/host/archon-ops/archon-ops ops/cron/lib/run-as.sh ops/cron/ops-self-update.sh
+shellcheck -x -P SCRIPTDIR ops/host/archon-user/{install.sh,verify.sh,archon-as-archon,no-self-match} ops/host/archon-ops/archon-ops ops/cron/lib/run-as.sh ops/cron/ops-self-update.sh
 visudo -c -f ops/host/archon-user/sudoers-archon-user     # works without root
 ```

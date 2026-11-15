@@ -1,0 +1,10 @@
+#!/bin/sh
+# pgrep/pidwait that never match the caller's own ancestors. A generated wait
+# loop like `bash -c 'while pgrep -f "bats-exec-suite"; do sleep 5; done'`
+# matches its own `bash -c` argv and never ends (#243, #293). install.sh
+# (step 5) installs this as ~archon/.local/bin/pgrep and .../pidwait, which
+# come before /usr/bin on every archon session's PATH.
+case "${0##*/}" in
+    pgrep|pidwait) exec "/usr/bin/${0##*/}" --ignore-ancestors "$@" ;;
+    *) echo "no-self-match: installed as ${0##*/}; only pgrep and pidwait are supported" >&2; exit 64 ;;
+esac
