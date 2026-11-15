@@ -57,10 +57,10 @@ log() { echo "$LOG_TAG $(date '+%Y-%m-%d %H:%M:%S') $*"; }
 
 # backup_due <name>: 0 when the project's newest archive is older than its
 # PG_BACKUP_EVERY_HOURS interval (less a 30-minute slack for cron jitter), or
-# when it has no interval or no archive yet.
+# when it has no interval, an unreadable one, or no archive yet.
 backup_due() {
     local name="$1" every newest age_min
-    every=$(pg_backup_every_hours "$name")
+    every=$(pg_backup_every_hours "$name") || return 0
     [ -n "$every" ] || return 0
     newest=$(find "$BACKUP_ROOT/$name" -maxdepth 1 -name '*.sql.gz' -printf '%T@\n' 2>/dev/null | sort -rn | head -1)
     [ -n "$newest" ] || return 0

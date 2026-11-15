@@ -237,6 +237,14 @@ cluster_dirs() { find "$T" -maxdepth 1 -name 'restore-test.*' 2>/dev/null; }
     [[ "$output" == *"is 31h old (limit 30h)"* ]]
 }
 
+@test "a malformed backup interval fails that project instead of ending the run" {
+    export PG_BACKUP_EVERY_HOURS="reli=24h"
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"reli restore FAILED — pg_backup_every_hours: reli's interval '24h' in PG_BACKUP_EVERY_HOURS is not a whole number of hours"* ]]
+    [[ "$output" == *"restore test FAILED for: reli"* ]]
+}
+
 @test "musenmingle's default 24h interval: a 10h-old archive restores (#314)" {
     unset PG_BACKUP_EVERY_HOURS
     only_configured 'MUSENMINGLE_DB_URL=postgresql://u:p@h/d'

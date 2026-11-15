@@ -256,7 +256,9 @@ restore_project() {
         fail "no $name-*.sql.gz under $dir"; return 1
     fi
     age=$(( $(date +%s) - $(stat -c %Y "$archive") ))
-    every=$(pg_backup_every_hours "$name")
+    if ! every=$(pg_backup_every_hours "$name" 2>&1); then
+        fail "$every"; return 1
+    fi
     limit_h=$(( MAX_ARCHIVE_AGE_H + ${every:-0} ))
     if [ "$age" -gt $(( limit_h * 3600 )) ]; then
         fail "newest archive $archive is $(( age / 3600 ))h old (limit ${limit_h}h) — is backup-dbs.sh running?"; return 1

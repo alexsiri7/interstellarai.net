@@ -71,12 +71,17 @@ PG_BACKUP_PROJECTS=(
 : "${PG_BACKUP_EVERY_HOURS=musenmingle=24}"
 
 # pg_backup_every_hours NAME → prints NAME's PG_BACKUP_EVERY_HOURS interval,
-# nothing when it backs up every run.
+# nothing when it backs up every run. Fails when the interval is not a whole
+# number of hours: callers do arithmetic on it, and a bad operand makes bash
+# abandon the rest of the run while still exiting 0.
 pg_backup_every_hours() {
     local name="$1" pair every=""
     for pair in $PG_BACKUP_EVERY_HOURS; do
         [ "${pair%%=*}" = "$name" ] && every="${pair#*=}"
     done
+    case "$every" in
+        *[!0-9]*) echo "pg_backup_every_hours: $name's interval '$every' in PG_BACKUP_EVERY_HOURS is not a whole number of hours" >&2; return 1 ;;
+    esac
     printf '%s' "$every"
 }
 
