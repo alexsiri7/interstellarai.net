@@ -135,6 +135,8 @@ def download(storage_path: str) -> bytes:
     key = os.environ.get("ANNIE_SUPABASE_SERVICE_ROLE_KEY", "")
     if not base or not key:
         raise SystemExit("ANNIE_SUPABASE_URL and ANNIE_SUPABASE_SERVICE_ROLE_KEY are needed to download location images")
+    if not base.startswith("https://"):
+        raise SystemExit("ANNIE_SUPABASE_URL must be an https:// URL: the storage key is sent with every download")
     url = f"{base}/storage/v1/object/authenticated/{IMAGE_BUCKET}/{urllib.parse.quote(storage_path)}"
     request = urllib.request.Request(url, headers={"apikey": key, "Authorization": f"Bearer {key}"})
     with urllib.request.urlopen(request, timeout=60) as response:

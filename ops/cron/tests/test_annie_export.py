@@ -118,6 +118,12 @@ class ExportTest(unittest.TestCase):
         review = (self.export(drawn) / "location/the-hall.review.md").read_text()
         self.assertIn("- **Region:** path (1, 2) → (3.5, 4) (screenshot pixels)\n", review)
 
+    def test_a_point_region_lists_its_pixel_coordinate(self) -> None:
+        drawn = copy.deepcopy(BIBLE)
+        drawn["annotations"][1]["region"] = {"type": "point", "x": 5, "y": 7}
+        review = (self.export(drawn) / "location/the-hall.review.md").read_text()
+        self.assertIn("- **Region:** point (5, 7) (screenshot pixels)\n", review)
+
     def test_a_second_export_is_identical_and_downloads_nothing(self) -> None:
         first = self.files(self.export(BIBLE, "one"))
         self.assertEqual(sorted(self.downloads), sorted(STORAGE))
@@ -167,6 +173,14 @@ class ExportTest(unittest.TestCase):
                 mock.patch.object(sys, "stdin", io.StringIO(json.dumps(BIBLE))):
             ae.main()
         self.assertIn("ANNIE_SUPABASE_URL", str(raised.exception))
+
+    def test_a_storage_url_that_is_not_https_is_refused_before_sending_the_key(self) -> None:
+        env = {"ANNIE_SUPABASE_URL": "http://annie.supabase.co", "ANNIE_SUPABASE_SERVICE_ROLE_KEY": "sekrit"}
+        with mock.patch.dict("os.environ", env, clear=True), mock.patch.object(ae.urllib.request, "urlopen") as urlopen, \
+                self.assertRaises(SystemExit) as raised:
+            ae.download("p/hall-sketch/full.webp")
+        urlopen.assert_not_called()
+        self.assertIn("https://", str(raised.exception))
 
 
 if __name__ == "__main__":

@@ -113,3 +113,15 @@ teardown() { rm -rf "$TEST_TMP"; }
     grep -qx 'Too dark.' "$HOME/last-export/location/the-hall.review.md"
     grep -q 'location/<slug>.map.json' "$HOME/last-export/README.md"
 }
+
+@test "images come from the persistent cache, so a cached image needs no storage key" {
+    data='cached sketch'
+    sum=$(printf '%s' "$data" | sha256sum | cut -d' ' -f1)
+    mkdir -p "$HOME/.archon/story-sync-state/images/game"
+    printf '%s' "$data" > "$HOME/.archon/story-sync-state/images/game/$sum.webp"
+    echo '{"objects":[{"id":"h","type":"LOCATION","name":"The Hall","description":"","notes":"","role":null,"tags":""}],"relationships":[],"nodes":[],"images":[{"id":"i","storyObjectId":"h","kind":"sketch","caption":"","orderIndex":0,"isCover":true,"storagePath":"p/i/full.webp","sha256":"'"$sum"'"}],"maps":[],"annotations":[]}' > "$STORY_JSON"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$HOME/last-export/location/the-hall/01-sketch.webp")" = "$data" ]
+    [ -f "$HOME/.archon/story-sync-state/images/game/$sum.webp" ]
+}
