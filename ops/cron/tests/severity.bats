@@ -55,7 +55,9 @@ setup() {
             'a Railway-console and GitHub-repo-settings action with no git-tracked representation, which the issue itself calls a human step' \
             'the owner creating a Sentry auth token' 'a hand merge of ops/cron/lib/trust.sh' \
             'an owner-gated merge path' 'a step only the owner can take' \
-            'the owner storing the key in Doppler' 'turning on branch protection'; do
+            'the owner storing the key in Doppler' 'turning on branch protection' \
+            'a token kept in Doppler' 'a change in the Railway dashboard' 'a Cloudflare dashboard step' \
+            'PR #5, merged by hand' 'the environment secrets for staging'; do
         owner_only_blocker "$text" || { echo "missed: $text"; return 1; }
     done
 }
@@ -65,7 +67,9 @@ setup() {
     for text in '#8 landing first' 'PR #8' 'Owner-level product decision: keep the documented tradeoff' \
             'the console logging refactor in #14' 'the settings screen redesign (#31)' \
             'the dashboard page component from #44' '#122 (owner sign-in) and the Owner-only scene editor' \
-            'PR #8, which the owner should review'; do
+            'PR #8, which the owner should review' '#8 (the Doppler client wrapper) landing first' \
+            '#8 landing first; the repro was confirmed by hand' 'the Sentry dashboard widget in #31' \
+            '#12, the GitHub environments work'; do
         ! owner_only_blocker "$text" || { echo "matched: $text"; return 1; }
     done
 }

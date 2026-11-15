@@ -1220,6 +1220,17 @@ asked_proceed() {
     [ "$(grep -c '^add_note' "$LACHESIS_ARGV")" -eq 1 ]
 }
 
+@test "tiers: tier 1 blocked on an owner-only step asks with no default instead of acting" {
+    lachesis_on
+    tier_outcome 1 'Not done: blocked on a Railway-console action with no git-tracked representation, which the issue calls a human step.'
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 9
+    [ "$(asked_default)" = "" ]
+    [ "$(gh_calls 'archon-settle-act')" -eq 0 ]
+    [[ "$output" == *"tier 1, default none (owner-only blocker)"* ]]
+}
+
 @test "tiers: tier 1 other Not done releases to run again with the proceed marker" {
     lachesis_on
     tier_outcome 1 'Not done: the investigation was inconclusive. The crash did not reproduce.'

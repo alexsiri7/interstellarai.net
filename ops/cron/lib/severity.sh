@@ -67,18 +67,19 @@ SETTLE_DEFAULT_ACTION_RE='close-completed|close-not-planned|depend-[0-9]+'
 # default, a false negative is the ordinary default.
 SETTLE_OWNER_BLOCKER_WORDS=(
   # a step only a person can take
-  'human[- ]only' '(human|manual) (steps?|actions?)' 'by hand'
+  'human[- ]only' '(human|manual) (steps?|actions?)' 'merged? by hand'
   'owner[- ](only|gated) ([a-z-]+ )?(steps?|actions?|changes?|tasks?|paths?|merges?|merge paths?)'
   'only (a human|a person|a maintainer|the owner|the maintainer|you) (can|could|may)'
   'the (owner|human|maintainer)(.s)? (has |needs |must |is )?(to )?(creat|add|set|stor|rotat|enabl|configur|grant|merg|approv)[a-z]*'
   'outside ((the )?(agent|factory|automation)(.s)? )?reach' 'not authori[sz]ed to' 'no git-tracked representation'
   # a console or settings change
   '[a-z]+-(console|dashboard)'
-  '(railway|aws|gcp|google cloud|firebase|play|cloudflare|vercel|netlify|supabase|sentry|doppler|github|apple developer|app store connect) (console|dashboard)'
-  '(repo|repository|github|org|organi[sz]ation|environment)[- ](settings?|secrets?|environments?)'
+  '(in|via|through) (the )?(railway|aws|gcp|google cloud|firebase|play|cloudflare|vercel|netlify|supabase|sentry|doppler|github|apple developer|app store connect) (console|dashboard)'
+  '(railway|aws|gcp|google cloud|firebase|play|cloudflare|vercel|netlify|supabase|sentry|doppler|github|apple developer|app store connect) (console|dashboard) (steps?|actions?|changes?|settings?)'
+  '(repo|repository|github|org|organi[sz]ation|environment)[- ](settings?|secrets?)'
   'branch protection' 'required reviewers'
   # a secret or token only the owner can get
-  'doppler'
+  '(in|into|to) doppler'
   # an account action (billing and payments are already tier 3)
   '(two-factor|2fa)' 'admin (access|rights|permissions?)'
   # a hand merge of a sensitive path
