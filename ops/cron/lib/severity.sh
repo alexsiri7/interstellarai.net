@@ -64,26 +64,27 @@ SETTLE_DEFAULT_ACTION_RE='close-completed|close-not-planned|depend-[0-9]+'
 # default (#320, the owner's decision of 2026-11-15): running it again stops in
 # the same place. Matched over the verdict only, whole words, case-insensitive;
 # no run declares its blocker's kind. A false positive costs a question with no
-# default, a false negative is the ordinary default.
+# default, a false negative is the ordinary default. Each entry names who must
+# act or the step itself, never a bare feature noun: a blocker such as "the
+# admin-dashboard rewrite" or "two-factor login" is code a run can write.
 SETTLE_OWNER_BLOCKER_WORDS=(
   # a step only a person can take
-  'human[- ]only' '(human|manual) (steps?|actions?)' 'merged? by hand'
+  'human[- ]only' '(a|an|one|is) (human|manual) (step|action)'
+  '(needs?|requires?|takes?) ((a|one|some) )?(human|manual) (steps?|actions?)'
   'owner[- ](only|gated) ([a-z-]+ )?(steps?|actions?|changes?|tasks?|paths?|merges?|merge paths?)'
   'only (a human|a person|a maintainer|the owner|the maintainer|you) (can|could|may)'
   'the (owner|human|maintainer)(.s)? (has |needs |must |is )?(to )?(creat|add|set|stor|rotat|enabl|configur|grant|merg|approv)[a-z]*'
-  'outside ((the )?(agent|factory|automation)(.s)? )?reach' 'not authori[sz]ed to' 'no git-tracked representation'
-  # a console or settings change
-  '[a-z]+-(console|dashboard)'
-  '(in|via|through) (the )?(railway|aws|gcp|google cloud|firebase|play|cloudflare|vercel|netlify|supabase|sentry|doppler|github|apple developer|app store connect) (console|dashboard)'
-  '(railway|aws|gcp|google cloud|firebase|play|cloudflare|vercel|netlify|supabase|sentry|doppler|github|apple developer|app store connect) (console|dashboard) (steps?|actions?|changes?|settings?)'
-  '(repo|repository|github|org|organi[sz]ation|environment)[- ](settings?|secrets?)'
+  'outside ((the )?(agent|factory|automation)(.s)? )?reach' 'no git-tracked representation'
+  '(agent|factory|automation|pipeline|archon|run|bot|token)(.s)? (is |are |was )?not authori[sz]ed to'
+  # a console or settings change, as a step
+  '(steps?|actions?|changes?|tasks?) (in|on|via|through) (the )?((railway|aws|gcp|google cloud|firebase|play|cloudflare|vercel|netlify|supabase|sentry|doppler|github|apple developer|app store connect)[- ](console|dashboard)|doppler)'
+  '((railway|aws|gcp|google cloud|firebase|play|cloudflare|vercel|netlify|supabase|sentry|doppler|github|apple developer|app store connect)[- ](console|dashboard)|(repo|repository|github|org|organi[sz]ation|environment)[- ](settings|secrets))( and [a-z-]+)? (steps?|actions?|changes?|tasks?)'
   'branch protection' 'required reviewers'
-  # a secret or token only the owner can get
-  '(in|into|to) doppler'
   # an account action (billing and payments are already tier 3)
-  '(two-factor|2fa)' 'admin (access|rights|permissions?)'
+  '(owner|maintainer)(.s)? (two-factor|2fa|admin (access|rights|permissions?))'
+  'admin (access|rights|permissions?) (on|to|for) (the )?(repo|repository|org|organi[sz]ation|account)'
   # a hand merge of a sensitive path
-  '(hand|manual)[- ]merge'
+  'merged? by hand' '(a|needs?( a)?|requires?( a)?) (hand|manual)[- ]merge'
 )
 SETTLE_OWNER_BLOCKER_RE=$(IFS='|'; echo "${SETTLE_OWNER_BLOCKER_WORDS[*]}")
 
