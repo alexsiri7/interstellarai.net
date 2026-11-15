@@ -283,7 +283,7 @@ archives() { find "$T/backups/reli" -name '*.sql.gz' 2>/dev/null; }
 
 @test "musenmingle backs up daily by default; other projects every run" {
     unset PG_BACKUP_EVERY_HOURS
-    grep -q 'PG_BACKUP_EVERY_HOURS="${PG_BACKUP_EVERY_HOURS-musenmingle=24}"' "$SCRIPT"
+    grep -q ': "${PG_BACKUP_EVERY_HOURS=musenmingle=24}"' "$CRON_DIR/lib/pg-backup.sh"
     mkdir -p "$T/backups/reli"
     echo x | gzip > "$T/backups/reli/reli-recent.sql.gz"
     run "$SCRIPT"

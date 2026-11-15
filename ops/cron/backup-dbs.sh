@@ -53,23 +53,14 @@ STATUS_FILE="$DB_BACKUP_STATE_DIR/db-backup-status"
 # lib/pg-backup.sh, shared with restore-test.sh.
 PROJECTS=("${PG_BACKUP_PROJECTS[@]}")
 
-# Egress budget. Supabase's free plan allows 5.5 GB of egress a month and every
-# dump counts against it. Musenmingle's schema (thumbnails and embeddings,
-# ~70 MB a dump) taken every 3h was ~0.5 GB a day and blew the quota in
-# November 2026. Projects listed here back up once a day; the rest every run.
-# Format: "name=hours name=hours".
-PG_BACKUP_EVERY_HOURS="${PG_BACKUP_EVERY_HOURS-musenmingle=24}"
-
 log() { echo "$LOG_TAG $(date '+%Y-%m-%d %H:%M:%S') $*"; }
 
 # backup_due <name>: 0 when the project's newest archive is older than its
 # PG_BACKUP_EVERY_HOURS interval (less a 30-minute slack for cron jitter), or
 # when it has no interval or no archive yet.
 backup_due() {
-    local name="$1" pair every="" newest age_min
-    for pair in $PG_BACKUP_EVERY_HOURS; do
-        [ "${pair%%=*}" = "$name" ] && every="${pair#*=}"
-    done
+    local name="$1" every newest age_min
+    every=$(pg_backup_every_hours "$name")
     [ -n "$every" ] || return 0
     newest=$(find "$BACKUP_ROOT/$name" -maxdepth 1 -name '*.sql.gz' -printf '%T@\n' 2>/dev/null | sort -rn | head -1)
     [ -n "$newest" ] || return 0

@@ -225,6 +225,30 @@ cluster_dirs() { find "$T" -maxdepth 1 -name 'restore-test.*' 2>/dev/null; }
     [ ! -f "$T/restored-restore_reli.sql" ]
 }
 
+@test "a project with a 24h backup interval may be up to 30h old; older fails" {
+    export PG_BACKUP_EVERY_HOURS="reli=24"
+    touch -d '29 hours ago' "$T/backups/reli/reli-20260919-091701.sql.gz"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK: reli restored"* ]]
+    touch -d '31 hours ago' "$T/backups/reli/reli-20260919-091701.sql.gz"
+    run "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"is 31h old (limit 30h)"* ]]
+}
+
+@test "musenmingle's default 24h interval: a 10h-old archive restores (#314)" {
+    unset PG_BACKUP_EVERY_HOURS
+    only_configured 'MUSENMINGLE_DB_URL=postgresql://u:p@h/d'
+    events_dump_sql > "$T/events.sql"
+    make_schema_archive musenmingle musenmingle-20260919-091701 2 events.sources "$T/events.sql" > /dev/null
+    touch -d '10 hours ago' "$T/backups/musenmingle/musenmingle-20260919-091701.sql.gz"
+    export STUB_ROWS=2
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK: musenmingle restored"* ]]
+}
+
 @test "no archive at all fails" {
     rm -rf "$T/backups/reli"
     run "$SCRIPT"
