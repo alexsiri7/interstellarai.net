@@ -112,6 +112,12 @@ class ExportTest(unittest.TestCase):
         self.assertIn("- **Snapshot:** build `v1.2`, sha256 `abc123`\n", review)
         self.assertIn("- **Snapshot:** pruned\n", review)
 
+    def test_a_path_region_lists_its_points(self) -> None:
+        drawn = copy.deepcopy(BIBLE)
+        drawn["annotations"][1]["region"] = {"type": "path", "points": [[1, 2], [3.5, 4]]}
+        review = (self.export(drawn) / "location/the-hall.review.md").read_text()
+        self.assertIn("- **Region:** path (1, 2) → (3.5, 4) (screenshot pixels)\n", review)
+
     def test_a_second_export_is_identical_and_downloads_nothing(self) -> None:
         first = self.files(self.export(BIBLE, "one"))
         self.assertEqual(sorted(self.downloads), sorted(STORAGE))
@@ -131,6 +137,14 @@ class ExportTest(unittest.TestCase):
         self.assertEqual({k for k in first.keys() | second.keys() if first.get(k) != second.get(k)},
                          {"location/the-hall/02-mood.webp"})
         self.assertFalse((self.cache / f"{sha(HALL_MOOD)}.webp").exists())
+
+    def test_a_changed_map_changes_only_its_map_file(self) -> None:
+        first = self.files(self.export(BIBLE, "one"))
+        changed = copy.deepcopy(BIBLE)
+        changed["maps"][0]["items"][0]["x"] = 10
+        second = self.files(self.export(changed, "two"))
+        self.assertEqual({k for k in first.keys() | second.keys() if first.get(k) != second.get(k)},
+                         {"location/the-hall.map.json"})
 
     def test_a_location_with_neither_is_unchanged_from_the_plain_export(self) -> None:
         plain = {k: BIBLE[k] for k in ("objects", "relationships", "nodes")}

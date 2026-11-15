@@ -58,11 +58,13 @@ A location can also carry:
   top-left corner (y down), `rotation` in degrees clockwise, an area's `points`
   relative to its centre, and an optional `link` to a story object by `name` and
   `slug` (the path of its file here, without `.md`; `null` when the linked
-  object was deleted). `background` is the image the map is drawn over.
+  object was deleted). `background` is the image the map is drawn over, `null`
+  when the map has none.
 - `location/<slug>.review.md`: notes and name or description changes the owner
   made on game snapshots of the location and that are not resolved yet. Regions
   are in the snapshot's screenshot pixels; the screenshot itself is not here,
-  the block names its build and sha256.
+  the block names its build and sha256, or says `pruned` when that snapshot is
+  gone.
 """
 
 
