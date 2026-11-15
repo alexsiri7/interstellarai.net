@@ -17,7 +17,7 @@ setup() {
     log() { echo "$*" >> "$T/log"; }
     # gh against $T/issues.json: list, create, view, comment.
     gh() {
-        echo "$1 $2" >> "$T/gh-calls"
+        echo "$*" >> "$T/gh-calls"
         local body="" title="" n
         case "$1 $2" in
             "issue list") [ -z "${GH_LIST_FAIL:-}" ] || return 1; cat "$T/issues.json" ;;
@@ -46,7 +46,7 @@ setup() {
     # shellcheck disable=SC1090
     source <(awk '/^ship_breaker_redact\(\)/{p=1} p{print} p && /^}$/{p=0}' "$D/lib/ship-breaker.sh")
     # shellcheck disable=SC1090
-    source <(awk '/^(run_failure_signature|check_failure_signatures|escalate_failure_signature)\(\)/{p=1}
+    source <(awk '/^(run_failure_signature|node_failure_error|check_failure_signatures|escalate_failure_signature)\(\)/{p=1}
                   p{print} p && /^}$/{p=0}' "$D/pipeline-health-cron.sh")
 }
 
@@ -88,6 +88,8 @@ comments() { jq '[.[].comments | length] | add // 0' "$T/issues.json"; }
     [[ "$body" == *"**First seen**: $(date -u -d "@$oldest" '+%Y-%m-%d %H:%M UTC')"* ]]
     [ "$(grep -o 'cron-issue-[0-9]*' <<<"$body" | tr '\n' ' ')" = "cron-issue-22 cron-issue-33 cron-issue-11 " ]
     [ "$(tail -n1 <<<"$body")" = "<!-- lachesis:automated -->" ]
+    grep -q -- '^issue list .*--label factory-gap' "$T/gh-calls"
+    grep -q -- '^issue create .*--label factory-gap' "$T/gh-calls"
 
     check_failure_signatures
 
@@ -114,22 +116,41 @@ comments() { jq '[.[].comments | length] | add // 0' "$T/issues.json"; }
     [ "$(tail -n1 <<<"$comment")" = "<!-- lachesis:automated -->" ]
 }
 
-@test "runs where no node completed share a signature too" {
-    for i in 1 2 3; do
-        printf '%s\n' "❌ DAG workflow 'archon-ship-block' failed: node forge failed. 3$i downstream nodes were skipped." \
-            > "$BASE_DIR/reli/.archon-logs/cron-issue-$i-20261114-101010.log"
-    done
-    for i in 4 5 6; do
+first_node_failed() {  # <project> <issue> <node> <dag_node_failed fields>
+    printf '%s\n' \
+        '{"level":50,"time":1794743233050,"nodeId":"'"$3"'",'"$4"',"msg":"dag_node_failed"}' \
+        "❌ DAG workflow 'archon-ship-block' failed: nodes $3, deliver failed. 3$2 downstream nodes were skipped." \
+        > "$BASE_DIR/$1/.archon-logs/cron-issue-$2-20261114-101010.log"
+}
+
+@test "runs where no node completed are signed by the failing node's own error" {
+    first_node_failed reli 1 forge '"exitCode":1,"stderrTail":"gh: not authenticated (run 12)"'
+    first_node_failed filmduel 2 forge '"exitCode":1,"stderrTail":"gh: not authenticated (run 34)"'
+    first_node_failed annie 3 forge '"exitCode":1,"stderrTail":"gh: not authenticated\n(run 56)"'
+
+    check_failure_signatures
+
+    [ "$(issues)" -eq 1 ]
+    [ "$(jq -r '.[0].title' "$T/issues.json")" = "factory-gap: 3 runs failed at forge with the same error" ]
+    [[ "$(jq -r '.[0].body' "$T/issues.json")" == *"'forge': gh: not authenticated (run <id>)"* ]]
+}
+
+@test "runs where no node completed, failing for different reasons or quoting none, file nothing" {
+    first_node_failed reli 1 forge '"exitCode":1,"stderrTail":"gh: not authenticated"'
+    first_node_failed filmduel 2 forge '"exitCode":128,"stderrTail":"fatal: could not read from remote"'
+    first_node_failed annie 3 forge '"err":{"type":"Error","message":"Claude Code process exited with code 1"}'
+    first_node_failed reli 4 forge '"exitCode":1,"stderrTail":""'
+    printf '%s\n' "❌ DAG workflow 'archon-ship-block' failed: node forge failed. 7 downstream nodes were skipped." \
+        > "$BASE_DIR/filmduel/.archon-logs/cron-issue-5-20261114-101010.log"
+    for i in 6 7 8; do
         printf '%s\n' "❌ DAG workflow 'archon-ship-block' completed with no successful nodes. Check node conditions, trigger rules, and upstream failures." \
             > "$BASE_DIR/annie/.archon-logs/cron-issue-$i-20261114-101010.log"
     done
 
     check_failure_signatures
 
-    [ "$(issues)" -eq 2 ]
-    jq -e '[.[].title] | sort == ["factory-gap: 3 runs failed at (none) with the same error",
-                                  "factory-gap: 3 runs failed at forge with the same error"]' "$T/issues.json"
-    jq -e 'any(.[].body; contains("'"'"'forge'"'"': node forge failed. <id> downstream nodes were skipped."))' "$T/issues.json"
+    [ "$(issues)" -eq 0 ]
+    [ ! -s "$T/gh-calls" ]
 }
 
 @test "different messages, or fewer than three matches, file nothing" {
