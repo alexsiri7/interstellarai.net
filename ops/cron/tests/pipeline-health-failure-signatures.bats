@@ -71,6 +71,10 @@ comments() { jq '[.[].comments | length] | add // 0' "$T/issues.json"; }
     failed_run reli 11 "$(publish_error 3412345)"
     failed_run filmduel 22 "$(publish_error 98)"
     failed_run annie 33 "$(publish_error 7)"
+    oldest=$(( $(date +%s) - 20 * 3600 ))
+    touch -d "@$(( oldest + 19 * 3600 ))" "$BASE_DIR/reli/.archon-logs/cron-issue-11-20261114-101010.log"
+    touch -d "@$oldest" "$BASE_DIR/filmduel/.archon-logs/cron-issue-22-20261114-101010.log"
+    touch -d "@$(( oldest + 10 * 3600 ))" "$BASE_DIR/annie/.archon-logs/cron-issue-33-20261114-101010.log"
 
     check_failure_signatures
 
@@ -81,7 +85,8 @@ comments() { jq '[.[].comments | length] | add // 0' "$T/issues.json"; }
     [[ "$body" == *"cron-issue-11-20261114-101010.log"* ]]
     [[ "$body" == *"cron-issue-22-20261114-101010.log"* ]]
     [[ "$body" == *"cron-issue-33-20261114-101010.log"* ]]
-    [[ "$body" == *"**First seen**: "* ]]
+    [[ "$body" == *"**First seen**: $(date -u -d "@$oldest" '+%Y-%m-%d %H:%M UTC')"* ]]
+    [ "$(grep -o 'cron-issue-[0-9]*' <<<"$body" | tr '\n' ' ')" = "cron-issue-22 cron-issue-33 cron-issue-11 " ]
     [ "$(tail -n1 <<<"$body")" = "<!-- lachesis:automated -->" ]
 
     check_failure_signatures
@@ -107,6 +112,24 @@ comments() { jq '[.[].comments | length] | add // 0' "$T/issues.json"; }
     [[ "$comment" == *"cron-issue-44-20261114-101010.log"* ]]
     [[ "$comment" != *"cron-issue-11-"* ]]
     [ "$(tail -n1 <<<"$comment")" = "<!-- lachesis:automated -->" ]
+}
+
+@test "runs where no node completed share a signature too" {
+    for i in 1 2 3; do
+        printf '%s\n' "❌ DAG workflow 'archon-ship-block' failed: node forge failed. 3$i downstream nodes were skipped." \
+            > "$BASE_DIR/reli/.archon-logs/cron-issue-$i-20261114-101010.log"
+    done
+    for i in 4 5 6; do
+        printf '%s\n' "❌ DAG workflow 'archon-ship-block' completed with no successful nodes. Check node conditions, trigger rules, and upstream failures." \
+            > "$BASE_DIR/annie/.archon-logs/cron-issue-$i-20261114-101010.log"
+    done
+
+    check_failure_signatures
+
+    [ "$(issues)" -eq 2 ]
+    jq -e '[.[].title] | sort == ["factory-gap: 3 runs failed at (none) with the same error",
+                                  "factory-gap: 3 runs failed at forge with the same error"]' "$T/issues.json"
+    jq -e 'any(.[].body; contains("'"'"'forge'"'"': node forge failed. <id> downstream nodes were skipped."))' "$T/issues.json"
 }
 
 @test "different messages, or fewer than three matches, file nothing" {
@@ -140,6 +163,10 @@ comments() { jq '[.[].comments | length] | add // 0' "$T/issues.json"; }
         > "$BASE_DIR/annie/.archon-logs/pr-maint-44-20261114-101010.log"
     for i in 5 6 7; do
         failed_run annie "$i" "Claude Code returned an error result: rate_limit_error (request $i)"
+    done
+    for i in 8 9 10; do
+        failed_run reli "$i" "API Error: 529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\"}}"
+        failed_run filmduel "$i" "API Error: 429 quota exceeded"
     done
 
     check_failure_signatures

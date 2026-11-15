@@ -2896,14 +2896,18 @@ check_published_prs() {
 #   11-15, 15 archon-ship runs across four repos died on one review__publish
 #   bug while this script only reported "no progress". Each tick reads the
 #   cron-issue-*.log ship logs of the last FAILURE_SIGNATURE_WINDOW_MINUTES
-#   across REPOS and takes a signature from the engine's
+#   across REPOS and takes a signature from the engine's failure line, one of
 #     ❌ DAG workflow '<wf>' completed with failures: '<node>': <error>
-#   line: the failing node and that line's error, with uuids, SHAs and numbers
-#   replaced by <id>. Once FAILURE_SIGNATURE_MIN_RUNS runs share one, it files
+#     ❌ DAG workflow '<wf>' failed: node <node> failed. <n> downstream nodes were skipped.
+#     ❌ DAG workflow '<wf>' completed with no successful nodes. ...
+#   (the last two when no node completed, e.g. the first one failed): the
+#   failing node and that line's error, with uuids, SHAs and numbers replaced
+#   by <id>. Once FAILURE_SIGNATURE_MIN_RUNS runs share one, it files
 #   one factory-gap issue on FAILURE_SIGNATURE_REPO, found again by a hidden
 #   signature marker; a run it does not list yet becomes a comment on the open
-#   one. A rate-limit error is no signature, as the ship circuit breaker does
-#   not count one (a quota pause never writes that line at all), and a run
+#   one. A rate-limit, quota or overload error (check_progress's token-limit
+#   words) is no signature, as the ship circuit breaker does not count one (a
+#   quota pause never writes that line at all), and a run
 #   older than the last close of its signature's escalation is not counted
 #   again. Errors are redacted (ship_breaker_redact) before they are quoted.
 # ----------------------------------------------------------------------------
@@ -2915,12 +2919,22 @@ FAILURE_SIGNATURE_WINDOW_MINUTES="${FAILURE_SIGNATURE_WINDOW_MINUTES:-1440}"
 # nothing for any other.
 run_failure_signature() {
   local line node msg
-  line=$(grep -m1 -oE "DAG workflow '[^']*' completed with failures: '[^']+': .*" "$1" 2>/dev/null) \
-    || return 0
-  line=${line#*completed with failures: \'}
-  node=${line%%\'*}
-  msg=${line#*\': }
-  grep -qiE 'rate.?limit|hit your.*limit' <<<"$msg" && return 0
+  line=$(grep -m1 -oE "DAG workflow '[^']*' (completed with failures: '[^']+': |failed: nodes? |completed with no successful nodes).*" \
+           "$1" 2>/dev/null) || return 0
+  case $line in
+    *"' completed with failures: '"*)
+      line=${line#*completed with failures: \'}
+      node=${line%%\'*}
+      msg=${line#*\': } ;;
+    *"' failed: node"*)
+      msg=${line#*\' failed: }
+      node=${msg#node }; node=${node#s }; node=${node%% failed. *} ;;
+    *)
+      node="(none)"
+      msg=${line#*\' } ;;
+  esac
+  grep -qiE 'rate.?limit|hit your.*limit|\b429\b|quota.?exceed|overloaded|usage.?limit|credit.?exhaust' \
+    <<<"$msg" && return 0
   msg=$(ship_breaker_redact <<<"$msg" | sed -E \
     -e 's/[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}/<id>/g' \
     -e 's/\b[0-9a-f]{7,40}\b/<id>/g' \
