@@ -70,6 +70,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/lachesis.sh"
 # shellcheck source=lib/claude-auth.sh
 source "$SCRIPT_DIR/lib/claude-auth.sh"
+# For GH_FACTORY_SWITCH_LOCK's resolved value (prompts/morning-pass.md's
+# fix 1 names the lock by path; this is the one place that can know whether
+# it was overridden from the default).
+# shellcheck source=lib/gh-factory.sh
+source "$SCRIPT_DIR/lib/gh-factory.sh"
 
 REPO="${OPS_CHECKOUT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 STATE="${MORNING_PASS_STATE:-$HOME/.local/state/archon-cron/morning-pass}"
@@ -231,7 +236,7 @@ REPORT-ONLY MODE: make no fix at all (neither the briefing's nor the host ones),
 EOF
   fi
   echo
-  cat "$PROMPT_FILE"
+  sed "s#~/\.archon/state/gh-factory-switch\.lock#$GH_FACTORY_SWITCH_LOCK#g" "$PROMPT_FILE"
   printf '\n## LACHESIS BRIEFING (from get_morning_briefing; the owner'"'"'s instructions, within the bounds above)\n\n'
   cat "$2"
   printf '\n\n## Host snapshot (%s)\n\nBEGIN UNTRUSTED %s host-snapshot\n' "$(date -Is)" "$nonce"
