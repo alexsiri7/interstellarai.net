@@ -1102,10 +1102,12 @@ setup_scheduled_env() {
 # gh stub for check_prod_deploy. The function filters listings with a local
 # jq, so run and deployment fixtures are raw gh/API JSON and the real filters
 # are under test. commits/main and the deployment status keep an inline --jq,
-# so those fixtures are the post-jq answer.
+# so those fixtures are the post-jq answer. `run view <id>` answers with
+# $RUN_VIEW_<id> and fails when that is unset.
 stub_gh_for_prod_deploy() {
     gh() {
         case "$1 $2" in
+            "run view") local v="RUN_VIEW_$3"; [ -n "${!v:-}" ] || return 1; echo "${!v}" ;;
             "run list")
                 case "$*" in
                     *"--commit"*) echo "$HEAD_RUNS_FIXTURE" ;;
@@ -1120,6 +1122,7 @@ stub_gh_for_prod_deploy() {
             "issue create") echo "$*" > "$ISSUE_SENTINEL"; record_issue_body "$@"; echo "https://github.com/alexsiri7/test-project/issues/42" ;;
             "issue close") printf '%s %s\n' "$3" "$7" >> "$STATE_DIR/closed" ;;
             "issue edit") printf '%s\n' "$*" >> "$STATE_DIR/edited" ;;
+            "issue comment") [ -z "${COMMENT_FAILS:-}" ] || return 1; printf '%s\n' "$*" >> "$STATE_DIR/commented" ;;
             *) echo "" ;;
         esac
     }
@@ -1147,6 +1150,9 @@ setup_prod_deploy_env() {
     # shellcheck disable=SC1090
     source <(awk '/^DEPLOY_LAG_FLOOR_SECONDS=/{print}' "$SCRIPT_FILE")
     load_fn deploy_lag_threshold
+    load_fn deploy_failure_step
+    load_fn open_deploy_failure_issue
+    load_fn prod_deploy_failure_comment
     load_fn check_prod_deploy
     load_escalation_closes
 }
@@ -1220,6 +1226,84 @@ head_aged() { HEAD_FIXTURE='{"sha":"aaa","ts":"'"$(date -u -d "@$(( $(date +%s) 
     [ -f "$STATE_DIR/prod-deploy-failed-test-project-aaa" ]
     assert_settled_launch health-prod-deploy-aaa
     assert_settle_parks_filed_body
+}
+
+# ── check_prod_deploy: one open issue per failing deploy step (#325) ───────
+
+# run_view_fixture <job> <step> — raw `gh run view --json name,jobs` of a
+# Production run whose <job> failed at <step>, after a green job.
+run_view_fixture() {
+    jq -nc --arg j "$1" --arg s "$2" '{name: "Staging → Production Pipeline", jobs: [
+        {name: "Build", conclusion: "success", steps: [{name: "Checkout", conclusion: "success"}]},
+        {name: $j, conclusion: "failure", steps: [{name: "Checkout", conclusion: "success"},
+            {name: $s, conclusion: "failure"}, {name: "Deploy", conclusion: "skipped"}]}]}'
+}
+
+# The reli#1842 case: HEAD "aaa" fails in run 222, and the open issue this
+# script filed for run 111 is parked for the owner, no archon label left.
+setup_repeat_deploy_failure() {
+    setup_prod_deploy_env
+    HEAD_RUNS_FIXTURE='[{"name":"Staging → Production Pipeline","conclusion":"failure","createdAt":"2026-11-16T01:46:08Z","updatedAt":"2026-11-16T01:49:29Z","url":"https://github.com/alexsiri7/test-project/actions/runs/222"}]'
+    RUN_VIEW_222=$(run_view_fixture "Deploy to staging" "Validate Railway secrets")
+    RUN_VIEW_111=$(run_view_fixture "Deploy to staging" "Validate Railway secrets")
+    ISSUE_LIST_FIXTURE=$(jq -nc '[
+        {number: 1865, title: "Prod deploy failed on main", body: "## Prod deploy failed\n\n**Deploy run/status**: https://github.com/alexsiri7/test-project/actions/runs/111\n\nAuto-filed by `pipeline-health-cron.sh`."},
+        {number: 1842, title: "Prod deploy failed on main", body: "## Prod deploy failed\n\n**SHA**: `old`\n**Deploy run/status**: https://github.com/alexsiri7/test-project/actions/runs/111\n**State**: failure\n\nAuto-filed by `pipeline-health-cron.sh`. Prod deploy is a pipeline bottleneck."},
+        {number: 1800, title: "Prod deploy failed on main", body: "Filed by hand. **Deploy run/status**: https://github.com/alexsiri7/test-project/actions/runs/111"}]')
+    stub_gh_for_prod_deploy
+}
+
+@test "check_prod_deploy comments on the open issue whose deploy failed at the same step, filing and firing nothing" {
+    setup_repeat_deploy_failure
+
+    check_prod_deploy "test-project"
+
+    [ ! -f "$ISSUE_SENTINEL" ]
+    [ ! -f "$STATE_DIR/nohup-argv" ]
+    [ "$(grep -c "^issue comment " "$STATE_DIR/commented")" -eq 1 ]
+    grep -q '^issue comment 1842 --repo alexsiri7/test-project --body ' "$STATE_DIR/commented"
+    grep -qF '**Failed step**: `Staging → Production Pipeline / Deploy to staging / Validate Railway secrets`' "$STATE_DIR/commented"
+    grep -qF '**SHA**: `aaa`' "$STATE_DIR/commented"
+    grep -qF '**Deploy run/status**: https://github.com/alexsiri7/test-project/actions/runs/222' "$STATE_DIR/commented"
+    grep -qF '<!-- lachesis:automated -->' "$STATE_DIR/commented"
+    [ -f "$STATE_DIR/prod-deploy-failed-test-project-aaa" ]
+    [ ! -f "$STATE_DIR/prod-deploy-cooldown-test-project" ]
+}
+
+@test "check_prod_deploy files and fires as before when the open issue failed at another step" {
+    setup_repeat_deploy_failure
+    RUN_VIEW_111=$(run_view_fixture "Deploy to staging" "Run migrations")
+
+    check_prod_deploy "test-project"
+
+    [ ! -f "$STATE_DIR/commented" ]
+    grep -q "Prod deploy failed on main" "$ISSUE_SENTINEL"
+    [ -f "$STATE_DIR/prod-deploy-failed-test-project-aaa" ]
+    assert_settled_launch health-prod-deploy-aaa
+}
+
+@test "check_prod_deploy keeps the SHA unmarked when the comment fails, so the next tick retries" {
+    setup_repeat_deploy_failure
+    COMMENT_FAILS=1
+
+    check_prod_deploy "test-project"
+
+    [ ! -f "$ISSUE_SENTINEL" ]
+    [ ! -f "$STATE_DIR/prod-deploy-failed-test-project-aaa" ]
+}
+
+@test "deploy_failure_step names the failed job when no step failed, and fails on a run with no failed job" {
+    setup_prod_deploy_env
+    stub_gh_for_prod_deploy
+    RUN_VIEW_5='{"name":"Production","jobs":[{"name":"deploy","conclusion":"timed_out","steps":[]}]}'
+    RUN_VIEW_6='{"name":"Production","jobs":[{"name":"deploy","conclusion":"success","steps":[]}]}'
+
+    [ "$(deploy_failure_step test-project https://github.com/alexsiri7/test-project/actions/runs/5)" = "Production / deploy" ]
+    run deploy_failure_step test-project https://github.com/alexsiri7/test-project/actions/runs/6
+    [ "$status" -eq 1 ]
+    run deploy_failure_step test-project https://github.com/alexsiri7/test-project/actions/runs/7
+    [ "$status" -eq 1 ]
+    [ "$(deploy_failure_step test-project https://github.com/alexsiri7/test-project/deployments)" = "production deployment" ]
 }
 
 @test "check_prod_deploy waits on a fresh HEAD that no deploy has reached yet" {
