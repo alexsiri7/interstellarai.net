@@ -4,7 +4,8 @@
 #
 # For every project in PG_BACKUP_PROJECTS (lib/pg-backup.sh) it takes the
 # newest archive under $BACKUP_ROOT/<project>/, refuses one older than
-# RESTORE_TEST_MAX_ARCHIVE_AGE_H (6: two 3-hourly backups missed), and
+# RESTORE_TEST_MAX_ARCHIVE_AGE_H (6: two 3-hourly backups missed) — plus the
+# project's PG_BACKUP_EVERY_HOURS interval when it backs up less often — and
 # restores it into a throwaway PostgreSQL cluster (initdb + pg_ctl from the
 # user-level PostgreSQL 17 in ~/.local/opt/postgresql-17, unix socket only,
 # random port, temp dir removed on exit). The restore runs under
@@ -233,7 +234,7 @@ STATUS_LINES=()
 restore_project() {
     local name="$1" url_var="$2" schema="$3" table="$4"
     local dir="$BACKUP_ROOT/$name" archive age reason rows db errfile fkfile
-    local t0 ms found ntables fks got fk_re
+    local t0 ms found ntables fks got fk_re every limit_h
 
     if [ -z "${!url_var:-}" ]; then
         log "SKIP: $name — $url_var not set (add it to Doppler factory/prd)"
@@ -255,8 +256,12 @@ restore_project() {
         fail "no $name-*.sql.gz under $dir"; return 1
     fi
     age=$(( $(date +%s) - $(stat -c %Y "$archive") ))
-    if [ "$age" -gt $(( MAX_ARCHIVE_AGE_H * 3600 )) ]; then
-        fail "newest archive $archive is $(( age / 3600 ))h old (limit ${MAX_ARCHIVE_AGE_H}h) — is backup-dbs.sh running?"; return 1
+    if ! every=$(pg_backup_every_hours "$name" 2>&1); then
+        fail "$every"; return 1
+    fi
+    limit_h=$(( MAX_ARCHIVE_AGE_H + ${every:-0} ))
+    if [ "$age" -gt $(( limit_h * 3600 )) ]; then
+        fail "newest archive $archive is $(( age / 3600 ))h old (limit ${limit_h}h) — is backup-dbs.sh running?"; return 1
     fi
     if ! reason=$(pg_validate_archive "$archive"); then
         fail "$archive: $reason"; return 1

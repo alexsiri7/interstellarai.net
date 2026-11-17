@@ -62,6 +62,29 @@ PG_BACKUP_PROJECTS=(
     'kindred-auth|KINDRED_DB_URL|auth|users'
 )
 
+# Egress budget. Supabase's free plan allows 5.5 GB of egress a month and every
+# dump counts against it. Musenmingle's schema (thumbnails and embeddings,
+# ~70 MB a dump) taken every 3h was ~0.5 GB a day and blew the quota in
+# November 2026. Projects listed here back up once a day; the rest every run.
+# Format: "name=hours name=hours". restore-test.sh widens its archive-age
+# limit for these projects by the same interval (interstellarai.net#314).
+: "${PG_BACKUP_EVERY_HOURS=musenmingle=24}"
+
+# pg_backup_every_hours NAME → prints NAME's PG_BACKUP_EVERY_HOURS interval,
+# nothing when it backs up every run. Fails when the interval is not a whole
+# number of hours: callers do arithmetic on it, and a bad operand makes bash
+# abandon the rest of the run while still exiting 0.
+pg_backup_every_hours() {
+    local name="$1" pair every=""
+    for pair in $PG_BACKUP_EVERY_HOURS; do
+        [ "${pair%%=*}" = "$name" ] && every="${pair#*=}"
+    done
+    case "$every" in
+        *[!0-9]*) echo "pg_backup_every_hours: $name's interval '$every' in PG_BACKUP_EVERY_HOURS is not a whole number of hours" >&2; return 1 ;;
+    esac
+    printf '%s' "$every"
+}
+
 # pg_backup_url_vars — the URL variable names PG_BACKUP_PROJECTS reads, once each.
 pg_backup_url_vars() {
     printf '%s\n' "${PG_BACKUP_PROJECTS[@]}" | cut -d'|' -f2 | sort -u

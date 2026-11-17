@@ -281,9 +281,20 @@ archives() { find "$T/backups/reli" -name '*.sql.gz' 2>/dev/null; }
     [[ "$output" == *"OK: reli backed up"* ]]
 }
 
+@test "a project with a malformed interval backs up every run, with a warning" {
+    export PG_BACKUP_EVERY_HOURS="reli=24h"
+    mkdir -p "$T/backups/reli"
+    echo x | gzip > "$T/backups/reli/reli-recent.sql.gz"
+    touch -d '-2 hours' "$T/backups/reli/reli-recent.sql.gz"
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reli's interval '24h' in PG_BACKUP_EVERY_HOURS is not a whole number of hours"* ]]
+    [[ "$output" == *"OK: reli backed up"* ]]
+}
+
 @test "musenmingle backs up daily by default; other projects every run" {
     unset PG_BACKUP_EVERY_HOURS
-    grep -q 'PG_BACKUP_EVERY_HOURS="${PG_BACKUP_EVERY_HOURS-musenmingle=24}"' "$SCRIPT"
+    grep -q ': "${PG_BACKUP_EVERY_HOURS=musenmingle=24}"' "$CRON_DIR/lib/pg-backup.sh"
     mkdir -p "$T/backups/reli"
     echo x | gzip > "$T/backups/reli/reli-recent.sql.gz"
     run "$SCRIPT"
