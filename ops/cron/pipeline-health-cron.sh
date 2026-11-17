@@ -15,7 +15,8 @@
 #      dispatch / rerun when that run is for an older SHA); a red drift run
 #      off HEAD files "Main CI drift: <workflow>" + fires archon, closed once
 #      it is green again. Release/deploy/side-effect workflows are never touched
-#   2. Prod deploy failed or lagging main HEAD → file issue + fire archon (dedup by SHA);
+#   2. Prod deploy failed or lagging main HEAD → file issue + fire archon (dedup by SHA;
+#      a failure at the step an open "Prod deploy failed" issue tracks → comment on it);
 #      lagging = undeployed past the repo's p95 Production-run latency + 5 min
 #      (floor 15 min, cap 1h). A successful deploy closes the open ones,
 #      labelled factory-closed
@@ -1258,6 +1259,62 @@ deploy_lag_threshold() {
   echo "$t"
 }
 
+# deploy_failure_step <project> <deploy-url> — where a failed prod deploy
+# failed: "<workflow> / <first failed job> / <its first failed step>" (or
+# "<workflow> / <job>" when no step failed) for an Actions run URL. Exit 1
+# when the run cannot be read or shows no failed job, and for any other URL:
+# a deployments-API signal links no run, so two of its failures cannot be
+# told apart and each is filed as before.
+deploy_failure_step() {
+  local project="$1" url="$2" view step
+  [[ "$url" =~ /actions/runs/([0-9]+) ]] || return 1
+  view=$(gh run view "${BASH_REMATCH[1]}" --repo "alexsiri7/$project" --json name,jobs 2>/dev/null) || return 1
+  step=$(printf '%s' "$view" | jq -r '
+    .name as $wf
+    | first(.jobs[]? | select(.conclusion | IN("failure", "timed_out"))) as $job
+    | [$wf, $job.name, (first($job.steps[]? | select(.conclusion | IN("failure", "timed_out"))) | .name)]
+    | map(select(. != null)) | join(" / ")' 2>/dev/null | tr -d '`\r' | head -n 1)
+  [ -n "$step" ] || return 1
+  echo "$step"
+}
+
+# open_deploy_failure_issue <project> <step> — the lowest-numbered open "Prod
+# deploy failed" issue this script filed whose deploy failed at <step>, read
+# off the run its body links, whatever its labels: one parked for the owner
+# still tracks the same failure (reli#1842 and its 7 duplicates). Prints
+# nothing when none does; exit 1 when the issues cannot be listed.
+open_deploy_failure_issue() {
+  local project="$1" step="$2" list rows num url
+  list=$(gh issue list --repo "alexsiri7/$project" --state open --limit 200 \
+    --json number,title,body 2>/dev/null) || return 1
+  rows=$(printf '%s' "$list" | jq -r '
+    [.[] | select((.title | startswith("Prod deploy failed"))
+                  and ((.body // "") | contains("Auto-filed by `pipeline-health-cron.sh`")))]
+    | sort_by(.number)[]
+    | "\(.number)\t\((.body | capture("\\*\\*Deploy run/status\\*\\*: (?<u>\\S+)") | .u) // "")"' 2>/dev/null) || return 1
+  while IFS=$'\t' read -r num url; do
+    [ -n "$url" ] || continue
+    if [ "$(deploy_failure_step "$project" "$url")" = "$step" ]; then
+      echo "$num"
+      return
+    fi
+  done <<< "$rows"
+}
+
+# prod_deploy_failure_comment <project> <issue> <sha> <step> <deploy-url> —
+# tell the open issue its failure recurred on a new SHA.
+prod_deploy_failure_comment() {
+  gh issue comment "$2" --repo "alexsiri7/$1" --body "Prod deploy failed again at the same step, on a new SHA.
+
+**Failed step**: \`$4\`
+**SHA**: \`$3\`
+**Deploy run/status**: $5
+
+Added by \`pipeline-health-cron.sh\`, which keeps one open issue per failing deploy step rather than one per SHA (alexsiri7/interstellarai.net#325). No new issue was filed and no run was started.
+
+<!-- lachesis:automated -->" >/dev/null 2>&1
+}
+
 # ----------------------------------------------------------------------------
 # Check 2: Prod deploy health — failed or lagging main HEAD.
 #   Signal sources (try in order, use whichever exists):
@@ -1265,7 +1322,9 @@ deploy_lag_threshold() {
 #     (b) GitHub deployments API, environment matches "production" (Railway native integration, FilmDuel)
 #   The listings only prove a signal exists; state is judged on the run or
 #   deployment at main HEAD, never on whichever entry a listing puts first.
-#   If the deploy at HEAD FAILED → file issue + fire archon (dedup by SHA).
+#   If the deploy at HEAD FAILED → file issue + fire archon (dedup by SHA), or,
+#   when an open "Prod deploy failed" issue this script filed failed at the
+#   same step (deploy_failure_step), comment on that issue instead.
 #   If nothing deployed HEAD AND HEAD older than the repo's lag threshold
 #   (deploy_lag_threshold) → file lag issue —
 #   unless the signal is a Railway deployment whose watchPatterns no commit
@@ -1373,6 +1432,26 @@ check_prod_deploy() {
     if [ -f "$marker" ]; then
       log "$project: prod deploy still failed at ${deploy_sha:0:10} — already filed, skipping"
       return
+    fi
+
+    # A new SHA failing at the step an open issue already tracks is one
+    # comment on that issue: no new issue, no run (#325: reli#1865-#1876
+    # each refiled reli#1842's missing secrets). No step known: file as below.
+    local step open_issue
+    if step=$(deploy_failure_step "$project" "$deploy_url"); then
+      if ! open_issue=$(open_deploy_failure_issue "$project" "$step"); then
+        log "$project: prod deploy FAILED at ${deploy_sha:0:10} ($step) — could not list open issues, retrying next tick"
+        return
+      fi
+      if [ -n "$open_issue" ]; then
+        if prod_deploy_failure_comment "$project" "$open_issue" "$deploy_sha" "$step" "$deploy_url"; then
+          log "$project: prod deploy FAILED at ${deploy_sha:0:10} at the step open issue #$open_issue tracks ($step) — commented there"
+          touch "$marker"
+        else
+          log "$project: prod deploy FAILED at ${deploy_sha:0:10} — could not comment on open issue #$open_issue, retrying next tick"
+        fi
+        return
+      fi
     fi
 
     # Per-project cooldown (2h): prevents re-firing when Archon closes the issue
