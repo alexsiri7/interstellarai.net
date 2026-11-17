@@ -505,7 +505,7 @@ load_fn() {
     [ "$disclaimer" -lt "$(grep -n "^The factory's commits since the merge base:" "$T/claude-prompt" | cut -d: -f1)" ]
     grep -q '^||||||| ' "$T/claude-saw-README.md"
     # proven and swapped like a clean merge
-    grep -q "^$wt :: --filter \* test\$" "$BUN_ARGV"
+    grep -q "^$wt :: --filter \* test \$" "$BUN_ARGV"
     [ "$(live_branch)" = "upstream-sync-0.11.0" ]
     [ "$(printf 'readme v2 (0.11.0)\nfactory line')" = "$(cat "$T/live/README.md")" ]
     [ -f "$T/live/FACTORY.md" ]
