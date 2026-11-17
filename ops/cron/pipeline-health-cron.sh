@@ -1261,14 +1261,12 @@ deploy_lag_threshold() {
 
 # deploy_failure_step <project> <deploy-url> — where a failed prod deploy
 # failed: "<workflow> / <first failed job> / <its first failed step>" (or
-# "<workflow> / <job>" when no step failed) for an Actions run URL, the
-# constant "production deployment" for a deployments-API signal, which has
-# no steps. Exit 1 when the run cannot be read or shows no failed job.
+# "<workflow> / <job>" when no step failed) for an Actions run URL. Exit 1
+# when the run cannot be read or shows no failed job, and for any other URL:
+# a deployments-API signal links no run, so two of its failures cannot be
+# told apart and each is filed as before.
 deploy_failure_step() {
   local project="$1" url="$2" view step
-  case "$url" in
-    */deployments) echo "production deployment"; return ;;
-  esac
   [[ "$url" =~ /actions/runs/([0-9]+) ]] || return 1
   view=$(gh run view "${BASH_REMATCH[1]}" --repo "alexsiri7/$project" --json name,jobs 2>/dev/null) || return 1
   step=$(printf '%s' "$view" | jq -r '

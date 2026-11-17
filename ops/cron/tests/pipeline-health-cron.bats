@@ -1292,7 +1292,7 @@ setup_repeat_deploy_failure() {
     [ ! -f "$STATE_DIR/prod-deploy-failed-test-project-aaa" ]
 }
 
-@test "deploy_failure_step names the failed job when no step failed, and fails on a run with no failed job" {
+@test "deploy_failure_step names the failed job when no step failed, and fails on a run with no failed job or a deployments-API signal" {
     setup_prod_deploy_env
     stub_gh_for_prod_deploy
     RUN_VIEW_5='{"name":"Production","jobs":[{"name":"deploy","conclusion":"timed_out","steps":[]}]}'
@@ -1303,7 +1303,8 @@ setup_repeat_deploy_failure() {
     [ "$status" -eq 1 ]
     run deploy_failure_step test-project https://github.com/alexsiri7/test-project/actions/runs/7
     [ "$status" -eq 1 ]
-    [ "$(deploy_failure_step test-project https://github.com/alexsiri7/test-project/deployments)" = "production deployment" ]
+    run deploy_failure_step test-project https://github.com/alexsiri7/test-project/deployments
+    [ "$status" -eq 1 ]
 }
 
 @test "check_prod_deploy waits on a fresh HEAD that no deploy has reached yet" {
