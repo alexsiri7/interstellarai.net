@@ -37,6 +37,19 @@ setup() {
     done
 }
 
+# un-reminder #491 (2026-11-12): "rotating/repairing" kept the rotate clause
+# from matching, and the run's owner-only secret closed as a precedent.
+@test "an owner-held secret or third-party credential is tier 3 (#305)" {
+    local text
+    for text in \
+        'Not done: blocked on Fixing this requires rotating/repairing the Cloudflare Worker secret UR_REQUESTY_KEY (and/or the underlying Requesty.ai API key), which only the owner can do via their Requesty.ai account and wrangler secret access; no code change in this repository can repair an upstream credential that Requesty'"'"'s router is rejecting.' \
+        'set it as the RAILWAY_TOKEN GitHub Actions secret' \
+        'rotate or verify a third-party credential'; do
+        [ "$(severity_tier 1 "$text")" = 3 ] || { echo "not raised: $text"; return 1; }
+        [ "$(severity_tier '' "$text")" = 3 ] || { echo "not raised: $text"; return 1; }
+    done
+}
+
 @test "the floor never lowers a tier" {
     [ "$(severity_tier 3 'GDPR')" = 3 ]
 }
@@ -44,7 +57,9 @@ setup() {
 @test "ordinary words near the categories stay below 3" {
     local text
     for text in 'truncate the log line' 'add a schema migration' 'fix the button visibility' \
-            'the Claude account ran out' 'illegal state exception' 'rotate the logs'; do
+            'the Claude account ran out' 'illegal state exception' 'rotate the logs' \
+            'read the API key from env in the client' 'the session token expires too early' \
+            'the secret binding name is misspelled in code'; do
         [ "$(severity_tier 1 "$text")" = 1 ] || { echo "raised: $text"; return 1; }
     done
 }

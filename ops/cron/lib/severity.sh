@@ -11,7 +11,9 @@
 #   2 default  reversible but visible: ask, with the verdict's own suggested
 #              action as the default taken after two days.
 #   3 wait     prod data deletion or migration, history rewrites, repo
-#              visibility, legal/GDPR, money or accounts, secret rotation, store
+#              visibility, legal/GDPR, money or accounts, secret rotation or a
+#              secret the owner holds outside the repo (a Worker, Doppler or
+#              Actions secret, a third-party credential, #305), store
 #              publishing: ask with no default.
 # An outcome that declares no tier is tier 2. The keyword floor below reads the
 # verdict and the issue title, never the body, and only ever raises a tier: a
@@ -20,6 +22,20 @@
 
 [ -n "${_SEVERITY_SH:-}" ] && return 0
 _SEVERITY_SH=1
+
+# Secrets and credentials only the owner can rotate or set: each clause names
+# where the secret lives or whose it is, never a bare key, token or secret.
+SEVERITY_SECRET_WORDS=(
+  'rotat(e|es|ed|ing|ion) (of )?(the |a |an |all )?([a-z_-]+ )?(secrets?|keys?|tokens?|credentials?|passwords?)'
+  'secret rotation'
+  'leaked ([a-z_-]+ )?(secrets?|keys?|tokens?|credentials?|passwords?)' 'keystore' 'signing key'
+  '(worker|wrangler|cloudflare|doppler|github|actions|repository|repo|deployment|environment|production|prod) secrets?'
+  'secrets? (access|store|manager)'
+  'third[- ]party (accounts?|credentials?|api keys?|keys?|tokens?|secrets?)'
+  '(upstream|external|owner.?s) (api )?(credentials?|keys?|tokens?|secrets?)'
+)
+# shellcheck disable=SC2034  # read by lib/settle-ship-outcome.sh
+SEVERITY_SECRET_RE=$(IFS='|'; echo "${SEVERITY_SECRET_WORDS[*]}")
 
 # Whole words, case-insensitive. Bare "migration", "truncate", "visibility" and
 # "account" are left out: ordinary code issues use them (a schema migration,
@@ -42,10 +58,8 @@ SEVERITY_TIER3_WORDS=(
   'billing' 'payments?' 'invoices?' 'refunds?' 'stripe' 'paypal' 'pricing'
   'subscriptions?' 'in-app purchases?' 'credit cards?'
   '(delete|close|cancel|transfer) (the |an |a |my |user )?accounts?'
-  # secret rotation
-  'rotat(e|es|ed|ing|ion) (of )?(the |a |an |all )?([a-z_-]+ )?(secrets?|keys?|tokens?|credentials?|passwords?)'
-  'secret rotation' 'revok(e|es|ed|ing)'
-  'leaked ([a-z_-]+ )?(secrets?|keys?|tokens?|credentials?|passwords?)' 'keystore' 'signing key'
+  # secret rotation, owner-held secrets
+  "${SEVERITY_SECRET_WORDS[@]}" 'revok(e|es|ed|ing)'
   # store publishing
   'play store' 'google play' 'app store' 'testflight' 'store listing' 'production track'
 )
