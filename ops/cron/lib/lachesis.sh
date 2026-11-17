@@ -117,6 +117,25 @@ lachesis_depend() {
   lachesis_call add_dependency "$args" >/dev/null
 }
 
+# lachesis_wait_on <project> <issue> <question> <context> <owner/repo#N>... —
+# record a question blocking alexsiri7/<project>#<issue> that waits on issues in
+# other repositories (ask_question waits_on): Lachesis labels the issue
+# needs-author and answers the question itself, releasing the issue, once every
+# one of them is closed. No default: it waits on the issues, not on a person.
+# True when recorded.
+lachesis_wait_on() {
+  local project="$1" issue="$2" question="$3" context="$4" args
+  shift 4
+  args=$(jq -nc --arg repo "alexsiri7/$project" --argjson n "$issue" \
+    --arg q "$question" --arg c "$context" \
+    '{repo: $repo, question: $q, kind: "clarification", asker: "factory",
+      blocks: [$n], issue: $n, context: $c,
+      waits_on: [$ARGS.positional[] | capture("^(?<repo>.+)#(?<issue>[0-9]+)$")
+                 | .issue |= tonumber]}' \
+    --args "$@") || return 1
+  lachesis_call ask_question "$args" >/dev/null
+}
+
 # lachesis_ask_once <project> <issue> <key> <question> [context] — lachesis_ask,
 # once per (project, issue, key): a marker in LACHESIS_STATE_DIR keeps a
 # question whose cause outlives its answer (a stranger's comment left in

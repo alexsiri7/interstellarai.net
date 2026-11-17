@@ -248,7 +248,7 @@ Released to run again; the next run must not defer to these. ${requeue_note} Run
 }
 
 defers=0
-[[ "$verdict" == "No delivery needed: "* || "$verdict" == "Not done: blocked on "* ]] && defers=1
+[[ "$verdict" == "No delivery needed: "* || "$verdict" == "$VERDICT_BLOCKED"* ]] && defers=1
 
 # Keyed on the marker every pipeline-health issue body carries. A failed
 # lookup counts as health-filed, since any gh failure parks (and releases or
@@ -329,7 +329,7 @@ fi
 # before any release, tier action or question.
 fc_decided=0
 case "$verdict" in
-  "No delivery needed: "*|"Not done: blocked on "*|"No work owed in this repository: "*) fc_decided=1 ;;
+  "No delivery needed: "*|"$VERDICT_BLOCKED"*|"No work owed in this repository: "*) fc_decided=1 ;;
 esac
 if [ "$fc_decided" = 1 ] && [ "$view_ok" = 1 ]; then
   fc_tier=$(severity_tier "$declared_tier" "$verdict_block"$'\n'"$title")
@@ -452,7 +452,7 @@ suggested_action() {
       done
       echo close-completed ;;
     "No work owed in this repository: "*) echo close-not-planned ;;
-    "Not done: blocked on "*)
+    "$VERDICT_BLOCKED"*)
       if [ "${#refs[@]}" -eq 1 ] && [ "$all_refs_known" = 1 ] \
           && [ "$(gh api "repos/$repo/issues/${refs[0]}" \
                 --jq 'if .pull_request then "pr" else .state end' 2>/dev/null)" = open ]; then
