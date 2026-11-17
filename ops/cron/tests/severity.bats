@@ -49,6 +49,36 @@ setup() {
     done
 }
 
+@test "owner_only_blocker matches a step only the owner can take" {
+    local text
+    for text in \
+            'a Railway-console and GitHub-repo-settings action with no git-tracked representation, which the issue itself calls a human step' \
+            'the owner creating a Sentry auth token' 'a hand merge of ops/cron/lib/trust.sh' \
+            'an owner-gated merge path' 'a step only the owner can take' \
+            'the owner storing the key in Doppler' 'turning on branch protection' \
+            'a step in Doppler' 'a change in the Railway dashboard' 'a Cloudflare dashboard step' \
+            'PR #5, merged by hand' 'an environment-secrets change for staging' 'which needs a manual step' \
+            'the owner'"'"'s admin access' 'admin rights on the repo' 'the run is not authorised to merge it'; do
+        owner_only_blocker "$text" || { echo "missed: $text"; return 1; }
+    done
+}
+
+@test "owner_only_blocker leaves dependency and code blockers alone" {
+    local text
+    for text in '#8 landing first' 'PR #8' 'Owner-level product decision: keep the documented tradeoff' \
+            'the console logging refactor in #14' 'the settings screen redesign (#31)' \
+            'the dashboard page component from #44' '#122 (owner sign-in) and the Owner-only scene editor' \
+            'PR #8, which the owner should review' '#8 (the Doppler client wrapper) landing first' \
+            '#8 landing first; the repro was confirmed by hand' 'the Sentry dashboard widget in #31' \
+            '#12, the GitHub environments work' '#9, the manual steps checklist feature' \
+            '#44, the admin-dashboard rewrite landing first' 'the new web-console component' \
+            '#31 (the environment settings page)' '#8 (repo settings UI)' '#8, moving config to Doppler' \
+            '#8 which adds two-factor login' '#8 (the admin permissions model)' \
+            '#8, where users are not authorized to edit' 'a bug in the Sentry dashboard'; do
+        ! owner_only_blocker "$text" || { echo "matched: $text"; return 1; }
+    done
+}
+
 @test "matching ignores case" {
     [ "$(severity_tier 1 'Force-Pushed to main')" = 3 ]
 }

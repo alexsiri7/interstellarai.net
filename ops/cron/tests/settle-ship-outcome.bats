@@ -1113,6 +1113,27 @@ asked_proceed() {
     [[ "$output" == *"tier 3, default none"* ]]
 }
 
+@test "tiers: a blocked-on verdict naming an owner-only step asks with no default; a dependency keeps its default" {
+    lachesis_on
+    printf "Not done: blocked on splitting RAILWAY_TOKEN per environment, a Railway-console and GitHub-repo-settings action with no git-tracked representation, which the issue calls a human step.\n" > "$RUN_LOG"
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 9
+    [ "$(asked_default)" = "" ]
+    sed -n 's/^ask_question //p' "$LACHESIS_ARGV" | jq -e 'has("wait_days") or has("options") | not'
+    [[ "$output" == *"tier 2, default none (owner-only blocker)"* ]]
+
+    : > "$LACHESIS_ARGV"; : > "$GH_ARGV"
+    printf 'Not done: blocked on PR #8.\n' > "$RUN_LOG"
+    printf 'pr\topen\n' > "$T/fixtures/state-8"
+    printf 'open\tfalse\tfalse\talexsiri7\n' > "$T/fixtures/pull-8"
+    ref 8 pr
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    asked_proceed
+    [[ "$output" == *"tier 2, default proceed"* ]]
+}
+
 @test "tiers: any other Not done defaults to running once more" {
     lachesis_on
     printf 'Not done: the investigation was inconclusive. The crash did not reproduce.\n' > "$RUN_LOG"
@@ -1197,6 +1218,17 @@ asked_proceed() {
     grep -qx -- "<!-- archon-settle-act: depend-8 -->" "$GH_ARGV"
     [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 0 ]
     [ "$(grep -c '^add_note' "$LACHESIS_ARGV")" -eq 1 ]
+}
+
+@test "tiers: tier 1 blocked on an owner-only step asks with no default instead of acting" {
+    lachesis_on
+    tier_outcome 1 'Not done: blocked on a Railway-console action with no git-tracked representation, which the issue calls a human step.'
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+    [ "$status" -eq 0 ]
+    assert_parked 9
+    [ "$(asked_default)" = "" ]
+    [ "$(gh_calls 'archon-settle-act')" -eq 0 ]
+    [[ "$output" == *"tier 1, default none (owner-only blocker)"* ]]
 }
 
 @test "tiers: tier 1 other Not done releases to run again with the proceed marker" {
