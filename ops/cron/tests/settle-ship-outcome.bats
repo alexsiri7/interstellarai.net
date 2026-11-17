@@ -22,6 +22,10 @@ setup() {
     # The #259 lookups read head (main's SHA), runs-<sha> (gh run list JSON),
     # deps-<sha> (deployments) with depstate-<id> (its latest state), and
     # file-<path with / as _> (a file that exists). GH_COMMENT_RC fails `issue comment`.
+    # `issue create` prints issue GH_CREATE_NUM's URL (default 99), or fails
+    # with GH_CREATE_RC; GH_DEP_RC fails the native blocked_by POST, and its GET
+    # reads blocked-by-<N> (default: none). `issue list` prints the issue-list
+    # fixture (default: none), or fails with GH_ISSUE_LIST_RC.
     cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_ARGV"
@@ -54,7 +58,16 @@ case "$*" in
   "api "*/issues/*@tsv*)
     [ -e "$GH_FIXTURES/gone-${2##*/}" ] && { echo 'gh: Not Found (HTTP 404)' >&2; exit 1; }
     cat "$GH_FIXTURES/state-${2##*/}" 2>/dev/null || exit 1 ;;
+  "api --method POST "*/dependencies/blocked_by*) exit "${GH_DEP_RC:-0}" ;;
+  "api "*/dependencies/blocked_by*)
+    n=$(sed -E 's#.*/issues/([0-9]+)/.*#\1#' <<<"$*")
+    jq -r "$4" "$GH_FIXTURES/blocked-by-$n" 2>/dev/null || echo '[]' | jq -r "$4" ;;
   "api "*/issues/*)   [ "$3" = --jq ] && jq -r "$4" "$GH_FIXTURES/ref-${2##*/}" 2>/dev/null ;;
+  *"issue list"*)     cat "$GH_FIXTURES/issue-list" 2>/dev/null || echo '[]'
+                       exit "${GH_ISSUE_LIST_RC:-0}" ;;
+  *"issue create"*)
+    [ -n "${GH_CREATE_RC:-}" ] && exit "$GH_CREATE_RC"
+    echo "https://github.com/alexsiri7/testproj/issues/${GH_CREATE_NUM:-99}" ;;
   *"issue view"*)
     [ -n "${GH_VIEW_RC:-}" ] && exit "$GH_VIEW_RC"
     n=$(sed -E 's/^issue view ([0-9]+).*/\1/' <<<"$*")
@@ -87,7 +100,7 @@ gh_calls() {
 fixture() { printf '%s\n' "$2" > "$T/fixtures/$1"; }
 
 # ref <N> open-issue|closed-issue|merged-pr|pr: what GitHub's issues API
-# returns for #N.
+# returns for #N, whose id is 1000 + N.
 ref() {
     local json
     case "$2" in
@@ -96,7 +109,7 @@ ref() {
         merged-pr)    json='{"state":"closed","pull_request":{"merged_at":"2026-09-16T10:00:00Z"}}' ;;
         pr)           json='{"state":"open","pull_request":{"merged_at":null}}' ;;
     esac
-    fixture "ref-$1" "$json"
+    fixture "ref-$1" "$(jq -c --argjson id "$((1000 + $1))" '. + {id: $id}' <<<"$json")"
 }
 
 assert_parked() {
@@ -1739,4 +1752,403 @@ LOG
     cd "$(dirname "$SCRIPT")/.."
     run shellcheck -x lib/factory-close.sh
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+# ── Scope and ownership calls (#270) ─────────────────────────────────────────
+
+# The #260 shape: one part deliverable now, the other waiting on open #246.
+split_verdict() {
+    printf '%s\nReport: /x/triage.md\n' \
+        'Not done: blocked on a split: this issue keeps "Escalate a stuck PR once per PR"; "Route gate-blocked PRs to the ops reviewer" waits on #246. Part 2 needs the reviewer #246 adds.' \
+        > "$RUN_LOG"
+}
+
+assert_split() {
+    [ "$status" -eq 0 ]
+    [ "$(gh_calls 'issue create')" -eq 1 ]
+    grep -q -- "issue create --repo alexsiri7/testproj --title Route gate-blocked PRs to the ops reviewer --body Split from #9 by the factory (#270)" "$GH_ARGV"
+    grep -q -- "\*\*Blocked on:\*\* #246" "$GH_ARGV"
+    grep -q -- "issue comment 9 --repo alexsiri7/testproj --body \*\*Scope (factory split, " "$GH_ARGV"
+    grep -q -- "moved to #99, blocked on #246" "$GH_ARGV"
+    grep -qx -- "<!-- archon-settle-split: 99 -->" "$GH_ARGV"
+    [[ "$output" == *"#9 split: \"Route gate-blocked PRs to the ops reviewer\" moved to #99 (waits on #246)"* ]]
+}
+
+@test "split with dependency, pickup on: files the waiting part blocked on its blocker in Lachesis and runs the issue again" {
+    lachesis_on
+    split_verdict
+    ref 246 open-issue
+
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    assert_split
+    sed -n 's/^add_dependency //p' "$LACHESIS_ARGV" \
+        | jq -e '. == {repo: "alexsiri7/testproj", issue_number: 99, blocked_by_issue_number: 246}'
+    [ "$(gh_calls 'dependencies/blocked_by')" -eq 0 ]
+    assert_released 9
+    [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 0 ]
+    sed -n 's/^add_note //p' "$LACHESIS_ARGV" | jq -e '.issue == 9 and (.text | contains("into #99, blocked on #246"))'
+}
+
+@test "split with dependency, pickup off: records GitHub's native blocked_by link and re-queues the issue" {
+    export LACHESIS_CALL_CMD="$T/no-such-lachesis"
+    split_verdict
+    ref 246 open-issue
+
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    assert_split
+    grep -qx -- "api --method POST repos/alexsiri7/testproj/issues/99/dependencies/blocked_by -F issue_id=1246" "$GH_ARGV"
+    assert_released 9 "--add-label archon:queued"
+    [ "$(gh_calls 'could not be recorded')" -eq 0 ]
+}
+
+@test "split whose dependency fails to record still splits, and says so" {
+    split_verdict
+    ref 246 open-issue
+
+    GH_DEP_RC=1 run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    assert_split
+    grep -q -- "The dependency of #99 on #246 could not be recorded" "$GH_ARGV"
+    assert_released 9 "--add-label archon:queued"
+}
+
+@test "split whose release fails after a successful comment exits 1, having commented and created once" {
+    split_verdict
+    ref 246 open-issue
+
+    GH_EDIT_RC=1 run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    [ "$status" -eq 1 ]
+    [ "$(gh_calls 'issue create')" -eq 1 ]
+    [ "$(gh_calls 'issue comment')" -eq 1 ]
+    grep -qx -- "<!-- archon-settle-split: 99 -->" "$GH_ARGV"
+    [[ "$output" == *"#9 — split off #99, but could not release to run again"* ]]
+}
+
+@test "split not taken: an unconfirmed blocker, tier 3, a health issue, an earlier split or a failed create takes today's path" {
+    lachesis_on
+    for case in pr closed-issue self tier3 health marker create-fails; do
+        : > "$GH_ARGV"; : > "$LACHESIS_ARGV"; rm -f "$T/fixtures/"*
+        split_verdict
+        ref 246 open-issue
+        unset GH_CREATE_RC
+        case "$case" in
+            pr|closed-issue) ref 246 "$case" ;;
+            self) sed -i 's/waits on #246/waits on #9/' "$RUN_LOG" ;;
+            tier3) sed -i 's/ops reviewer/billing reviewer/' "$RUN_LOG" ;;
+            health) fixture body-9 'Auto-filed by `pipeline-health-cron.sh`' ;;
+            marker) fixture comments-9 '<!-- archon-settle-split: 98 -->' ;;
+            create-fails) export GH_CREATE_RC=1 ;;
+        esac
+
+        run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+        [ "$status" -eq 0 ] || { echo "case $case: status $status"; return 1; }
+        [ "$(gh_calls 'archon-settle-split')" -eq 0 ] || { echo "case $case split"; return 1; }
+        [ "$(gh_calls 'dependencies/blocked_by')" -eq 0 ]
+        [ "$(grep -c '^add_dependency .*"issue_number":99' "$LACHESIS_ARGV")" -eq 0 ]
+        [ "$case" = create-fails ] || [ "$(gh_calls 'issue create')" -eq 0 ] || { echo "case $case created"; return 1; }
+    done
+}
+
+# SPLIT_RE hand-copies this grammar from triage.md; nothing else ties them
+# together, so a meaning-preserving reword of the policy could silently stop
+# matching (R1, review of #281). This reads the live template out of the
+# policy file and checks SPLIT_RE (via the whole script) still recognizes it.
+@test "SPLIT_RE still matches the exact split grammar triage.md specifies" {
+    local triage_md
+    triage_md="$(cd "$(dirname "$SCRIPT")/../../.." && pwd)/.archon/sdlc/policy/triage.md"
+    local template
+    template=$(grep -oE '`a split: this issue keeps.*#<N>`' "$triage_md" | sed -E 's/^`//; s/`$//')
+    [ -n "$template" ]
+    local filled=$template
+    filled=${filled//<part delivered now>/Escalate a stuck PR once per PR}
+    filled=${filled//<part that waits>/Route gate-blocked PRs to the ops reviewer}
+    filled=${filled//<N>/246}
+
+    printf 'Not done: blocked on %s. Part 2 needs the reviewer #246 adds.\nReport: /x/triage.md\n' "$filled" > "$RUN_LOG"
+    ref 246 open-issue
+
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    assert_split
+}
+
+@test "split whose comments read, blocker lookup, dedup list or create call fails logs which GitHub call failed, not silently (R4, review of #281)" {
+    for case in comments blocker dedup create; do
+        : > "$GH_ARGV"; rm -f "$T/fixtures/"*
+        unset GH_COMMENTS_RC GH_ISSUE_LIST_RC GH_CREATE_RC
+        split_verdict
+        case "$case" in
+            comments) export GH_COMMENTS_RC=1 ;;
+            blocker)  : ;; # no ref 246 fixture: the blocker lookup itself fails
+            dedup)    ref 246 open-issue; export GH_ISSUE_LIST_RC=1 ;;
+            create)   ref 246 open-issue; export GH_CREATE_RC=1 ;;
+        esac
+
+        run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+        [ "$status" -eq 0 ] || { echo "case $case: status $status"; return 1; }
+        [[ "$output" == *"#9 — could not"*"not split"* ]] || { echo "case $case: $output"; return 1; }
+        [ "$(gh_calls 'archon-settle-split')" -eq 0 ] || { echo "case $case split"; return 1; }
+    done
+}
+
+@test "--recheck never splits" {
+    split_verdict
+    ref 246 open-issue
+
+    run "$SCRIPT" --recheck testproj 9 "$RUN_LOG"
+
+    [ "$status" -eq 1 ]
+    [ "$(gh_calls 'issue create')" -eq 0 ]
+    assert_untouched
+}
+
+# The verdict the #259 run stopped on (2026-11-06), asking where to land it.
+land_here_verdict() {
+    cat > "$RUN_LOG" <<'LOG'
+Not done: blocked on The fix must edit the shared SDLC pack's default triage policy and its fixture-tested closure logic, which live in the separate alexsiri7/Archon repository (not checked out or editable from this interstellarai.net run); deciding whether to land it there vs. as a project-local override is also an owner-level call this run cannot make. factory-gap is a deliberate human-only label (ops/cron/lib/human-labels.sh) kept out of automated pickup; the operator's explicit request supplies the human decision to act, but not the repo/ownership decision.. Issue #259 asks the default triage policy to gain three more no-person close paths, each with bats/fixture tests. The file it must change lives in the separate alexsiri7/Archon repo (confirmed by precedent issue #212, fixed in that repo), so this run declares BLOCKED rather than a route.
+Report: /x/triage.md
+LOG
+}
+
+assert_landed_here() {
+    [ "$status" -eq 0 ]
+    grep -q -- "\*\*Decision (factory, [0-9-]*): land it here.\*\* The change lands in alexsiri7/testproj" "$GH_ARGV"
+    grep -qx -- "<!-- archon-settle-land-here -->" "$GH_ARGV"
+    [ "$(gh_calls 'issue create')" -eq 0 ]
+    [[ "$output" == *"#259 — decided to land it here; released to run again"* ]]
+}
+
+# #212 is closed, as on GitHub: the #259 precedent close must not take this stop.
+@test "local-landing choice, pickup on: the real #259 stop is answered land it here and runs again, asking nothing" {
+    lachesis_on
+    land_here_verdict
+    ref 212 closed-issue
+
+    run "$SCRIPT" testproj 259 "$RUN_LOG"
+
+    assert_landed_here
+    assert_released 259
+    grep -q -- "Lachesis next_issue decides when it runs again" "$GH_ARGV"
+    [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 0 ]
+    sed -n 's/^add_note //p' "$LACHESIS_ARGV" | jq -e '.issue == 259 and (.text | contains("Land #259 in alexsiri7/testproj"))'
+}
+
+@test "local-landing choice, pickup off: re-queued with the decision as direction" {
+    export LACHESIS_CALL_CMD="$T/no-such-lachesis"
+    land_here_verdict
+    ref 212 closed-issue
+
+    run "$SCRIPT" testproj 259 "$RUN_LOG"
+
+    assert_landed_here
+    assert_released 259 "--add-label archon:queued"
+    grep -q -- "Re-queued as archon:queued" "$GH_ARGV"
+}
+
+@test "land-here not taken: decided before, a cross-repo blocker, tier 3, a health issue, or a decided No delivery needed takes today's path" {
+    lachesis_on
+    for case in marker cross-repo tier3 health no-delivery-needed; do
+        : > "$GH_ARGV"; : > "$LACHESIS_ARGV"; rm -f "$T/fixtures/"*
+        land_here_verdict
+        case "$case" in
+            marker) fixture comments-259 '<!-- archon-settle-land-here -->' ;;
+            tier3) sed -i 's/closure logic/billing logic/' "$RUN_LOG" ;;
+            health) fixture body-259 'Auto-filed by `pipeline-health-cron.sh`' ;;
+            cross-repo) sed -i 's/precedent issue #212/alexsiri7\/lachesis#301/' "$RUN_LOG" ;;
+            no-delivery-needed) sed -i '1s/^Not done: blocked on /No delivery needed: /' "$RUN_LOG" ;;
+        esac
+
+        run "$SCRIPT" testproj 259 "$RUN_LOG"
+
+        [ "$status" -eq 0 ] || { echo "case $case: status $status"; return 1; }
+        [ "$(gh_calls 'archon-settle-land-here')" -eq 0 ] || { echo "case $case landed"; return 1; }
+        assert_parked 259
+        grep -q '^ask_question ' "$LACHESIS_ARGV"
+    done
+}
+
+@test "land-here whose release fails posts nothing and exits 1" {
+    land_here_verdict
+
+    GH_EDIT_RC=1 run "$SCRIPT" testproj 259 "$RUN_LOG"
+
+    [ "$status" -eq 1 ]
+    [ "$(gh_calls 'issue comment')" -eq 0 ]
+}
+
+@test "land-here whose comment fails after a successful release exits 0, having released" {
+    lachesis_on
+    land_here_verdict
+    ref 212 closed-issue
+
+    GH_COMMENT_RC=1 run "$SCRIPT" testproj 259 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_released 259
+    [[ "$output" == *"#259 — released, but could not comment the land-here decision"* ]]
+}
+
+@test "local-landing choice from plan: a planning stop on where to land is answered land it here" {
+    lachesis_on
+    printf '%s\n' '{"delivered":false,"reason":"blocked","pr_url":"","summary":"Not done: planning stopped on calls only a person can make. The triage policy lives in the shared SDLC pack.\n- Land it here as a project-local override, or upstream in alexsiri7/Archon?\nReport: /x/plan.md"}' > "$RUN_LOG"
+
+    run "$SCRIPT" testproj 259 "$RUN_LOG"
+
+    assert_landed_here
+    assert_released 259
+    [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 0 ]
+}
+
+# The shape the real #270 settle run is meant to answer (R1, review of #281):
+# plan itself — not triage — names a part waiting on another open issue.
+@test "plan-level split stop: a part waiting on an open issue is released to run again, asking nothing" {
+    lachesis_on
+    printf '%s\n' '{"delivered":false,"reason":"blocked","pr_url":"","summary":"Not done: planning stopped on calls only a person can make. Part 1 can ship now; part 2 waits on open issue #246 and should be split off.\n- Part 2 waits on #246; it is split off, not a person call.\nReport: /x/plan.md"}' > "$RUN_LOG"
+    ref 246 open-issue
+
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    [ "$(gh_calls 'issue create')" -eq 0 ]
+    grep -qx -- "<!-- archon-settle-plan-split -->" "$GH_ARGV"
+    assert_released 9
+    [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 0 ]
+    sed -n 's/^add_note //p' "$LACHESIS_ARGV" | jq -e '.issue == 9 and (.text | contains("waits on another open issue"))'
+    [[ "$output" == *"#9 — a part waits on another issue; released to run again for triage to split it"* ]]
+}
+
+@test "plan-level split stop, pickup off: re-queued with the decision as direction" {
+    export LACHESIS_CALL_CMD="$T/no-such-lachesis"
+    printf '%s\n' '{"delivered":false,"reason":"blocked","pr_url":"","summary":"Not done: planning stopped on calls only a person can make. Part 2 waits on open issue #246 and should be split off.\nReport: /x/plan.md"}' > "$RUN_LOG"
+    ref 246 open-issue
+
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    assert_released 9 "--add-label archon:queued"
+    grep -q -- "Re-queued as archon:queued" "$GH_ARGV"
+}
+
+@test "plan-level split stop not taken: already answered, no open-issue ref, no split language, tier 3, or a health issue" {
+    lachesis_on
+    for case in marker no-ref no-split-language tier3 health; do
+        : > "$GH_ARGV"; : > "$LACHESIS_ARGV"; rm -f "$T/fixtures/"*
+        printf '%s\n' '{"delivered":false,"reason":"blocked","pr_url":"","summary":"Not done: planning stopped on calls only a person can make. Part 2 waits on open issue #246 and should be split off.\nReport: /x/plan.md"}' > "$RUN_LOG"
+        ref 246 open-issue
+        case "$case" in
+            marker) fixture comments-9 '<!-- archon-settle-plan-split -->' ;;
+            no-ref) ref 246 closed-issue ;;
+            no-split-language) sed -i 's/ and should be split off//' "$RUN_LOG" ;;
+            tier3) sed -i 's/Part 2 waits/Part 2 touches billing and waits/' "$RUN_LOG" ;;
+            health) fixture body-9 'Auto-filed by `pipeline-health-cron.sh`' ;;
+        esac
+
+        run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+        [ "$status" -eq 0 ] || { echo "case $case: status $status"; return 1; }
+        [ "$(gh_calls 'archon-settle-plan-split')" -eq 0 ] || { echo "case $case took"; return 1; }
+        assert_parked 9
+    done
+}
+
+# A same-repo block that only mentions a shared pack is no stop on where to land.
+@test "land-here not taken: a block on an open issue here that mentions a shared pack" {
+    lachesis_on
+    printf 'Not done: blocked on #45, which changes the shared deploy pack first.\nReport: /x\n' > "$RUN_LOG"
+    ref 45 open-issue
+
+    run "$SCRIPT" testproj 259 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    [ "$(gh_calls 'archon-settle-land-here')" -eq 0 ]
+    assert_parked 259
+}
+
+@test "split whose release failed is released by the next settle of the same run, not split again" {
+    lachesis_on
+    split_verdict
+    ref 246 open-issue
+    fixture comments-9 "Released to run again for the part it keeps. Run log: \`/elsewhere/run.log\`
+
+<!-- archon-settle-split: 99 -->"
+
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    [ "$(gh_calls 'issue create')" -eq 0 ]
+    [ "$(gh_calls 'issue comment')" -eq 0 ]
+    assert_released 9
+    [ "$(grep -c '^ask_question' "$LACHESIS_ARGV")" -eq 0 ]
+    [[ "$output" == *"#9 — split already taken by this run; released to run again"* ]]
+}
+
+@test "split whose comment fails releases nothing; the next settle reuses the issue it filed" {
+    lachesis_on
+    split_verdict
+    ref 246 open-issue
+
+    LACHESIS_DEPEND_RC=1 GH_COMMENT_RC=1 run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    [ "$status" -eq 1 ]
+    [ "$(gh_calls 'issue create')" -eq 1 ]
+    [ "$(gh_calls 'issue edit')" -eq 0 ]
+
+    : > "$GH_ARGV"; : > "$LACHESIS_ARGV"
+    fixture issue-list '[{"number":99,"body":"Split from #9 by the factory (#270)\n\n<!-- archon-split-from: 9 -->"}]'
+
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    [ "$(gh_calls 'issue create')" -eq 0 ]
+    sed -n 's/^add_dependency //p' "$LACHESIS_ARGV" \
+        | jq -e '. == {repo: "alexsiri7/testproj", issue_number: 99, blocked_by_issue_number: 246}'
+    [ "$(gh_calls 'could not be recorded')" -eq 0 ]
+    grep -q -- "moved to #99, blocked on #246" "$GH_ARGV"
+    grep -qx -- "<!-- archon-settle-split: 99 -->" "$GH_ARGV"
+    assert_released 9
+}
+
+@test "split reused after a failed comment, pickup off: links the blocker unless the link is already there" {
+    export LACHESIS_CALL_CMD="$T/no-such-lachesis"
+    split_verdict
+    ref 246 open-issue
+    fixture issue-list '[{"number":99,"body":"Split from #9 by the factory (#270)\n\n<!-- archon-split-from: 9 -->"}]'
+
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    [ "$(gh_calls 'issue create')" -eq 0 ]
+    grep -qx -- "api --method POST repos/alexsiri7/testproj/issues/99/dependencies/blocked_by -F issue_id=1246" "$GH_ARGV"
+    [ "$(gh_calls 'could not be recorded')" -eq 0 ]
+
+    : > "$GH_ARGV"
+    fixture blocked-by-99 '[{"id":1246}]'
+
+    GH_DEP_RC=1 run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    [ "$status" -eq 0 ]
+    [ "$(gh_calls 'api --method POST')" -eq 0 ]
+    [ "$(gh_calls 'could not be recorded')" -eq 0 ]
+    grep -q -- "moved to #99, blocked on #246" "$GH_ARGV"
+}
+
+# The split's blocker closed by settle time: no split, and the closed #212 it
+# names must not close it as matching that precedent either.
+@test "a split verdict naming a closed precedent is never closed as matching it" {
+    lachesis_on
+    printf '%s\nReport: /x/triage.md\n' \
+        'Not done: blocked on a split: this issue keeps "Escalate a stuck PR once per PR"; "Route gate-blocked PRs to the ops reviewer" waits on #246. Same as precedent issue #212, which landed part 1.' \
+        > "$RUN_LOG"
+    ref 246 closed-issue
+    ref 212 closed-issue
+
+    run "$SCRIPT" testproj 9 "$RUN_LOG"
+
+    [ "$(gh_calls 'issue close')" -eq 0 ]
+    [ "$(gh_calls 'issue create')" -eq 0 ]
 }
