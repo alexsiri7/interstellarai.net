@@ -15,3 +15,4 @@ dibs
 kith
 catscape-watchface
 punland
+vlc-subtitle-sync
