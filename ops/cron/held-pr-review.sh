@@ -369,9 +369,7 @@ for PROJECT in "${PROJECTS[@]}"; do
       continue
     fi
 
-    ISSUES=$( { field '.closingIssuesReferences[]?.number'
-                field '.body // ""' | grep -oiE '(close[sd]?|fix(e[sd])?|resolve[sd]?|refs?) #[0-9]+' | grep -oE '[0-9]+$'
-              } | awk '/^[0-9]+$/ && !seen[$0]++' | head -n 3)
+    ISSUES=$(linked_issue_numbers <<<"$VIEW")
     NOTE_ON="${ISSUES%%$'\n'*}"; NOTE_ON="${NOTE_ON:-$NUM}"
 
     if ! gh pr diff "$NUM" --repo "$REPO" --name-only > "$TMP/files" 2>/dev/null \
@@ -398,8 +396,12 @@ for PROJECT in "${PROJECTS[@]}"; do
     if ! linked_issues_text "$ISSUES" "$TMP/issues"; then
       skip "could not read a linked issue, or its restatement is not on record"; continue
     fi
-    if field '.body // ""' | merge_precondition_lines >/dev/null \
-       || merge_precondition_lines < "$TMP/issues" >/dev/null; then
+    # The same check pr-maintenance holds the PR on, so this review never
+    # approves away a hold it placed.
+    PRECONDITION=0
+    merge_precondition_find "$REPO" "$VIEW" >/dev/null || PRECONDITION=$?
+    if [ "$PRECONDITION" = 2 ]; then skip "could not read it or a linked issue for a merge precondition"; continue; fi
+    if [ "$PRECONDITION" = 0 ]; then
       if hold_for_owner "its text names a precondition only the owner can meet before it merges"; then
         N_OWNER=$((N_OWNER + 1))
       else

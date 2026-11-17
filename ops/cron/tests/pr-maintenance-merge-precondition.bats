@@ -148,7 +148,7 @@ gh_called() { grep -qE "$1" "$STUB_GH_ARGV"; }
     gh_called '^pr edit 302 --add-label hold$'
     grep -qF "Holding this PR for the owner: linked issue #8 states a precondition to meet before it merges." "$T/comments"
     ! grep -q 'SECRET_X\|Prerequisites' "$T/comments"
-    gh_called '^issue view 7 --json body$'
+    gh_called '^issue view 7 --repo alexsiri7/proj --json body$'
     gh_called '^pr merge 303 '
 }
 
@@ -184,4 +184,28 @@ gh_called() { grep -qE "$1" "$STUB_GH_ARGV"; }
     [ ! -f "$(MARKER_DIR)/proj-300.precondition-held" ]
     [ ! -f "$T/comments" ]
     [[ "$output" == *"could not add hold; retrying next tick"* ]]
+}
+
+@test "an ops PR on a protected repo keeps its ops-merge clock through an unreadable tick, and an unread one gets none" {
+    export ARCHON_RUN_AS=archon ARCHON_RUNAS_PROTECTED_REPOS=proj
+    sed -i 's/^case "\$1 \$2" in$/[ "$1 $2" = "pr diff" ] \&\& { echo ops\/cron\/x.sh; exit 0; }\n&/' "$STUB_BIN/gh"
+    local f="$HOME/.archon/state/deadlines/ops-merge--proj--300"
+    export GH_PR_LIST="[$(pr 300 false), $(pr 301 false)]"
+    view 300 "Tidies the cron."
+    export DEADLINE_NOW=1000
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    [ "$status" -eq 0 ]
+    grep -qx 'last_seen=1000' "$f"
+    [ ! -f "$HOME/.archon/state/deadlines/ops-merge--proj--301" ]
+
+    rm "$T/view-300.json"
+    rm -rf "$HOME/.config/archon-cron/state" # next tick, past the throttle
+    export DEADLINE_NOW=2000
+    run "$CRON_DIR/pr-maintenance-cron.sh"
+    [ "$status" -eq 0 ]
+    grep -qx 'first_seen=1000' "$f"
+    grep -qx 'last_seen=2000' "$f"
+    [ ! -f "$HOME/.archon/state/deadlines/ops-merge--proj--301" ]
+    ! gh_called '^pr merge'
+    ! gh_called '^pr edit'
 }

@@ -62,7 +62,7 @@ mkdir -p "$LOG_DIR"
 # below and by pr-review-cron.sh. held-pr-review.sh reviews a fully trusted,
 # green one instead, and hands it back here only at a head it approved or
 # blocked; a PR that must stay open and unmerged says so in its body, and that
-# review leaves it to the owner. merge_precondition_held applies it to a PR
+# review leaves it to the owner. merge_precondition_clear applies it to a PR
 # whose text states a precondition to meet before it merges.
 HOLD_LABEL="hold"
 # One marker per project and PR holding the "<headRefOid> <mergeStateStatus>"
@@ -71,7 +71,7 @@ HOLD_LABEL="hold"
 # correction for, one (<project>-<PR>.rebase-requested) holding the head SHA
 # Phase 1b last asked dependabot to rebase, one (<project>-<PR>.review-retries) counting the
 # review-stage retries of the failed run that left the PR, and an empty one
-# (<project>-<PR>.precondition-held) once merge_precondition_held has held it.
+# (<project>-<PR>.precondition-held) once merge_precondition_clear has held it.
 MAINTENANCE_STATE_DIR="$HOME/.archon/state/pr-maintenance"
 mkdir -p "$MAINTENANCE_STATE_DIR"
 # Review-stage retries: per PR in all, and per project per tick.
@@ -453,55 +453,39 @@ pr_scope_decision() {
   esac
 }
 
-# merge_precondition_held <number> <author> [<view-json>] — true, with a log
-# line, when the PR is not to be promoted or merged this tick because its
-# description or one of up to 3 linked issues states a precondition to meet
-# before it merges (lib/merge-precondition.sh, #325). Only the owner can
-# confirm one is met, so the PR gets $HOLD_LABEL, one comment naming the
-# precondition (a linked issue by number only: its text may be a bridge
+# merge_precondition_clear <number> <author> [<view-json>] — whether the PR
+# may be promoted or merged this tick as far as a merge precondition goes
+# (lib/merge-precondition.sh, #325): exit 0 when its description and up to 3
+# linked issues state none. Exit 1, with a log line, when one does: only the
+# owner can confirm it is met, so the PR gets $HOLD_LABEL, one comment naming
+# the precondition (a linked issue by number only: its text may be a bridge
 # issue's) and one ntfy. The owner confirms by removing the label: the
 # <project>-<PR>.precondition-held marker then lets it through, as does
-# held-pr-review having left it to the owner. A merge-only bot's PR is never
-# read, its body carries upstream text. <view-json> is the PR's
-# `gh pr view --json body,closingIssuesReferences`, read here when not given.
-# Fails closed: a read failure holds the PR this tick, unlabelled.
-merge_precondition_held() {
+# held-pr-review having left it to the owner. Exit 2, with a log line, when
+# the PR or a linked issue cannot be read: it is held this tick, unlabelled.
+# A merge-only bot's PR is never read, its body carries upstream text.
+# <view-json> is the PR's `gh pr view --json body,closingIssuesReferences`,
+# read here when not given.
+merge_precondition_clear() {
   local pr="$1" view="${3:-}" marker="$MAINTENANCE_STATE_DIR/${PROJECT}-$1.precondition-held"
-  local body issues n iview hits="" source="" quote=""
-  [ "$(trust_pr_level "$2" false)" = full ] || return 1
-  [ ! -f "$marker" ] || return 1
-  case "$(held_review_get "$PROJECT" "$pr")" in *" owner "*) return 1 ;; esac
-  if { [ -n "$view" ] || view=$(gh pr view "$pr" --json body,closingIssuesReferences 2>/dev/null); } \
-     && body=$(printf '%s' "$view" | jq -er '.body // ""' 2>/dev/null); then :
-  else
-    log "$PROJECT: PR #$pr — could not read it for a merge precondition, not promoting or merging it this tick"
-    return 0
-  fi
-  if hits=$(printf '%s\n' "$body" | merge_precondition_lines); then
-    source="this PR's description"
-  else
-    issues=$( { printf '%s' "$view" | jq -r '.closingIssuesReferences[]?.number' 2>/dev/null
-                printf '%s' "$body" | grep -oiE '(close[sd]?|fix(e[sd])?|resolve[sd]?|refs?) #[0-9]+' | grep -oE '[0-9]+$'
-              } | awk '/^[0-9]+$/ && !seen[$0]++ && ++n <= 3' || true)
-    for n in $issues; do
-      if ! iview=$(gh issue view "$n" --json body 2>/dev/null) \
-         || ! iview=$(printf '%s' "$iview" | jq -er '.body // ""' 2>/dev/null); then
-        log "$PROJECT: PR #$pr — could not read linked issue #$n for a merge precondition, not promoting or merging it this tick"
-        return 0
-      fi
-      if printf '%s\n' "$iview" | merge_precondition_lines >/dev/null; then
-        source="linked issue #$n"
-        break
-      fi
-    done
-  fi
-  [ -n "$source" ] || return 1
+  local found rc=0 source quote=""
+  [ "$(trust_pr_level "$2" false)" = full ] || return 0
+  [ ! -f "$marker" ] || return 0
+  case "$(held_review_get "$PROJECT" "$pr")" in *" owner "*) return 0 ;; esac
+  [ -n "$view" ] || view=$(gh pr view "$pr" --json body,closingIssuesReferences 2>/dev/null) || view=""
+  found=$(merge_precondition_find "alexsiri7/$PROJECT" "$view") || rc=$?
+  case "$rc" in
+    1) return 0 ;;
+    2) log "$PROJECT: PR #$pr — could not read $found for a merge precondition, not promoting or merging it this tick"
+       return 2 ;;
+  esac
+  source="${found%%$'\n'*}"
   if ! gh pr edit "$pr" --add-label "$HOLD_LABEL" >/dev/null 2>&1; then
     log "$PROJECT: PR #$pr — $source states a merge precondition, but could not add $HOLD_LABEL; retrying next tick"
-    return 0
+    return 1
   fi
   touch "$marker" 2>/dev/null || true
-  [ "$source" != "this PR's description" ] || quote=$'\n\n'$(printf '%s\n' "$hits" | sed 's/^/> /')
+  [ "$found" = "$source" ] || quote=$'\n\n'$(printf '%s\n' "${found#*$'\n'}" | sed 's/^/> /')
   gh pr comment "$pr" --body "Holding this PR for the owner: $source states a precondition to meet before it merges.$quote
 
 The factory cannot confirm it is met. Remove the \`$HOLD_LABEL\` label once it is, and pr-maintenance merges the PR as usual (alexsiri7/interstellarai.net#325).
@@ -511,6 +495,7 @@ The factory cannot confirm it is met. Remove the \`$HOLD_LABEL\` label once it i
     "PR #$pr is held for the owner: $source states a precondition to meet before it merges. Remove $HOLD_LABEL once it is met. https://github.com/alexsiri7/$PROJECT/pull/$pr" \
     "PR held for an owner precondition"
   log "$PROJECT: PR #$pr — $source states a precondition to meet before it merges; labelled $HOLD_LABEL for the owner"
+  return 1
 }
 
 # held_review_merge_gate <number> <headRefOid> — what held-pr-review.sh's
@@ -698,7 +683,7 @@ for PROJECT in "${PROJECTS[@]}"; do
     fi
     pr_left_by_failed_run "$PR" "$HEAD" && continue
     # Before the flip: a draft that names a merge precondition stays a draft.
-    merge_precondition_held "$PR" "$AUTHOR" && continue
+    merge_precondition_clear "$PR" "$AUTHOR" || continue
     log "$PROJECT: promoting draft PR #$PR to ready (CI CLEAN)"
     if ! gh pr ready "$PR" 2>>"$LOG_DIR/pr-maintenance-errors.log"; then
       log "$PROJECT: PR #$PR — could not mark ready (see $LOG_DIR/pr-maintenance-errors.log)"
@@ -748,17 +733,22 @@ for PROJECT in "${PROJECTS[@]}"; do
     # closed: a bare merge would reintroduce exactly this bug, and the PR is
     # still CLEAN on the next tick 15 minutes later.
     MERGE_JSON=$(gh pr view "$PR" --json title,body,closingIssuesReferences,statusCheckRollup 2>/dev/null || echo "")
-    if [ -z "$MERGE_JSON" ]; then
-      log "$PROJECT: PR #$PR — could not read title/body for the merge message, retrying next tick"
-      continue
-    fi
-    # Before the ops-merge mark too: ops-pr-review.sh merges what it marks.
-    merge_precondition_held "$PR" "$AUTHOR" "$MERGE_JSON" && continue
+    [ -n "$MERGE_JSON" ] \
+      || log "$PROJECT: PR #$PR — could not read title/body for the merge message, retrying next tick"
+    PRECONDITION=0
+    merge_precondition_clear "$PR" "$AUTHOR" "$MERGE_JSON" || PRECONDITION=$?
+    [ "$PRECONDITION" != 1 ] || continue
     if MERGE_HOLD=$(runas_merge_blocked "$PROJECT" "$PR"); then
       log "$PROJECT: PR #$PR is CLEAN but not auto-merged: $MERGE_HOLD"
-      deadline_mark ops-merge "$PROJECT" "$PR" "$SHA" "$HEAD" "$MERGE_HOLD"
+      # ops-pr-review.sh merges what is marked, so a PR the precondition check
+      # could not read only keeps the clock it was given at this head.
+      if [ "$PRECONDITION" = 0 ] \
+         || [ "$(deadline_get "$DEADLINE_STATE_DIR/ops-merge--$PROJECT--$PR" sha)" = "$SHA" ]; then
+        deadline_mark ops-merge "$PROJECT" "$PR" "$SHA" "$HEAD" "$MERGE_HOLD"
+      fi
       continue
     fi
+    { [ -n "$MERGE_JSON" ] && [ "$PRECONDITION" = 0 ]; } || continue
     held_review_merge_gate "$PR" "$SHA" || continue
     [ "$STATE" = CLEAN ] || [ "$HELD_APPROVED" = 1 ] || continue
     log "$PROJECT: PR #$PR is $STATE — merging directly"

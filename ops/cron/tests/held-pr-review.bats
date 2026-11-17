@@ -256,6 +256,26 @@ calls() { grep -c "^$1" "$T/argv" || true; }
     [ "$(cut -d' ' -f2,3 "$HELD_REVIEW_STATE/catscape-23")" = "owner needs-owner-review" ]
 }
 
+@test "floor: each linked issue is checked on its own and as filed, as pr-maintenance holds on it (#325)" {
+    # An unclosed fence in #30 must not hide #31's precondition.
+    held catscape 22 "$SHA1" hold
+    printf '%s' '{"title":"Fix","body":"```\nsome log","labels":[]}' > "$GH/issue-30.json"
+    echo '{"title":"Split","body":"## Before merging\nThe owner sets SECRET_X.","labels":[]}' > "$GH/issue-31.json"
+    view_set 22 '.body = "Fixes #30, fixes #31" | .closingIssuesReferences = [{number: 30}, {number: 31}]'
+    # A restated issue's raw body, not its restatement, carries the precondition.
+    held catscape 23 "$SHA1" hold
+    echo '{"title":"Bridge","body":"Do not merge until the owner rotates the key.","labels":[{"name":"archon:restated"}]}' > "$GH/issue-32.json"
+    mkdir -p "$SCREEN_RESTATE_DIR"
+    echo '{"v":1,"source":"feedback","type":"bug_report","summary":"Rotate the key","error_class":"","frames":[],"files":[],"repro":""}' > "$SCREEN_RESTATE_DIR/catscape-32.json"
+    view_set 23 '.body = "Fixes #32" | .closingIssuesReferences = [{number: 32}]'
+    verdict approve
+    review
+    [ "$(calls claude)" -eq 0 ]
+    [ "$(calls 'gh pr edit')" -eq 0 ]
+    [ "$(cut -d' ' -f2,3 "$HELD_REVIEW_STATE/catscape-22")" = "owner hold" ]
+    [ "$(cut -d' ' -f2,3 "$HELD_REVIEW_STATE/catscape-23")" = "owner hold" ]
+}
+
 @test "digest: a PR that closed or moved drops out; a week with none sends nothing and closes the last issue" {
     held catscape 22 "$SHA1" hold
     files 22 .github/CODEOWNERS

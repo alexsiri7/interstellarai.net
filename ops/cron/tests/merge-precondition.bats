@@ -62,3 +62,12 @@ hits() { printf '%s\n' "$1" | merge_precondition_lines; }
     [ "${#lines[0]}" -eq 200 ]
     [ "${lines[2]}" = Precondition ]
 }
+
+@test "linked_issue_numbers: closing references first, then body keywords, deduped, at most 3" {
+    run linked_issue_numbers <<<'{"closingIssuesReferences":[{"number":7}],"body":"Refs #8, fixes #7. Closes #9 and resolves #10. See #11."}'
+    [ "$status" -eq 0 ]
+    [ "$output" = $'7\n8\n9' ]
+    run linked_issue_numbers <<<'{"body":null}'
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
