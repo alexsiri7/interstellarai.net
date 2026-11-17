@@ -16,7 +16,7 @@
 #      releases only, no pre-releases) is the newest one. No fetch, nothing
 #      written anywhere, so a no-op week touches the live repo not at all.
 #      Every run first closes the issues of tags older than the live one
-#      (step 3) that are still open. Nothing newer → log "current vX", status
+#      (step 4) that are still open. Nothing newer → log "current vX", status
 #      ok/noop, exit 0.
 #   2. guard: exit 0 (status deferred, last_ok left alone so a permanent
 #      deferral goes stale in check_archon_update) while any archon run is
@@ -65,8 +65,10 @@
 #      inspection (the message says where), and one GitHub issue per tag on
 #      $ARCHON_UPDATE_ISSUE_REPO (alexsiri7/interstellarai.net, labelled
 #      manual-review so the factory leaves it alone; marker
-#      archon-update-issue-<tag>), naming the resolved files if the merge had
-#      conflicts. This is the one escalation of a sync.
+#      archon-update-issue-<tag>; filing it closes every older tag's open
+#      issue as superseded, a failed close keeps the marker and is retried),
+#      naming the resolved files if the merge had conflicts. This is the one
+#      escalation of a sync.
 #      Validation also checks presence: every workflow in
 #      $ARCHON_UPDATE_REQUIRED_WORKFLOWS (the ones the ops crons launch) that the
 #      live CLI lists in a directory must still be listed by the new one. A
