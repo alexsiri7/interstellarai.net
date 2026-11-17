@@ -19,9 +19,11 @@
 #     re-held, reviewable again, once it is CLEAN/UNSTABLE/BLOCKED with every
 #     other check green; under `hold`, skipped (left to whoever applied it).
 #   - It weakens the factory's own checks or grants access
-#     (held_review_owner_hits), or its diff is too large: no Claude call; the
-#     label stays, one comment, and the PR goes into the owner's weekly
-#     question (lib/owner-digest.sh).
+#     (held_review_owner_hits), its diff is too large, or its text or a linked
+#     issue's states a precondition to meet before it merges
+#     (lib/merge-precondition.sh, #325): no Claude call; the label stays, one
+#     comment, and the PR goes into the owner's weekly question
+#     (lib/owner-digest.sh).
 #   - Otherwise `claude -p`, with no tools and no MCP servers in an empty
 #     directory, reviews the PR text, its linked issues (a restated issue's
 #     restatement, never its raw body) and the diff:
@@ -67,6 +69,8 @@ source "$SCRIPT_DIR/lib/held-review.sh"
 source "$SCRIPT_DIR/lib/owner-digest.sh"
 # shellcheck source=lib/owner-paths.sh
 source "$SCRIPT_DIR/lib/owner-paths.sh"
+# shellcheck source=lib/merge-precondition.sh
+source "$SCRIPT_DIR/lib/merge-precondition.sh"
 
 HELD_REVIEW_CLAUDE_DIR="${HELD_REVIEW_CLAUDE_DIR:-$HOME/.claude}"
 HELD_REVIEW_MODEL="${HELD_REVIEW_MODEL:-opus}"
@@ -393,6 +397,15 @@ for PROJECT in "${PROJECTS[@]}"; do
     fi
     if ! linked_issues_text "$ISSUES" "$TMP/issues"; then
       skip "could not read a linked issue, or its restatement is not on record"; continue
+    fi
+    if field '.body // ""' | merge_precondition_lines >/dev/null \
+       || merge_precondition_lines < "$TMP/issues" >/dev/null; then
+      if hold_for_owner "its text names a precondition only the owner can meet before it merges"; then
+        N_OWNER=$((N_OWNER + 1))
+      else
+        skip "names a merge precondition, but could not queue, comment or record it; next run"
+      fi
+      continue
     fi
 
     if [ "$REVIEWS" -ge "$HELD_REVIEW_MAX" ]; then skip "$HELD_REVIEW_MAX reviews already this run"; continue; fi

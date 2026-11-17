@@ -241,6 +241,21 @@ calls() { grep -c "^$1" "$T/argv" || true; }
     [ "$(calls 'lachesis ask_question')" -eq 2 ]
 }
 
+@test "floor: a PR whose text or linked issue states a merge precondition is the owner's, with no Claude call (#325)" {
+    held catscape 22 "$SHA1" hold
+    view_set 22 '.body = "Fixes #30\n\n## Before merging\n1. Create the RAILWAY_PROJECT_TOKEN secret."'
+    held catscape 23 "$SHA1" needs-owner-review
+    echo '{"title":"Split the token","body":"**Do not merge until** the owner has set the secret.","labels":[]}' > "$GH/issue-31.json"
+    view_set 23 '.body = "Fixes #31" | .closingIssuesReferences = [{number: 31}]'
+    verdict approve
+    review
+    [ "$(calls claude)" -eq 0 ]
+    [ "$(calls 'gh pr edit')" -eq 0 ]
+    [ "$(grep -c "Waiting for the owner's weekly review: its text names a precondition only the owner can meet before it merges" "$T/comments")" -eq 2 ]
+    [ "$(cut -d' ' -f2,3 "$HELD_REVIEW_STATE/catscape-22")" = "owner hold" ]
+    [ "$(cut -d' ' -f2,3 "$HELD_REVIEW_STATE/catscape-23")" = "owner needs-owner-review" ]
+}
+
 @test "digest: a PR that closed or moved drops out; a week with none sends nothing and closes the last issue" {
     held catscape 22 "$SHA1" hold
     files 22 .github/CODEOWNERS
