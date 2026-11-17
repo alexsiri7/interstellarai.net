@@ -54,6 +54,10 @@
 #      (dedup per-PR)
 #  8b. A PR a factory ship run published now answers 404 (hidden or deleted)
 #      → ntfy once per PR per episode, marker cleared when it resolves again
+#  8c. 3+ ship runs in the last 24h failed at the same node with the same
+#      error (ids, numbers and SHAs aside; rate limits excluded) → one
+#      factory-gap issue on interstellarai.net per signature; later runs are
+#      comments on the open one (#319)
 #  9e. Claude accounts: once a day, a real request against every config dir in
 #      CLAUDE_ACCOUNTS (lib/claude-auth.sh) → ntfy once per day per failing
 #      account + one `human-needed` tracking issue, closed on recovery
@@ -2888,6 +2892,178 @@ check_published_prs() {
 }
 
 # ----------------------------------------------------------------------------
+# Check 8c: several ship runs failing the same way (#319). From 2026-11-13 to
+#   11-15, 15 archon-ship runs across four repos died on one review__publish
+#   bug while this script only reported "no progress". Each tick reads the
+#   cron-issue-*.log ship logs of the last FAILURE_SIGNATURE_WINDOW_MINUTES
+#   across REPOS and takes a signature from the engine's failure line, one of
+#     ❌ DAG workflow '<wf>' completed with failures: '<node>': <error>
+#     ❌ DAG workflow '<wf>' failed: node <node> failed. <n> downstream nodes were skipped.
+#   (the second when no node completed, e.g. the first one failed; its error
+#   comes from the node's dag_node_failed record): the failing node and its
+#   error, with uuids, SHAs and numbers replaced by <id>. A run with no error
+#   to quote (a "completed with no successful nodes" run, where nothing
+#   failed) is no signature. Once FAILURE_SIGNATURE_MIN_RUNS runs share one, it files
+#   one factory-gap issue on FAILURE_SIGNATURE_REPO, found again by a hidden
+#   signature marker; a run it does not list yet becomes a comment on the open
+#   one. A rate-limit, quota or overload error (check_progress's token-limit
+#   words) is no signature, as the ship circuit breaker does not count one (a
+#   quota pause never writes that line at all), and a run
+#   older than the last close of its signature's escalation is not counted
+#   again. Errors are redacted (ship_breaker_redact) before they are quoted.
+# ----------------------------------------------------------------------------
+FAILURE_SIGNATURE_REPO="alexsiri7/interstellarai.net"
+FAILURE_SIGNATURE_MIN_RUNS="${FAILURE_SIGNATURE_MIN_RUNS:-3}"
+FAILURE_SIGNATURE_WINDOW_MINUTES="${FAILURE_SIGNATURE_WINDOW_MINUTES:-1440}"
+
+# run_failure_signature <log>: echo "<node>\t<error>" for a failed run's log,
+# nothing for any other.
+run_failure_signature() {
+  local line node msg
+  line=$(grep -m1 -oE "DAG workflow '[^']*' (completed with failures: '[^']+': |failed: nodes? ).*" \
+           "$1" 2>/dev/null) || return 0
+  case $line in
+    *"' completed with failures: '"*)
+      line=${line#*completed with failures: \'}
+      node=${line%%\'*}
+      msg=${line#*\': } ;;
+    *)
+      node=${line#*\' failed: node}; node=${node#s}; node=${node# }
+      node=${node%% failed. *}; node=${node%%, *}
+      msg=$(node_failure_error "$1" "$node") ;;
+  esac
+  [ -n "$msg" ] || return 0
+  grep -qiE 'rate.?limit|hit your.*limit|\b429\b|quota.?exceed|overloaded|usage.?limit|credit.?exhaust' \
+    <<<"$msg" && return 0
+  msg=$(ship_breaker_redact <<<"$msg" | sed -E \
+    -e 's/[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}/<id>/g' \
+    -e 's/\b[0-9a-f]{7,40}\b/<id>/g' \
+    -e 's/[0-9]+/<id>/g')
+  printf '%s\t%s\n' "$node" "${msg:0:500}"
+}
+
+# node_failure_error <log> <node>: the error of <node>'s last failure, on one
+# line, from the engine's dag_node_failed log record (JSON on stderr, which the
+# ship log captures). The "failed: node <node> failed." line does not carry it.
+node_failure_error() {
+  grep -F '"dag_node_failed"' "$1" 2>/dev/null | jq -Rr --arg n "$2" '
+    fromjson? | select(.msg == "dag_node_failed" and .nodeId == $n)
+    | .err.message // (if .isTimeout == true then "timed out" else null end)
+      // ([.stderrTail, .stdoutTail] | map(select(. != null and . != "")) | join(" "))
+    | gsub("\\s+"; " ")' 2>/dev/null | tail -n1
+}
+
+check_failure_signatures() {
+  local project f sig key
+  local -A nodes=() errors=() runs=() counts=()
+  for project in "${REPOS[@]}"; do
+    [ -d "$BASE_DIR/$project/.archon-logs" ] || continue
+    while IFS= read -r f; do
+      sig=$(run_failure_signature "$f")
+      [ -n "$sig" ] || continue
+      key=$(printf '%s' "$sig" | sha256sum | cut -c1-16)
+      nodes[$key]=${sig%%$'\t'*}
+      errors[$key]=${sig#*$'\t'}
+      runs[$key]+="$(stat -c %Y "$f") $project $f"$'\n'
+      counts[$key]=$(( ${counts[$key]:-0} + 1 ))
+    done < <(find "$BASE_DIR/$project/.archon-logs" -maxdepth 1 -type f \
+               -name 'cron-issue-*.log' -mmin -"$FAILURE_SIGNATURE_WINDOW_MINUTES")
+  done
+
+  local due=0
+  for key in "${!counts[@]}"; do
+    [ "${counts[$key]}" -ge "$FAILURE_SIGNATURE_MIN_RUNS" ] && due=1
+  done
+  [ "$due" = 1 ] || return 0
+
+  local issues
+  if ! issues=$(gh issue list --repo "$FAILURE_SIGNATURE_REPO" --state all --label factory-gap \
+                  --limit 200 --json number,state,body,closedAt 2>/dev/null); then
+    log "failure-signatures: could not list factory-gap issues — nothing filed, retrying next tick"
+    return 0
+  fi
+  for key in "${!counts[@]}"; do
+    [ "${counts[$key]}" -ge "$FAILURE_SIGNATURE_MIN_RUNS" ] || continue
+    escalate_failure_signature "$key" "${nodes[$key]}" "${errors[$key]}" "${runs[$key]}" "$issues"
+  done
+}
+
+# escalate_failure_signature <key> <node> <error> <runs> <issues>: file or
+# comment on the escalation for one signature. <runs> holds one
+# "<mtime> <project> <log>" line per run, <issues> the factory-gap listing.
+escalate_failure_signature() {
+  local key="$1" node="$2" error="$3" failed_runs="$4" issues="$5"
+  local marker="<!-- pipeline-health-failure-signature: $key -->"
+  local open closed_at
+  open=$(jq -r --arg m "$marker" '[.[] | select(.state == "OPEN" and ((.body // "") | contains($m))) | .number]
+           | min // empty' <<<"$issues" 2>/dev/null)
+  closed_at=$(jq -r --arg m "$marker" '[.[] | select(.state == "CLOSED" and ((.body // "") | contains($m)))
+                | .closedAt // empty | fromdateiso8601] | max // 0' <<<"$issues" 2>/dev/null)
+  [[ "$closed_at" =~ ^[0-9]+$ ]] || closed_at=0
+
+  local thread=""
+  if [ -n "$open" ] && ! thread=$(gh issue view "$open" --repo "$FAILURE_SIGNATURE_REPO" \
+                                    --json body,comments 2>/dev/null); then
+    log "failure-signatures: could not read escalation #$open — retrying next tick"
+    return 0
+  fi
+
+  local mtime project f when list="" n=0 first=""
+  while read -r mtime project f; do
+    [ -n "$f" ] && [ "$mtime" -gt "$closed_at" ] || continue
+    [[ "$thread" == *"\`$f\`"* ]] && continue
+    when=$(date -u -d "@$mtime" '+%Y-%m-%d %H:%M UTC')
+    list+="- $project: \`$f\` ($when)"$'\n'
+    n=$((n + 1))
+    [ -n "$first" ] || first=$when
+  done < <(printf '%s' "$failed_runs" | sort -n)
+
+  if [ -n "$open" ]; then
+    if [ "$n" -eq 0 ]; then
+      log "failure-signatures: escalation #$open already lists every run failing at $node"
+      return 0
+    fi
+    if gh issue comment "$open" --repo "$FAILURE_SIGNATURE_REPO" --body "$n more run(s) failed with this signature:
+
+$list
+Added by \`pipeline-health-cron.sh\` (\`check_failure_signatures\`).
+
+<!-- lachesis:automated -->" >/dev/null 2>&1; then
+      log "failure-signatures: added $n run(s) failing at $node to escalation #$open"
+    else
+      log "failure-signatures: could not comment on escalation #$open — retrying next tick"
+    fi
+    return 0
+  fi
+
+  [ "$n" -ge "$FAILURE_SIGNATURE_MIN_RUNS" ] || return 0
+  local body url
+  body="## Factory gap — $n runs failed with the same error
+
+**Failing node**: \`$node\`
+**First seen**: $first
+
+\`\`\`
+'$node': $error
+\`\`\`
+
+Runs, oldest first:
+
+$list
+Auto-filed by \`pipeline-health-cron.sh\` (\`check_failure_signatures\`, #319): $n ship runs in the last $((FAILURE_SIGNATURE_WINDOW_MINUTES / 60))h failed with this signature, the failing node and its error with ids, numbers and SHAs replaced by \`<id>\`. Later runs that fail the same way are added here as comments. Close this once the cause is fixed.
+
+$marker
+<!-- lachesis:automated -->"
+  if url=$(gh issue create --repo "$FAILURE_SIGNATURE_REPO" --label factory-gap \
+             --title "factory-gap: $n runs failed at $node with the same error" \
+             --body "$body" 2>/dev/null | tail -1) && [[ "$url" =~ [0-9]+$ ]]; then
+    log "failure-signatures: filed $url for $n runs failing at $node"
+  else
+    log "failure-signatures: could not file the escalation for $node — retrying next tick"
+  fi
+}
+
+# ----------------------------------------------------------------------------
 # Check 8: Sweep stale `archon:in-progress` labels off closed issues.
 #   archon's fix workflow closes issues via "Fixes #N" on a merged PR, but
 #   GitHub doesn't auto-update the label, and the workflow doesn't always
@@ -3524,6 +3700,7 @@ done
 reconcile_zombies
 check_parked_runs
 check_stalled_tool_calls
+check_failure_signatures
 check_daily_trim
 check_disk
 check_archon_tmp_trim
