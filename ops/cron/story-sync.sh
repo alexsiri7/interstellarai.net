@@ -2,9 +2,12 @@
 # story-sync.sh — bring story changes from Annie into the game repos.
 #
 # For each line of story-sync.txt (`<annie-project-id> <owner/repo>`):
-#   1. Export the Annie project's story bible (story objects, relationships and
-#      the outline with each node's latest text) with a READ-ONLY psql session
-#      on ANNIE_DB_URL, as Markdown, via lib/annie_export.py.
+#   1. Export the Annie project's story bible (story objects, relationships,
+#      the outline with each node's latest text, location maps and images, and
+#      the open and sent snapshot annotations) with a READ-ONLY psql session on
+#      ANNIE_DB_URL, as Markdown, via lib/annie_export.py. Images come from
+#      Annie's private storage bucket (GET only), downloaded only when their
+#      sha256 is not already cached in $STATE_DIR/images/<repo>.
 #   2. Compare it with the export last handed to the factory (a hash in
 #      $STATE_DIR). Unchanged: nothing runs.
 #   3. Changed: run `archon-story-sync` in the repo's clone with the export dir.
@@ -14,6 +17,10 @@
 #      factory when the settled story changed what the game must do.
 # The hash is recorded only when the workflow succeeded, so a failed run is
 # retried the next day.
+#
+# Exported annotations are not marked `sent` in Annie: no Annie token scope may
+# set an annotation's status yet (word-coach-annie#1497), and this script never
+# writes to Annie's database. An annotation is exported until it is done.
 #
 # Crontab:
 #   30 6 * * * <repo>/ops/cron/story-sync.sh >> ~/.local/state/archon-cron/logs/story-sync.log 2>&1
@@ -36,7 +43,7 @@ source "$SCRIPT_DIR/lib/quota-pause.sh"
 quota_may_launch "story-sync" || exit 0
 # shellcheck source=lib/secrets.sh
 source "$SCRIPT_DIR/lib/secrets.sh"
-secrets_load NTFY_TOPIC ANNIE_DB_URL
+secrets_load NTFY_TOPIC ANNIE_DB_URL ANNIE_SUPABASE_URL ANNIE_SUPABASE_SERVICE_ROLE_KEY
 : "${NTFY_TOPIC:?NTFY_TOPIC not set}"
 : "${ANNIE_DB_URL:?ANNIE_DB_URL not set}"
 
@@ -76,8 +83,36 @@ select json_build_object(
       'synopsis', n.synopsis, 'status', n.status, 'orderIndex', n."orderIndex",
       'content', (select c.content from "ContentVersion" c where c."nodeId" = n.id
                   order by c."createdAt" desc limit 1)))
-    from "StructureNode" n where n."projectId" = '$id'), '[]'));
+    from "StructureNode" n where n."projectId" = '$id'), '[]'),
+  'images', coalesce((select json_agg(json_build_object(
+      'id', i.id, 'storyObjectId', i."storyObjectId", 'kind', i.kind, 'caption', i.caption,
+      'orderIndex', i."orderIndex", 'isCover', i."isCover", 'storagePath', i."storagePath",
+      'sha256', i.sha256))
+    from "LocationImage" i
+    join "StoryObject" o on o.id = i."storyObjectId" and o."projectId" = '$id'), '[]'),
+  'maps', coalesce((select json_agg(json_build_object(
+      'storyObjectId', m."storyObjectId", 'widthM', m."widthM", 'heightM', m."heightM",
+      'backgroundImageId', m."backgroundImageId", 'items', m.items))
+    from "LocationMap" m
+    join "StoryObject" o on o.id = m."storyObjectId" and o."projectId" = '$id'), '[]'),
+  'annotations', coalesce((select json_agg(json_build_object(
+      'id', a.id, 'locationId', a."locationId", 'kind', a.kind, 'thingKey', a."thingKey",
+      'thingName', (select t->>'name' from jsonb_array_elements(s.things) t
+                    where t->>'key' = a."thingKey" limit 1),
+      'region', a.region, 'text', a.text, 'storyObjectId', a."storyObjectId",
+      'build', s.build, 'snapshotSha256', s.sha256, 'createdAt', a."createdAt"))
+    from "SnapshotAnnotation" a
+    join "StoryObject" l on l.id = a."locationId" and l."projectId" = '$id'
+    left join "LocationSnapshot" s on s.id = a."snapshotId"
+    where a.status in ('open', 'sent')), '[]'));
 SQL
+}
+
+# export_markdown <out-dir> <image-cache> < export.json — the storage
+# credentials reach only this child, never the archon run.
+export_markdown() {
+  ANNIE_SUPABASE_URL="${ANNIE_SUPABASE_URL:-}" ANNIE_SUPABASE_SERVICE_ROLE_KEY="${ANNIE_SUPABASE_SERVICE_ROLE_KEY:-}" \
+    python3 -I "$SCRIPT_DIR/lib/annie_export.py" "$@"
 }
 
 # find_clone <owner/repo> — the repo's local clone, as sweep-audits.sh finds it.
@@ -97,7 +132,7 @@ while read -r project repo _; do
   # The export dir must be readable by the user archon runs agents as.
   export_dir=$(mktemp -d "${TMPDIR:-/tmp}/story-sync-$name-XXXXXX")
   chmod 755 "$export_dir"
-  if ! json=$(export_json "$project") || ! python3 -I "$SCRIPT_DIR/lib/annie_export.py" "$export_dir/annie" <<<"$json"; then
+  if ! json=$(export_json "$project") || ! export_markdown "$export_dir/annie" "$STATE_DIR/images/$name" <<<"$json"; then
     log "$name: could not export Annie project $project"
     notify "Story sync failed: $name" "Could not read Annie project $project" high x
     rm -rf "$export_dir"; failed=1; continue
