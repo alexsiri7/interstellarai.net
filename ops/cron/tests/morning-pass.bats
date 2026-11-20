@@ -148,13 +148,23 @@ teardown() {
     export ARCHON_THROTTLE_CONF="$T/throttle.conf"
     echo "TICK_INTERVAL_MINUTES=59" > "$ARCHON_THROTTLE_CONF"
     mkdir -p "$HOME/.config/archon-cron/state"
-    echo $(( $(date +%s) - 140 * 60 )) > "$HOME/.config/archon-cron/state/issue-pickup.last_run"
-    echo $(( $(date +%s) - 20 * 60 )) > "$HOME/.config/archon-cron/state/pipeline-health.last_run"
+    echo $(( $(date +%s) - 140 * 60 + 30 )) > "$HOME/.config/archon-cron/state/issue-pickup.last_run"
+    echo $(( $(date +%s) - 20 * 60 + 30 )) > "$HOME/.config/archon-cron/state/pipeline-health.last_run"
     run "$SCRIPT" --dry-run
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "$output" == *"== issue-pickup heartbeat: last ticked 140 min ago, alert after 135 min"* ]]
     [[ "$output" == *"== pr-maintenance heartbeat: never ticked, alert after 135 min"* ]]
     [[ "$output" == *"== pipeline-health heartbeat: last ticked 20 min ago, alert after 150 min"* ]]
+}
+
+@test "a cron its alert has just called silent is past its limit in the snapshot too" {
+    export ARCHON_THROTTLE_CONF="$T/throttle.conf"
+    echo "TICK_INTERVAL_MINUTES=59" > "$ARCHON_THROTTLE_CONF"
+    mkdir -p "$HOME/.config/archon-cron/state"
+    echo $(( $(date +%s) - 135 * 60 - 20 )) > "$HOME/.config/archon-cron/state/issue-pickup.last_run"
+    run "$SCRIPT" --dry-run
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"== issue-pickup heartbeat: last ticked 136 min ago, alert after 135 min"* ]]
 }
 
 @test "a job the live crontab has commented out or rescheduled is a variant, never missing" {

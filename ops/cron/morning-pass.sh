@@ -131,12 +131,13 @@ projects() { grep -vE '^[[:space:]]*(#|$)' "$SCRIPT_DIR/archon-projects.txt" | a
 declare -A HEARTBEAT_PERIODS=([issue-pickup]=15 [pr-maintenance]=15 [pipeline-health]=30)
 
 # snap_heartbeat <name> — "last ticked <N> min ago" or "never ticked", and the
-# alert limit.
+# alert limit. <N> rounds up, so it exceeds the limit exactly when the alert's
+# seconds-precise check does.
 snap_heartbeat() {
   local last
   last=$(cat "$HEARTBEAT_STAMP_DIR/$1.last_run" 2>/dev/null)
   if [[ "$last" =~ ^[0-9]+$ ]]; then
-    printf 'heartbeat: last ticked %s min ago' $(( ($(date +%s) - last) / 60 ))
+    printf 'heartbeat: last ticked %s min ago' $(( ($(date +%s) - last + 59) / 60 ))
   else
     printf 'heartbeat: never ticked'
   fi
@@ -145,7 +146,7 @@ snap_heartbeat() {
 
 snap_logs() {
   local name f age
-  for name in issue-pickup pr-maintenance pipeline-health; do
+  for name in "${!HEARTBEAT_PERIODS[@]}"; do
     echo "== $name $(snap_heartbeat "$name")"
   done
   for name in issue-pickup pr-maintenance pipeline-health ops-pr-review ops-self-update; do
