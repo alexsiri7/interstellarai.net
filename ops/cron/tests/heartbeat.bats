@@ -132,6 +132,44 @@ curl_calls() { [ -f "$CURL_ARGV" ] && wc -l < "$CURL_ARGV" || echo 0; }
     [ "$(curl_calls)" -eq 0 ]
 }
 
+# ── heartbeat by mtime ───────────────────────────────────────────────
+
+# touch_aged <file> <age in seconds>
+touch_aged() { touch -d "@$(( $(date +%s) - $2 ))" "$1"; }
+
+@test "mtime: a file written within two missed ticks raises nothing" {
+    # P=30: E=P, limit 2E+P = 90 min.
+    touch_aged "$T/ops-pr-review.log" $(( 90 * 60 - 60 ))
+    run heartbeat_watch_mtime ops-pr-review 30 "$T/ops-pr-review.log"
+    [ "$status" -eq 0 ]
+    [ "$(curl_calls)" -eq 0 ]
+    [ ! -f "$HEARTBEAT_STATE_DIR/ops-pr-review-alerted" ]
+}
+
+@test "mtime: a file older than two missed ticks alerts once, naming the cron" {
+    touch_aged "$T/ops-pr-review.log" $(( 90 * 60 + 60 ))
+    run heartbeat_watch_mtime ops-pr-review 30 "$T/ops-pr-review.log"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ops-pr-review last ticked 91 min ago; expected every 30 min, alert after 90"* ]]
+    [ "$(curl_calls)" -eq 1 ]
+    grep -q "Factory cron silent: ops-pr-review" "$CURL_ARGV"
+
+    run heartbeat_watch_mtime ops-pr-review 30 "$T/ops-pr-review.log"
+    [ "$(curl_calls)" -eq 1 ]
+}
+
+@test "mtime: a missing file alerts as never ticked, and a fresh write recovers" {
+    run heartbeat_watch_mtime morning-pass 1440 "$T/morning-pass.log"
+    [[ "$output" == *"morning-pass has never ticked (no $T/morning-pass.log)"* ]]
+    [ -f "$HEARTBEAT_STATE_DIR/morning-pass-alerted" ]
+
+    echo tick >> "$T/morning-pass.log"
+    run heartbeat_watch_mtime morning-pass 1440 "$T/morning-pass.log"
+    [[ "$output" == *"morning-pass recovered"* ]]
+    [ ! -f "$HEARTBEAT_STATE_DIR/morning-pass-alerted" ]
+    [ "$(curl_calls)" -eq 1 ]
+}
+
 # ── wiring into the work-loop crons ──────────────────────────────────
 
 # A watch whose period or name drifts from the watched cron pages falsely, or
@@ -154,4 +192,55 @@ curl_calls() { [ -f "$CURL_ARGV" ] && wc -l < "$CURL_ARGV" || echo 0; }
 @test "the watch calls run unconditionally on every real tick" {
     [ "$(grep -cx 'heartbeat_watch pipeline-health [0-9]*' "$SCRIPT_DIR/issue-pickup-cron.sh")" -eq 1 ]
     [ "$(grep -cx 'check_cron_heartbeats' "$SCRIPT_DIR/pipeline-health-cron.sh")" -eq 1 ]
+}
+
+# cron_period <minute> <hour> <dom> <month> <dow> — minutes between firings.
+cron_period() {
+    if [ "$5" != "*" ]; then echo 10080
+    elif [[ "$2" == \*/* ]]; then echo $(( ${2#*/} * 60 ))
+    elif [ "$2" != "*" ]; then echo 1440
+    elif [[ "$1" == \*/* ]]; then echo "${1#*/}"
+    else echo $(( 60 / $(tr , '\n' <<<"$1" | grep -c .) ))
+    fi
+}
+
+# A scheduled cron nothing watches can stop without anyone noticing. The four
+# crons with a status file are watched by pipeline-health's check_db_backup,
+# check_restore_test, check_system_maintenance and check_archon_update.
+@test "every scheduled cron is watched, the unthrottled ones by their crontab period" {
+    local m h dom mon dow rest name calls n=0
+    while read -r m h dom mon dow rest; do
+        name=$(sed -E 's|.* >> [^ ]+/logs/([^ ]+)\.log .*|\1|' <<<"$rest")
+        case "$name" in
+            issue-pickup|pr-maintenance|pipeline-health) continue ;;
+            db-backup|restore-test|system-maintenance|archon-update) continue ;;
+        esac
+        calls=$(grep -hE "^[[:space:]]*heartbeat_watch_mtime $name [0-9]+ " "$SCRIPT_DIR"/*.sh)
+        [ "$(grep -c . <<<"$calls")" -eq 1 ] || { echo "$name: not watched exactly once"; return 1; }
+        read -r _ _ period _ <<<"$calls"
+        [ "$period" = "$(cron_period "$m" "$h" "$dom" "$mon" "$dow")" ] || { echo "$name: watched at $period"; return 1; }
+        n=$((n + 1))
+    done < <(grep -E '^[^#@].* >> [^ ]+/logs/[^ ]+\.log ' "$SCRIPT_DIR/crontab")
+    [ "$n" -eq 10 ]
+}
+
+@test "each mtime watch reads the log its crontab line writes" {
+    local name file
+    while read -r _ name _ file; do
+        [ "$name" = ops-self-update ] && continue
+        [ "$file" = "\"\$LOG_DIR/$name.log\"" ]
+        grep -qE ">> [^ ]+/logs/$name\.log " "$SCRIPT_DIR/crontab"
+    done < <(grep -hE '^[[:space:]]*heartbeat_watch_mtime ' "$SCRIPT_DIR/pipeline-health-cron.sh")
+}
+
+@test "an ops-self-update cron tick touches the file its watch reads; other invocations do not" {
+    grep -qF 'heartbeat_watch_mtime ops-self-update 10 "$HOME/.local/state/archon-cron/ops-self-update/last-tick"' "$SCRIPT_DIR/pipeline-health-cron.sh"
+    mkdir -p "$T/checkout"
+    export ARCHON_RUN_AS=asiri OPS_CHECKOUT="$T/checkout" OPS_SELF_UPDATE_STATE="$T/ous"
+
+    run "$SCRIPT_DIR/ops-self-update.sh" --dry-run
+    [ ! -e "$T/ous/last-tick" ]
+
+    run "$SCRIPT_DIR/ops-self-update.sh"
+    [ -f "$T/ous/last-tick" ]
 }
