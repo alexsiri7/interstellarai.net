@@ -75,6 +75,7 @@ curl_calls() { [ -f "$CURL_ARGV" ] && wc -l < "$CURL_ARGV" || echo 0; }
     [ "$status" -eq 0 ]
     [ "$(curl_calls)" -eq 1 ]
     grep -q "Factory cron silent: pr-maintenance" "$CURL_ARGV"
+    grep -qF "heartbeat $HEARTBEAT_STAMP_DIR/pr-maintenance.last_run" "$CURL_ARGV"
     grep -q "ntfy.sh/test-topic" "$CURL_ARGV"
     [ -f "$HEARTBEAT_STATE_DIR/pr-maintenance-alerted" ]
 
@@ -234,13 +235,36 @@ cron_period() {
 }
 
 @test "an ops-self-update cron tick touches the file its watch reads; other invocations do not" {
-    grep -qF 'heartbeat_watch_mtime ops-self-update 10 "$HOME/.local/state/archon-cron/ops-self-update/last-tick"' "$SCRIPT_DIR/pipeline-health-cron.sh"
+    local watched
+    watched=$(sed -nE 's/^[[:space:]]*heartbeat_watch_mtime ops-self-update [0-9]+ "\$HOME(.*)"$/\1/p' \
+        "$SCRIPT_DIR/pipeline-health-cron.sh")
+    [ -n "$watched" ]
+    watched="$HOME$watched"
     mkdir -p "$T/checkout"
-    export ARCHON_RUN_AS=asiri OPS_CHECKOUT="$T/checkout" OPS_SELF_UPDATE_STATE="$T/ous"
+    unset OPS_SELF_UPDATE_STATE
+    export ARCHON_RUN_AS=asiri OPS_CHECKOUT="$T/checkout"
 
     run "$SCRIPT_DIR/ops-self-update.sh" --dry-run
-    [ ! -e "$T/ous/last-tick" ]
+    [ ! -e "$watched" ]
 
     run "$SCRIPT_DIR/ops-self-update.sh"
-    [ -f "$T/ous/last-tick" ]
+    [ -f "$watched" ]
+}
+
+@test "the morning pass's heartbeat periods are the ones its crons are watched at" {
+    local name period n=0
+    while read -r name period; do
+        grep -qE "\[$name\]=$period[ )]" "$SCRIPT_DIR/morning-pass.sh"
+        n=$((n + 1))
+    done < <(grep -hE '^[[:space:]]*heartbeat_watch [a-z-]+ [0-9]+$' \
+        "$SCRIPT_DIR/pipeline-health-cron.sh" "$SCRIPT_DIR/issue-pickup-cron.sh" | awk '{print $2, $3}')
+    [ "$n" -eq 3 ]
+}
+
+@test "the alert limit is heartbeat_watch's: T=59 gives 135 for 15-minute crons, 150 for 30" {
+    [ "$(heartbeat_limit_minutes 15)" = 135 ]
+    [ "$(heartbeat_limit_minutes 30)" = 150 ]
+    stamp pr-maintenance $(( 135 * 60 + 60 ))
+    run heartbeat_watch pr-maintenance 15
+    [[ "$output" == *"alert after 135 "* ]]
 }

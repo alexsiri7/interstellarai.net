@@ -144,6 +144,19 @@ teardown() {
     [ ! -d "$MORNING_PASS_STATE/runs" ]
 }
 
+@test "the snapshot gives each work-loop cron's last tick and the limit its silence alert uses" {
+    export ARCHON_THROTTLE_CONF="$T/throttle.conf"
+    echo "TICK_INTERVAL_MINUTES=59" > "$ARCHON_THROTTLE_CONF"
+    mkdir -p "$HOME/.config/archon-cron/state"
+    echo $(( $(date +%s) - 140 * 60 )) > "$HOME/.config/archon-cron/state/issue-pickup.last_run"
+    echo $(( $(date +%s) - 20 * 60 )) > "$HOME/.config/archon-cron/state/pipeline-health.last_run"
+    run "$SCRIPT" --dry-run
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"== issue-pickup heartbeat: last ticked 140 min ago, alert after 135 min"* ]]
+    [[ "$output" == *"== pr-maintenance heartbeat: never ticked, alert after 135 min"* ]]
+    [[ "$output" == *"== pipeline-health heartbeat: last ticked 20 min ago, alert after 150 min"* ]]
+}
+
 @test "a job the live crontab has commented out or rescheduled is a variant, never missing" {
     printf '*/15 * * * * /x/pr-maintenance-cron.sh >> /l/pr-maintenance.log 2>&1\n*/30 * * * * /x/pipeline-health-cron.sh >> /l/ph.log 2>&1\n0 5 * * 0 /x/pipeline-health-cron.sh --trim >> /l/ph.log 2>&1\n' >> "$T/live/ops/cron/crontab"
     printf '#*/15 * * * * /x/pr-maintenance-cron.sh >> /l/pr-maintenance.log 2>&1\n*/20 * * * * /x/pipeline-health-cron.sh >> /l/ph.log 2>&1\n' >> "$T/live-crontab"

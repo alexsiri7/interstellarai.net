@@ -10,6 +10,7 @@
 #   source "$SCRIPT_DIR/lib/heartbeat.sh"
 #   heartbeat_watch <name> <cron period in minutes>
 #   heartbeat_watch_mtime <name> <cron period in minutes> <file>
+#   heartbeat_limit_minutes <cron period in minutes>
 #
 # pipeline-health-cron.sh watches issue-pickup, pr-maintenance and the other
 # crons; issue-pickup-cron.sh watches pipeline-health, so stopping any one of
@@ -43,6 +44,12 @@ heartbeat_expected_minutes() {
   echo "$expected"
 }
 
+# heartbeat_limit_minutes <cron period> — the stamp age at which heartbeat_watch
+# alerts.
+heartbeat_limit_minutes() {
+  echo $(( 2 * $(heartbeat_expected_minutes "$1") + $1 ))
+}
+
 # heartbeat_watch <name> <cron period> — always returns 0: a watch never fails
 # the caller's tick.
 heartbeat_watch() {
@@ -71,7 +78,7 @@ _heartbeat_judge() {
   else
     age_min=$(( (now - last) / 60 ))
     if [ $(( now - last )) -gt $(( limit_min * 60 )) ]; then
-      problem="$name last ticked $age_min min ago; expected every $expected min, alert after $limit_min (two missed ticks)"
+      problem="$name last ticked $age_min min ago; expected every $expected min, alert after $limit_min (two missed ticks); heartbeat $source"
     fi
   fi
 
