@@ -1661,11 +1661,16 @@ load_trust() {
     [ "$(cat "$STALL_MARKER")" != "$stamp" ]
 }
 
-@test "check_cron_heartbeats watches issue-pickup and pr-maintenance at their 15-minute periods" {
+@test "check_cron_heartbeats watches issue-pickup and pr-maintenance at their 15-minute periods, the rest by their logs" {
     load_fn check_cron_heartbeats
     heartbeat_watch() { echo "$*" >> "$STATE_DIR/watched"; }
+    heartbeat_watch_mtime() { echo "$*" >> "$STATE_DIR/watched-mtime"; }
+    LOG_DIR="$STATE_DIR/logs"
     check_cron_heartbeats
     [ "$(cat "$STATE_DIR/watched")" = "$(printf 'issue-pickup 15\npr-maintenance 15')" ]
+    [ "$(grep -c . "$STATE_DIR/watched-mtime")" -eq 10 ]
+    grep -qx "pr-review 5 $STATE_DIR/logs/pr-review.log" "$STATE_DIR/watched-mtime"
+    grep -qx "ops-self-update 10 $HOME/.local/state/archon-cron/ops-self-update/last-tick" "$STATE_DIR/watched-mtime"
 }
 
 @test "the per-project tick loop still calls release_lag_check (#248 R5: dropping it silently ends the only production trigger for the unreleased-main flag)" {

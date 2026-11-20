@@ -57,8 +57,9 @@
 #  9e. Claude accounts: once a day, a real request against every config dir in
 #      CLAUDE_ACCOUNTS (lib/claude-auth.sh) → ntfy once per day per failing
 #      account + one `human-needed` tracking issue, closed on recovery
-#  9f. Work-loop crons silent: issue-pickup or pr-maintenance missed two
-#      expected ticks → ntfy once per episode (lib/heartbeat.sh)
+#  9f. Crons silent: issue-pickup, pr-maintenance or a cron with no status
+#      file of its own missed two expected ticks → ntfy once per episode
+#      (lib/heartbeat.sh)
 #  9g. Factory GitHub identity cannot open PRs (graphql.limit 0 or nearly
 #      used up, REST core limit at the unauthenticated 60, public profile 404 =
 #      flagged account; lib/gh-factory.sh, probed as the archon user in archon
@@ -3245,16 +3246,30 @@ check_doppler_token() {
 }
 
 # ----------------------------------------------------------------------------
-# Check 9f: work-loop crons silent. A cron that ticks and finds nothing still
-#   rewrites its throttle stamp; one that stops ticking (crontab lost, script
-#   dying before its gate) does not. Alerting and recovery are
-#   lib/heartbeat.sh's; pipeline-health's own heartbeat is watched by
-#   issue-pickup-cron.sh.
+# Check 9f: crons silent. A work-loop cron that ticks and finds nothing still
+#   rewrites its throttle stamp, and every other cron writes its log each time
+#   it fires; one that stops (crontab lost, script dying before its gate) does
+#   not. Alerting and recovery are lib/heartbeat.sh's; pipeline-health's own
+#   heartbeat is watched by issue-pickup-cron.sh. backup-dbs, restore-test,
+#   system-maintenance and archon-update are watched through their status
+#   files instead (check_db_backup, check_restore_test,
+#   check_system_maintenance, check_archon_update).
 # ----------------------------------------------------------------------------
 check_cron_heartbeats() {
   # Cron periods in minutes; keep in sync with ops/cron/crontab.
   heartbeat_watch issue-pickup 15
   heartbeat_watch pr-maintenance 15
+  heartbeat_watch_mtime lachesis-report 15 "$LOG_DIR/lachesis-report.log"
+  heartbeat_watch_mtime pr-review 5 "$LOG_DIR/pr-review.log"
+  heartbeat_watch_mtime ops-pr-review 30 "$LOG_DIR/ops-pr-review.log"
+  heartbeat_watch_mtime held-pr-review 30 "$LOG_DIR/held-pr-review.log"
+  heartbeat_watch_mtime morning-pass 1440 "$LOG_DIR/morning-pass.log"
+  heartbeat_watch_mtime sweep-audits 1440 "$LOG_DIR/sweep-audits.log"
+  heartbeat_watch_mtime daily-release 1440 "$LOG_DIR/daily-release.log"
+  heartbeat_watch_mtime musenmingle-digest 1440 "$LOG_DIR/musenmingle-digest.log"
+  heartbeat_watch_mtime tool-freshness 10080 "$LOG_DIR/tool-freshness.log"
+  # Its log stays empty while there is nothing to pull; it touches this instead.
+  heartbeat_watch_mtime ops-self-update 10 "$HOME/.local/state/archon-cron/ops-self-update/last-tick"
 }
 
 # ----------------------------------------------------------------------------

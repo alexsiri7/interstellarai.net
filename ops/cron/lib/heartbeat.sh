@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
-# Liveness watch for the work-loop crons: tells "ticked and found nothing"
-# apart from "stopped ticking". The heartbeat is the throttle stamp
-# (lib/throttle.sh), which should_tick rewrites at the start of every real
-# tick; a forced tick (ARCHON_CRON_FORCE_TICK=1) does not count.
+# Liveness watch for the crons: tells "ticked and found nothing" apart from
+# "stopped ticking". For the work-loop crons the heartbeat is the throttle
+# stamp (lib/throttle.sh), which should_tick rewrites at the start of every
+# real tick; a forced tick (ARCHON_CRON_FORCE_TICK=1) does not count. For the
+# other crons it is the mtime of a file the cron writes every time it fires
+# (its log, which the crontab line appends to).
 #
 # Usage:
 #   source "$SCRIPT_DIR/lib/heartbeat.sh"
 #   heartbeat_watch <name> <cron period in minutes>
+#   heartbeat_watch_mtime <name> <cron period in minutes> <file>
+#   heartbeat_limit_minutes <cron period in minutes>
 #
-# pipeline-health-cron.sh watches issue-pickup and pr-maintenance;
-# issue-pickup-cron.sh watches pipeline-health, so stopping any one of the
-# three is noticed. Under a throttle of T minutes a cron firing every P
-# minutes really ticks every E = max(P, ceil(T/P)*P) minutes; the watch alerts
-# once the stamp is older than 2E+P (two missed ticks, plus one cron slot for
-# a tick that slips when T is a multiple of P). One ntfy per stale episode,
-# marker in $HEARTBEAT_STATE_DIR (default
-# ~/.archon/pipeline-health-state/heartbeat), written only once the ntfy went
-# out; removed, with a `recovered` log line, when the cron ticks again.
+# pipeline-health-cron.sh watches issue-pickup, pr-maintenance and the other
+# crons; issue-pickup-cron.sh watches pipeline-health, so stopping any one of
+# them is noticed. Under a throttle of T minutes a cron firing every P minutes
+# really ticks every E = max(P, ceil(T/P)*P) minutes; a file written every
+# time the cron fires has E = P. The watch alerts once the heartbeat is older
+# than 2E+P (two missed ticks, plus one cron slot for a tick that slips when T
+# is a multiple of P). One ntfy per stale episode, marker in
+# $HEARTBEAT_STATE_DIR (default ~/.archon/pipeline-health-state/heartbeat),
+# written only once the ntfy went out; removed, with a `recovered` log line,
+# when the cron ticks again.
 # NTFY_TOPIC comes from the caller (lib/trust.sh or secrets_load).
 
 [ -n "${_ARCHON_HEARTBEAT_SH:-}" ] && return 0
@@ -39,24 +44,46 @@ heartbeat_expected_minutes() {
   echo "$expected"
 }
 
+# _heartbeat_limit <expected minutes> <cron period> — alert after two missed
+# ticks plus one cron slot.
+_heartbeat_limit() { echo $(( 2 * $1 + $2 )); }
+
+# heartbeat_limit_minutes <cron period> — the stamp age at which heartbeat_watch
+# alerts.
+heartbeat_limit_minutes() {
+  _heartbeat_limit "$(heartbeat_expected_minutes "$1")" "$1"
+}
+
 # heartbeat_watch <name> <cron period> — always returns 0: a watch never fails
 # the caller's tick.
 heartbeat_watch() {
   local name="$1" period="$2"
   local stamp="$HEARTBEAT_STAMP_DIR/$name.last_run"
+  _heartbeat_judge "$name" "$period" "$(heartbeat_expected_minutes "$period")" \
+    "$stamp" "$(cat "$stamp" 2>/dev/null)"
+}
+
+# heartbeat_watch_mtime <name> <cron period> <file> — <file>'s mtime is the
+# heartbeat, so the cron must write it every time it fires. Always returns 0.
+heartbeat_watch_mtime() {
+  local name="$1" period="$2" file="$3"
+  _heartbeat_judge "$name" "$period" "$period" "$file" "$(stat -c %Y "$file" 2>/dev/null)"
+}
+
+# _heartbeat_judge <name> <cron period> <expected minutes> <source> <last tick epoch>
+_heartbeat_judge() {
+  local name="$1" period="$2" expected="$3" source="$4" last="$5"
   local marker="$HEARTBEAT_STATE_DIR/$name-alerted"
-  local expected limit_min last now age_min problem=""
-  expected=$(heartbeat_expected_minutes "$period")
-  limit_min=$(( 2 * expected + period ))
+  local limit_min now age_min problem=""
+  limit_min=$(_heartbeat_limit "$expected" "$period")
   now=$(date +%s)
-  last=$(cat "$stamp" 2>/dev/null)
 
   if ! [[ "$last" =~ ^[0-9]+$ ]]; then
-    problem="$name has never ticked (no $stamp)"
+    problem="$name has never ticked (no $source)"
   else
     age_min=$(( (now - last) / 60 ))
     if [ $(( now - last )) -gt $(( limit_min * 60 )) ]; then
-      problem="$name last ticked $age_min min ago; expected every $expected min, alert after $limit_min (two missed ticks)"
+      problem="$name last ticked $age_min min ago; expected every $expected min, alert after $limit_min (two missed ticks); heartbeat $source"
     fi
   fi
 

@@ -42,7 +42,7 @@
 #   (it pulls ops/** unreviewed). Promote refuses anything but HEAD on origin/main.
 #
 # Env: OPS_CHECKOUT (default: the repo this script lives in), OPS_APPROVED_FILE,
-# OPS_SELF_UPDATE_STATE (held-notice markers), NTFY_TOPIC via lib/secrets.sh,
+# OPS_SELF_UPDATE_STATE (held-notice markers, the tick's last-tick heartbeat), NTFY_TOPIC via lib/secrets.sh,
 # OPS_PROMOTE / OPS_USER_INSTALL (the two sudo entrypoints; tests point them elsewhere).
 set -uo pipefail
 
@@ -81,6 +81,10 @@ notify() {
   curl -fsS -m 15 -H "Title: $1" -H "Priority: high" -H "Tags: $2" -d "$3" \
     "https://ntfy.sh/$topic" >/dev/null 2>&1 || log "ntfy failed"
 }
+
+# The cron tick's heartbeat (pipeline-health's check_cron_heartbeats): a
+# tick with nothing to pull writes nothing to the log.
+[ $# -eq 0 ] && mkdir -p "$STATE" && touch "$STATE/last-tick"
 
 if ! runas_archon && [ "${1:-}" != --approve ]; then
   [ "$DRY_RUN" -eq 1 ] && { echo "DRY-RUN: would run: git -C $REPO pull --ff-only -q origin main"; exit 0; }

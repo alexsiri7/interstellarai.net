@@ -70,6 +70,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/lachesis.sh"
 # shellcheck source=lib/claude-auth.sh
 source "$SCRIPT_DIR/lib/claude-auth.sh"
+# shellcheck source=lib/heartbeat.sh
+source "$SCRIPT_DIR/lib/heartbeat.sh"
 
 REPO="${OPS_CHECKOUT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 STATE="${MORNING_PASS_STATE:-$HOME/.local/state/archon-cron/morning-pass}"
@@ -123,8 +125,30 @@ section() {
 
 projects() { grep -vE '^[[:space:]]*(#|$)' "$SCRIPT_DIR/archon-projects.txt" | awk '{print $1}'; }
 
+# The work-loop crons' heartbeat_watch periods. Their snapshot lines carry the
+# heartbeat heartbeat_watch reads and the age at which it alerts, so the
+# message's Factory line agrees with that alert.
+declare -A HEARTBEAT_PERIODS=([issue-pickup]=15 [pr-maintenance]=15 [pipeline-health]=30)
+
+# snap_heartbeat <name> — "last ticked <N> min ago" or "never ticked", and the
+# alert limit. <N> rounds up, so it exceeds the limit exactly when the alert's
+# seconds-precise check does.
+snap_heartbeat() {
+  local last
+  last=$(cat "$HEARTBEAT_STAMP_DIR/$1.last_run" 2>/dev/null)
+  if [[ "$last" =~ ^[0-9]+$ ]]; then
+    printf 'heartbeat: last ticked %s min ago' $(( ($(date +%s) - last + 59) / 60 ))
+  else
+    printf 'heartbeat: never ticked'
+  fi
+  printf ', alert after %s min\n' "$(heartbeat_limit_minutes "${HEARTBEAT_PERIODS[$1]}")"
+}
+
 snap_logs() {
   local name f age
+  for name in "${!HEARTBEAT_PERIODS[@]}"; do
+    echo "== $name $(snap_heartbeat "$name")"
+  done
   for name in issue-pickup pr-maintenance pipeline-health ops-pr-review ops-self-update; do
     f="$LOG_DIR/$name.log"
     if [ ! -f "$f" ]; then echo "== $name.log: missing"; continue; fi
