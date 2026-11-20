@@ -35,7 +35,7 @@ The snapshot at the end of this prompt was collected by the cron just before thi
 What you find here goes into the message's "Anomalies" part (section "Finish"): one line per real problem, and nothing when everything is fine. Checks that pass, and what you could not check, stay out of the message; put them in `actions.log`. It covers:
 
 - `pipeline-status` (the owner's dashboard; `/home/asiri/bin/pipeline-status`).
-- The cron logs in `~/.local/state/archon-cron/logs/`: `issue-pickup.log`, `pr-maintenance.log`, `pipeline-health.log`, `ops-pr-review.log`, `ops-self-update.log`. Look for errors, repeated failures, and a log that has stopped being written (the snapshot gives each one's age).
+- The cron logs in `~/.local/state/archon-cron/logs/`: `issue-pickup.log`, `pr-maintenance.log`, `pipeline-health.log`, `ops-pr-review.log`, `ops-self-update.log`. Look for errors, repeated failures, and a log that has stopped being written (the snapshot gives each one's age; `ops-self-update.log` is written only when an update or a problem happens, so its age alone means nothing).
 - The factory's GitHub identity: `sudo -n -u archon env HOME=/mnt/ext-fast/archon-home gh auth status` must show `alexsiri7` as the active account, not `alexsiri7-factory` (the factory account is flagged by GitHub; while it is active, almost every run dies at PR publish).
 - Archon runs that failed in the last 24 hours: `/mnt/ext-fast/<repo>/.archon-logs/cron-issue-*.log`.
 - Main CI red on any repository in `ops/cron/archon-projects.txt`.
