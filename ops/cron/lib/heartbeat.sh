@@ -44,10 +44,14 @@ heartbeat_expected_minutes() {
   echo "$expected"
 }
 
+# _heartbeat_limit <expected minutes> <cron period> — alert after two missed
+# ticks plus one cron slot.
+_heartbeat_limit() { echo $(( 2 * $1 + $2 )); }
+
 # heartbeat_limit_minutes <cron period> — the stamp age at which heartbeat_watch
 # alerts.
 heartbeat_limit_minutes() {
-  echo $(( 2 * $(heartbeat_expected_minutes "$1") + $1 ))
+  _heartbeat_limit "$(heartbeat_expected_minutes "$1")" "$1"
 }
 
 # heartbeat_watch <name> <cron period> — always returns 0: a watch never fails
@@ -70,7 +74,8 @@ heartbeat_watch_mtime() {
 _heartbeat_judge() {
   local name="$1" period="$2" expected="$3" source="$4" last="$5"
   local marker="$HEARTBEAT_STATE_DIR/$name-alerted"
-  local limit_min=$(( 2 * expected + period )) now age_min problem=""
+  local limit_min now age_min problem=""
+  limit_min=$(_heartbeat_limit "$expected" "$period")
   now=$(date +%s)
 
   if ! [[ "$last" =~ ^[0-9]+$ ]]; then
